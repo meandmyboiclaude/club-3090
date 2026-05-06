@@ -1,0 +1,20 @@
+schema_version: 1
+id: gemma-26b-it-assistant
+display_name: Google Gemma 4 26B-A4B MTP assistant
+spec_method: mtp_assistant
+model_compat:
+  - gemma-4-26b-a4b
+n_default: 4
+n_max: 4
+download:
+  hf_repo: google/gemma-4-26B-A4B-it-assistant
+  size_gb: 0.97
+  format: fp16
+vram_footprint_gb: 0.97
+status: production
+# Phase A-prime fold-in (v0.8.0 #359). Grounded verbatim from the shipped
+# `--speculative-config` JSON in models/gemma-4-26b-a4b/vllm/compose/dual/awq-mtp.yml
+# ('{"model":"/root/.cache/huggingface/gemma-4-26b-a4b-it-assistant","num_speculative_tokens":4}').
+# Dir verified at /mnt/models/huggingface/gemma-4-26b-a4b-it-assistant.
+speculative_config_template: '{"model":"{LOCAL_MODEL_PATH}","num_speculative_tokens":{N}}'
+local_model_path: /root/.cache/huggingface/gemma-4-26b-a4b-it-assistant

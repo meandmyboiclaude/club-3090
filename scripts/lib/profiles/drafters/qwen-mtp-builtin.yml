@@ -1,0 +1,19 @@
+schema_version: 1
+id: qwen-mtp-builtin
+display_name: Qwen 3.6 built-in MTP head
+spec_method: mtp
+model_compat:
+  - qwen3.6-27b
+  - qwen3.6-35b-a3b
+n_default: 3
+n_max: 3
+download: false
+vram_footprint_gb: 0
+status: production
+# Phase A-prime fold-in (v0.8.0 #359). Grounded verbatim from the shipped
+# `--speculative-config` JSON in models/qwen3.6-27b/vllm/compose/dual/docker-compose.yml
+# ('{"method":"mtp","num_speculative_tokens":3}'). Built-in MTP head — no
+# separate drafter weights, so local_model_path is null. {N} is substituted
+# from n_default (or a compose's ${SPEC_N_MAX:-N} override).
+speculative_config_template: '{"method":"mtp","num_speculative_tokens":{N}}'
+local_model_path: null

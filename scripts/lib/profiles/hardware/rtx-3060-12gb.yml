@@ -1,0 +1,28 @@
+schema_version: 1
+id: rtx-3060-12gb
+display_name: NVIDIA RTX 3060 12GB
+sm: 8.6
+vram_gb: 12
+arch: ampere-consumer
+mem_util_safe: 0.88
+supported_kv_formats:
+  - bf16
+  - fp16
+  - fp8_e5m2
+  - turboquant_3bit_nc
+  - int8_per_token_head
+  - q4_0
+  - k8v4
+kv_format_default:
+  long_context: turboquant_3bit_nc
+  multi_stream: int8_per_token_head
+  balanced: fp8_e5m2
+cudagraph: full
+driver_pin_recommended:
+  min: "580.0"
+  notes: "CUDA 13 vLLM nightlies require a 580.x-class NVIDIA driver."
+nvlink_capable: false
+power_cap_w_optimal: 120
+power_cap_w_max: 170
+notes: "Representative sub-24 GB profile; current v0.7.0 model catalog intentionally has no fitting compose."
+

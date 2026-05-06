@@ -1,0 +1,16 @@
+schema_version: 1
+id: vision-coding
+display_name: Vision plus code
+description: Vision-enabled coding and inspection workloads.
+priorities:
+  vision: required
+  max_ctx: medium
+  concurrency: low
+  prefill_throughput: medium
+  decode_throughput: medium
+defaults:
+  max_num_seqs: 1
+  mtp_default: true
+  vision: true
+requires_features: []
+

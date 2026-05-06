@@ -1,0 +1,58 @@
+# Model weights — never commit. Default download dir is models-cache/ (set
+# via MODEL_DIR env var if you want a different path).
+models-cache/
+*.safetensors
+*.gguf
+*.bin
+
+# Genesis patches fetched by setup.sh (upstream, not ours to vendor).
+# Lives at models/<model>/vllm/patches/genesis/ in the new layout.
+# No trailing slash — also matches local symlinks pointing at out-of-tree clones.
+models/*/vllm/patches/genesis
+
+# v0.8.0 [E] Pull-Emit-Derived runtime capture artifacts (the §6 capture
+# points + manifest; consumed by the later [F] Loop phase). Per-run output,
+# never committed.
+.pull-captures/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Docker compose state
+**/compose/*.log
+
+# Local env overrides
+.env
+*.env.local
+
+# Local safety backups of compose files (e.g. docker-compose.yml.default)
+**/compose/*.default
+
+# Patched vLLM source clone (volume-mounted by dual-card composes)
+vllm-src/
+
+# Internal diagnostics / feasibility memos — kept local, not published.
+# Per-model published diagnostics live at models/<name>/vllm/diagnostics/.
+docs/diagnostics/
+
+# Bench output. Most runs are intermediate investigations (cliff probes, soak
+# validation matrices, residency instrumentation) — those live in issue threads
+# and gitignored docs/diagnostics/. Bench evidence backing numbers in BENCHMARKS.md
+# / STRUCTURED_COT.md / CHANGELOG is tracked via the negations below; future
+# grammar-ab-* and grammar-full-* runs will auto-track when committed.
+results/*
+!results/grammar-ab-*/
+!results/grammar-full-*/
+!results/lucebox-*/
+!results/v0.20-migration/

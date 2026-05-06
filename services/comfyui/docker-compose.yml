@@ -1,0 +1,34 @@
+services:
+  comfyui:
+    build: .
+    image: comfyui-local:latest
+    container_name: comfyui
+    restart: "no"
+    ports:
+      - "8188:8188"
+    volumes:
+      # ComfyUI source + venv-installed custom-node code persists here
+      - /mnt/models/comfyui/ComfyUI:/workspace/ComfyUI
+      # Models tree (overrides ComfyUI/models nested mount)
+      - /mnt/models/comfyui/models:/workspace/ComfyUI/models
+      - /mnt/models/comfyui/input:/workspace/ComfyUI/input
+      - /mnt/models/comfyui/output:/workspace/ComfyUI/output
+      - /mnt/models/comfyui/user:/workspace/ComfyUI/user
+      # Folder-aliasing yaml so loaders find files whether they look in unet/ or diffusion_models/
+      - ./extra_model_paths.yaml:/workspace/ComfyUI/extra_model_paths.yaml:ro
+      # Pip cache so re-launches don't re-download every wheel
+      - /mnt/models/comfyui/pip-cache:/root/.cache/pip
+      # Share existing HF cache (so anything already pulled by vLLM/SGLang is reusable)
+      - /mnt/models/huggingface:/root/.cache/huggingface
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - HF_HOME=/root/.cache/huggingface
+      - PYTHONUNBUFFERED=1
+    shm_size: "8gb"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

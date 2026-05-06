@@ -1,0 +1,34 @@
+schema_version: 1
+id: vllm-stable
+display_name: vLLM stable release
+type: vllm
+stability: stable
+install:
+  method: pip
+  spec: vllm==0.20.2
+min_sm: 7.5
+supported_model_families:
+  - dense
+features:
+  int8_per_token_head: false
+  turboquant_3bit_nc: false
+  marlin_pad_sub_tile_n: false
+  qwen3_coder_tool_parser: stable_only
+supported_kv_formats:
+  - bf16
+  - fp16
+  - fp8_e5m2
+  - fp8_e4m3
+supported_drafters:
+  - eagle3
+supported_weight_formats:
+  - bf16
+  - fp16
+  - autoround
+  - awq
+  - gptq
+required_overlays: []
+vendored_overlays: []
+required_genesis: false
+notes: "Pinned to latest PyPI GA observed at implementation time: vLLM 0.20.2."
+

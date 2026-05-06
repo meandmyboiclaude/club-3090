@@ -1,0 +1,22 @@
+schema_version: 1
+id: gemma-it-assistant
+display_name: Google Gemma 4 MTP assistant
+spec_method: mtp_assistant
+model_compat:
+  - gemma-4-31b
+n_default: 4
+n_max: 4
+download:
+  hf_repo: google/gemma-4-31b-it-assistant
+  size_gb: 0.97
+  format: fp16
+vram_footprint_gb: 0.97
+status: production
+# Phase A-prime fold-in (v0.8.0 #359). Grounded verbatim from the shipped
+# `--speculative-config` JSON in models/gemma-4-31b/vllm/compose/dual/docker-compose.yml
+# ('{"model":"/root/.cache/huggingface/gemma-4-31b-it-assistant","num_speculative_tokens":4}').
+# local_model_path is the container path the compose passes (model-cache
+# volume maps host models-cache -> /root/.cache/huggingface; dir verified on
+# this stack at /mnt/models/huggingface/gemma-4-31b-it-assistant).
+speculative_config_template: '{"model":"{LOCAL_MODEL_PATH}","num_speculative_tokens":{N}}'
+local_model_path: /root/.cache/huggingface/gemma-4-31b-it-assistant

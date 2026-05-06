@@ -1,0 +1,70 @@
+schema_version: 1
+id: qwen3.6-27b
+display_name: Qwen 3.6 27B
+family: qwen3-next-hybrid
+hidden_size: 5120
+num_hidden_layers: 64
+num_gdn_layers: 48
+num_attn_layers: 16
+num_attn_heads: 24
+num_kv_heads: 4
+head_dim_attn: 256
+linear_num_v_heads: 48
+linear_num_k_heads: 16
+linear_v_head_dim: 128
+linear_k_head_dim: 128
+linear_conv_kernel_dim: 4
+max_ctx_supported: 262144
+attention_k_eq_v: false
+weights:
+  autoround_int4:
+    path: qwen3.6-27b-autoround-int4
+    size_gb: 17.5
+    format: autoround
+    status: production
+    # v0.8.0 Pull-Gate Tier-1 lookup slugs (full HF repo ids).
+    hf_repos:
+      - Lorbus/Qwen3.6-27B-int4-AutoRound
+      - Intel/Qwen3.6-27B-int4-AutoRound
+  awq:
+    path: qwen3.6-27b-awq-int4
+    size_gb: 17.0
+    format: awq
+    status: experimental
+  gguf:
+    path: qwen3.6-27b-gguf
+    size_gb: variable
+    format: gguf
+    status: production
+  carnice_bf16mtp:
+    path: carnice-v2-27b-int4-recipe-d-bf16mtp
+    size_gb: 17.5
+    format: autoround
+    status: experimental
+    hf_repos:
+      - wasifb/Carnice_V2_27B_INT4_BF16MTP
+  qwopus_bf16mtp:
+    path: qwopus3.6-27b-int4-recipe-d-bf16mtp
+    size_gb: 17.5
+    format: autoround
+    status: experimental
+    hf_repos:
+      - Jackrong/Qwopus3.6-27B-v1-preview
+default_weight_variant: autoround_int4
+compatible_drafters:
+  - qwen-mtp-builtin
+  - zlab-qwen-dflash
+  - unsloth-mtp-gguf
+valid_tp:
+  - 1
+  - 2
+  - 4
+# Strictly bootable on any vLLM nightly that supports the qwen3-next-hybrid
+# family. Genesis is REQUIRED for TQ3 KV (turboquant_3bit_nc — Genesis-only
+# feature). For non-TQ3 KV formats (fp8, bf16, q4_0, k8v4) Genesis is
+# recommended but not strictly needed: it adds Cliff 2 mitigations
+# (PN12/PN25/PN34) for long-context stability past ~21-26K. Composes encode
+# the engine choice via their `Engine-profile:` header — non-TQ3 composes
+# route to vllm-nightly-clean, TQ3 composes route to vllm-nightly-mtp.
+requires_genesis: false
+

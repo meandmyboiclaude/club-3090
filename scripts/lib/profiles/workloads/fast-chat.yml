@@ -1,0 +1,13 @@
+schema_version: 1
+id: fast-chat
+display_name: Fast chat
+description: Low-context chat path with maximum decode throughput.
+priorities:
+  max_ctx: low
+  concurrency: high
+  decode_throughput: max
+defaults:
+  max_num_seqs: 4
+  mtp_default: true
+requires_features: []
+

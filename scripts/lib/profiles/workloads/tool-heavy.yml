@@ -1,0 +1,15 @@
+schema_version: 1
+id: tool-heavy
+display_name: Tool-call agent
+description: IDE and Hermes-style agents with tool calls, moderate context, and low-latency turns.
+priorities:
+  max_ctx: medium
+  concurrency: low
+  prefill_throughput: high
+  decode_throughput: medium
+defaults:
+  max_num_seqs: 1
+  mtp_default: true
+  enable_thinking: false
+requires_features: []
+

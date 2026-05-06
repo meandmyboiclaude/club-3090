@@ -1,0 +1,22 @@
+schema_version: 1
+id: unsloth-mtp-gguf
+display_name: Unsloth Qwen 3.6 MTP GGUF
+spec_method: mtp_gguf
+model_compat:
+  - qwen3.6-27b
+engine_compat:
+  engine_type: llama-cpp
+n_default: 2
+n_max: 3
+download:
+  hf_repo: unsloth/Qwen3.6-27B-GGUF-MTP
+  size_gb: variable
+vram_footprint_gb: variable
+status: experimental
+# Phase A-prime fold-in (v0.8.0 #359). engine_compat.engine_type is llama-cpp
+# => OUT of the #141 vLLM-only generator scope. No vLLM `--speculative-config`
+# form exists for this GGUF MTP drafter (llama.cpp uses a different draft-model
+# flag set). Captured null so the schema stays uniform; the generator must
+# never select this drafter (engine scope gate refuses non-vLLM).
+speculative_config_template: null   # N/A — llama.cpp engine, not vLLM
+local_model_path: null

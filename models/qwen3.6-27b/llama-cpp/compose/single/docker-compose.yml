@@ -1,0 +1,146 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Qwen3.6-27B (Unsloth Q3_K_XL GGUF)
+#   Engine:    llama.cpp (NOT vLLM — different engine, different memory model)
+#   Topology:  Single 3090 (TP=1)
+#   Drafter:   none (vanilla llama.cpp; MTP via PR #22673 not adopted yet)
+#   KV:        q4_0 (4-bit packed)
+#   Vision:    yes (mmproj F16)
+#   Max ctx:   262K (full model native — no Cliff 1 / Cliff 2)
+#   Genesis:   N/A — llama.cpp engine; Genesis is vLLM/Qwen3-Next-specific
+#   Status:    ✅ Production
+#   Engine-profile: llama-cpp-mainline
+#   Best for:  Bulletproof single-card path — slow decode (~21 TPS) but
+#              cliff-immune; recommended fallback when vLLM hits OOM at long ctx
+# ---------------------------------------------------------------------------
+# Qwen3.6-27B on llama.cpp — single 3090, full 262K context, vision on.
+#
+# The "easy mode" path. No Genesis patches, no AutoRound, no patched vLLM
+# fork — just a stock llama.cpp Docker image and a single GGUF file.
+#
+# Showcase: vLLM single-card caps at 192K opt-in (with prefill caveats);
+# this hits 262K (the model's architectural max) on a stock 3090 thanks to
+# GGUF + q4_0 KV. The KV-cache type is the unlock — fp16 doesn't fit at
+# all, q8 fits but runs much slower on Ampere; q4_0 fits at full speed.
+#
+# Config:
+#   - GGUF:    Qwen3.6-27B-UD-Q3_K_XL (Unsloth dynamic, ~14.5 GB)
+#   - mmproj:  F16 (vision projector, ~0.8 GB)
+#   - Context: 262144 (model max)
+#   - KV:      q4_0 K + q4_0 V
+#   - Slots:   1 (single concurrent request; switch to single/concurrent.yml for 4)
+#   - FA:      on
+#
+# VRAM budget on 24 GB:
+#   weights (Q3_K_XL):           ~14.5 GB
+#   KV at 262K (q4_0 K+V):        ~4.5 GB
+#   mmproj F16:                   ~0.8 GB
+#   total:                       ~19.8 GB
+#   headroom:                     ~4 GB for prompt + activation peaks
+#
+# Bench (canonical narrative + code prompt) numbers — see BENCHMARKS.md.
+#
+# Quick start:
+#   1. Get the GGUF + mmproj:
+#        hf download unsloth/Qwen3.6-27B-GGUF \
+#          --include "Qwen3.6-27B-UD-Q3_K_XL.gguf" "mmproj-F16.gguf" \
+#          --local-dir $MODEL_DIR/qwen3.6-27b-gguf/unsloth-q3kxl
+#      (mmproj sometimes ships at the repo root rather than under unsloth-q3kxl;
+#       the MMPROJ env var below points at the canonical sidecar location.)
+#   2. From this directory:
+#        MODEL_DIR=/your/models/dir docker compose up -d
+#   3. curl http://localhost:8020/v1/models  → should list the model.
+#
+# Override defaults via .env or shell:
+#   MODEL_DIR              host dir to mount as /models  (default: ../../../../models-cache for repo, /path/to/your/models on your stack)
+#   GGUF_FILE              path under /models  (default: qwen3.6-27b-gguf/unsloth-q3kxl/Qwen3.6-27B-UD-Q3_K_XL.gguf)
+#   MMPROJ_FILE            path under /models  (default: qwen3.6-27b-gguf/mmproj-F16.gguf)
+#   CTX_SIZE               total KV pool       (default: 262144)
+#   BATCH_SIZE             llama.cpp -b        (default: 4096)
+#   UBATCH_SIZE            llama.cpp -ub       (default: 2048)
+#   KV_TYPE                K and V quant type  (default: q4_0)
+#   REASONING_FORMAT       reasoning channel routing (default: none — for opencode/IDE-agent compat)
+#                          Override to `auto` to get separate `reasoning_content` field
+#                          (Qwen3.6 thinking trace) — useful for clients that render
+#                          reasoning_content (most don't). Issue: club-3090#97.
+#   DISABLE_THINKING       default: 1 (thinking OFF). Set to 0 to opt INTO thinking
+#                          which forces empty <think></think> blocks in responses. Useful for
+#                          clients (e.g. opencode) that display <think> content as the response.
+#                          Tradeoff: applies to ALL clients on this server — Hermes/agents that
+#                          use thinking lose reasoning capability. Issue: club-3090#97.
+#   PORT                   host port           (default: 8020)
+#   CUDA_VISIBLE_DEVICES   which GPU to use    (default: 0)
+#
+# ─── opencode / IDE-agent compatibility (issue #97) ───
+# `--reasoning-format none` is the default because Qwen3.6's thinking mode
+# emits `<think>...</think>` blocks that llama.cpp's peg-native parser routes
+# to the OpenAI `reasoning_content` field by default. opencode (and most simple
+# OpenAI-compat clients) ignore `reasoning_content` and wait for `content`,
+# causing indefinite client hangs even though the server returns 200 cleanly.
+# `--reasoning-format none` collapses thinking into the content stream so all
+# clients work. Power users wanting reasoning_content separation: set
+# `REASONING_FORMAT=auto` in .env or shell.
+
+services:
+  llama-cpp-qwen36-27b:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    container_name: "${ESTATE_CONTAINER:-llama-cpp-qwen36-27b}"
+    restart: unless-stopped
+    ports:
+      - "${ESTATE_PORT:-${PORT:-8020}}:8080"
+    volumes:
+      - "${MODEL_DIR:-../../../../../models-cache}:/models:ro"
+    entrypoint:
+      - bash
+      - -c
+      - |
+        set -e
+        # DISABLE_THINKING=1 (default) appends --chat-template-kwargs to disable
+        # Qwen3 thinking server-side. Forces the chat template to insert empty
+        # <think></think> blocks → output goes straight to the response. Useful for
+        # clients (e.g. opencode) that display <think> content as the response.
+        # Tradeoff: applies to ALL clients on this server instance — Hermes/agents that
+        # use thinking lose reasoning capability. See docs/HARDWARE.md and disc club-3090#97.
+        # Note: $$VAR is YAML-escape for $VAR (compose passes literal $ to bash).
+        EXTRA_ARGS=()
+        if [ "$${DISABLE_THINKING:-1}" = "1" ]; then
+          EXTRA_ARGS+=("--chat-template-kwargs" '{"enable_thinking":false}')
+          echo "[entrypoint] DISABLE_THINKING=1 — chat template will produce empty <think></think>"
+        fi
+        exec /app/llama-server "$$@" "$${EXTRA_ARGS[@]}"
+      - --
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - -m
+      - /models/${GGUF_FILE:-qwen3.6-27b-gguf/unsloth-q3kxl/Qwen3.6-27B-UD-Q3_K_XL.gguf}
+      - --mmproj
+      - /models/${MMPROJ_FILE:-qwen3.6-27b-gguf/mmproj-F16.gguf}
+      - -c
+      - ${CTX_SIZE:-262144}
+      - -b
+      - ${BATCH_SIZE:-4096}
+      - -ub
+      - ${UBATCH_SIZE:-2048}
+      - -ngl
+      - "99"
+      - -fa
+      - "on"
+      - --cache-type-k
+      - ${KV_TYPE:-q4_0}
+      - --cache-type-v
+      - ${KV_TYPE:-q4_0}
+      - -np
+      - "1"
+      - --jinja
+      - --reasoning-format
+      - ${REASONING_FORMAT:-none}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${ESTATE_GPUS:-${CUDA_VISIBLE_DEVICES:-0}}"]
+              capabilities: [compute, utility]

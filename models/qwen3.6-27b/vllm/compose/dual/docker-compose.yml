@@ -1,0 +1,184 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Qwen3.6-27B (Lorbus AutoRound INT4 + BF16 mtp.fc preserved)
+#   Topology:  Dual 3090 (TP=2, NVLink auto-detected via NVLINK_MODE)
+#   Drafter:   MTP n=3 (built-in)
+#   KV:        fp8_e5m2 (1 byte/token)
+#   Vision:    yes
+#   Max ctx:   262K (237K single-prompt verified)
+#   Genesis:   none — intentionally Genesis-free (isolation control + fallback)
+#   Status:    ✅ Production
+#   Quality:   129/150 (86%) — det 56/75 (75%) · sandbox 73/75 (97%, v0.4 shape-check) (--full, 2026-05-09)
+#                TC 67% · IF 87% · SO 87% · DE 100% · RM 33% · BF 93% · HA 100% · CLI 98%
+#   Best for:  General-purpose dual-card vision + tools + long-ctx default ⭐
+# ---------------------------------------------------------------------------
+# Dual RTX 3090 — DEFAULT for 2× cards. Qwen3.6-27B + MTP n=3 + fp8 KV + vision.
+#
+# What this gives you (vs the single-card default):
+#   - TP=2 across both 3090s
+#   - max_num_seqs=2 → 2 concurrent agents at full 262K context (KV pool 2.36×)
+#   - max_model_len=262144 → model's natural max, no rope_scaling needed
+#   - vision + tools + MTP n=3 + recall — everything on, no compromises
+#   - Measured (re-bench 2026-04-28 on club-3090 substrate, dev205 + Genesis v7.51-stable):
+#     69.05 narr (CV 2.3%) / 88.58 code (CV 3.4%) TPS single-stream, AL 3.4, VRAM 23.6 GB/card
+#
+# What's intentionally NOT enabled:
+#   - TurboQuant KV — sidesteps vllm#40831 entirely. fp8_e5m2 is plenty for
+#     262K across two cards. For 4-stream concurrency at 262K, switch to
+#     dual/turbo.yml (which uses TurboQuant KV + Genesis P65).
+#
+# Dependencies:
+#   - 2× RTX 3090 (Ampere SM 8.6), PCIe-only (no NVLink — works fine)
+#   - vLLM PR #40361 (Marlin pad-sub-tile-n) — patched files volume-mounted
+#     from /opt/ai/engines/vllm/primary/. PR is open upstream; drop the mount when it
+#     lands. See ../../patches/README.md for the git-clone command.
+#
+# All dual-card variants in this dir:
+#
+#   File                                Ctx    Streams   Narr/Code TPS   KV       Vision  Topology
+#   dual/docker-compose.yml (this)      262K   2         69 / 89          fp8      ✅      2× PCIe
+#   multi4/docker-compose.yml            262K   4         63 / 76          fp8      ✅      4× PCIe
+#   multi4/dflash.yml     262K   2         64 / 104         FP16     ✅      4× PCIe
+#   dual/turbo.yml       262K   4         54 / 73          TQ3      ✅      2× PCIe
+#   dual/dflash.yml      185K   1         82 / 125         FP16     ✅
+#   dual/dflash-noviz.yml 200K   1         78 / 127         FP16     ❌      2× PCIe
+#   dual/nvlink-dflash.yml   185K   1         (community)      FP16     ✅      2× NVLink
+#   dual/nvlink-dflash-noviz.yml 188K   1         (community)      FP16     ❌      2× NVLink
+#
+# Run:
+#   cd <repo>/models/qwen3.6-27b/vllm/compose
+#   docker compose -f dual/docker-compose.yml up -d
+# ===========================================================================
+# Hardware metadata (parsed by scripts/preflight.sh):
+# Requires-min-vram-gb: 24
+# Engine-profile: vllm-nightly-clean
+# Requires-min-gpu-count: 2
+# Tensor-parallel: 2
+services:
+  vllm-qwen36-27b-dual:
+    # Tracking latest nightly intentionally — this stack uses fp8 KV (not
+    # TurboQuant), so it doesn't accumulate the same anchor-drift exposure
+    # the single-card project does. Pin if you hit a regression; otherwise
+    # ride the wave.
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}
+    container_name: "${ESTATE_CONTAINER:-vllm-qwen36-27b-dual}"
+    restart: "no"
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8010}}:8000"
+    volumes:
+      - ${MODEL_DIR:-../../../../../models-cache}:/root/.cache/huggingface
+      # torch.compile + Triton kernel caches — first boot warms (~60-90 sec);
+      # subsequent boots reuse cached graphs. Pattern from Sander's PROD launch.
+      # Closes club-3090 #22.
+      - ../../cache/torch_compile:/root/.cache/vllm/torch_compile_cache
+      - ../../cache/triton:/root/.triton/cache
+      # Marlin pad-sub-tile-n patch (vLLM PR #40361) — required for TP=2
+      # on AutoRound W4A16 models where out-dim shards fall below 64.
+      # Vendored in this repo at ../../patches/vllm-marlin-pad/ (no host
+      # filesystem dependency). Drops out when vllm#40361 lands upstream.
+      - ../../patches/vllm-marlin-pad/marlin.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/kernels/linear/mixed_precision/marlin.py:ro
+      - ../../patches/vllm-marlin-pad/MPLinearKernel.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/kernels/linear/mixed_precision/MPLinearKernel.py:ro
+      # vLLM PR #35936 required-tool fallback (drop when upstream lands).
+      # vLLM PR #35936 required-tool fallback — sidecar pattern (drop when upstream lands).
+      # Bind-mounted at side paths so install.sh can copy into vLLM's site-packages
+      # BEFORE Genesis runs — avoids the RO-mount conflict with Genesis P64/P68/P69
+      # which write to chat_completion/serving.py at vllm-import time. See
+      # patches/vllm-pr35936-required-fallback/install.sh + README.md.
+      - ../../patches/vllm-pr35936-required-fallback/vllm/entrypoints/openai/chat_completion/serving.py:/etc/club3090/pr35936-chat-completion-serving.py:ro
+      - ../../patches/vllm-pr35936-required-fallback/vllm/entrypoints/openai/engine/serving.py:/etc/club3090/pr35936-engine-serving.py:ro
+      - ../../patches/vllm-pr35936-required-fallback/install.sh:/etc/club3090/install-pr35936.sh:ro
+      # vLLM PR #41800 (truncate_prompt_tokens kwarg) overlay — fixes opencode
+      # HTTP 400 on get_max_tokens(). See patches/vllm-pr41800.../README.md.
+      - ../../patches/vllm-pr41800-truncate-prompt-tokens/install.sh:/etc/club3090/install-pr41800.sh:ro
+      # froggeric/Qwen-Fixed-Chat-Templates qwen3.6 — fixes 7 default-template
+      # bugs (empty <think></think> spam, </thinking> hallucination, unclosed
+      # think before tool call, no-user-query crash, developer role, etc.).
+      # See docs/UPSTREAM.md "Community templates / model assets" + the row at
+      # https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates
+      - ../../patches/froggeric-chat-template/chat_template.jinja:/etc/qwen-froggeric-chat-template.jinja:ro
+      # NVLink auto-detection — runs inside container at boot.
+      - ../../../../../scripts/detect_nvlink.sh:/etc/club3090/detect_nvlink.sh:ro
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=${ESTATE_GPUS:-${NVIDIA_VISIBLE_DEVICES:-all}}
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - NVLINK_MODE=${NVLINK_MODE:-auto}
+      - NCCL_CUMEM_ENABLE=0
+      - NCCL_P2P_DISABLE=1
+      - VLLM_NO_USAGE_STATS=1
+      - VLLM_USE_FLASHINFER_SAMPLER=1
+      - OMP_NUM_THREADS=1
+      # expandable_segments:True crashes boot on some setups (likely cuMemMap path).
+      # Known: JusefPol on NVLink (PR #31), WSL2 single-card 3090 Ti.
+      # Override via .env: PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
+      - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,max_split_size_mb:512}
+    shm_size: "16gb"
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    entrypoint:
+      - bash
+      - -c
+      - |
+        # VLLM_ENFORCE_EAGER=1 in compose/.env disables CUDA graphs — use on
+        # hardware where Cliff 2 GDN activation spikes occur at runtime
+        # (~50-65K active context tokens). Costs ~20-30% TPS in exchange for
+        # stability. See docs/HARDWARE.md "Note for WSL2 / Windows users".
+        # Install PR #35936 overlay before vllm imports (drop when upstream lands).
+        bash /etc/club3090/install-pr35936.sh
+        bash /etc/club3090/install-pr41800.sh
+        # NVLink auto-detection (sets NCCL env vars, _NVLINK_ENABLED).
+        source /etc/club3090/detect_nvlink.sh
+        if [ "${_NVLINK_ENABLED:-0}" = "1" ]; then
+          exec vllm serve ${VLLM_ENFORCE_EAGER:+--enforce-eager} "$@"
+        else
+          exec vllm serve ${VLLM_ENFORCE_EAGER:+--enforce-eager} --disable-custom-all-reduce "$@"
+        fi
+      - --
+    command:
+      - --model
+      - /root/.cache/huggingface/qwen3.6-27b-autoround-int4
+      - --served-model-name
+      - qwen3.6-27b-autoround
+      - --quantization
+      - auto_round
+      - --dtype
+      - float16
+      - --tensor-parallel-size
+      - "${TP:-2}"
+      - --pipeline-parallel-size
+      - "${PP:-1}"
+      - --max-model-len
+      - "${MAX_MODEL_LEN:-262144}"
+      - --gpu-memory-utilization
+      - "${GPU_MEMORY_UTILIZATION:-0.92}"
+      - --max-num-seqs
+      - "2"
+      - --max-num-batched-tokens
+      - "8192"
+      - --kv-cache-dtype
+      - "${KV_CACHE_DTYPE:-fp8_e5m2}"
+      - --trust-remote-code
+      # froggeric chat-template override (see volumes block + docs/UPSTREAM.md)
+      - --chat-template
+      - /etc/qwen-froggeric-chat-template.jinja
+      - --reasoning-parser
+      - qwen3
+      - --default-chat-template-kwargs
+      - '{"enable_thinking": false}'
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - qwen3_coder
+      - --enable-prefix-caching
+      - --enable-chunked-prefill
+      - --speculative-config
+      - '{"method":"mtp","num_speculative_tokens":3}'
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"

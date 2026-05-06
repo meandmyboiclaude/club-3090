@@ -1,0 +1,236 @@
+schema_version: 1
+anchors:
+  - model: qwen3.6-27b
+    arch_family: qwen3-next-hybrid
+    quant: autoround-int4
+    topology_class: dual-3090-tp2
+    engine_pin: vllm-nightly-01d4d1ad+genesis-v7.72.2
+    kv_format: fp8_e5m2
+    selected_ctx: 262144
+    measured: {vram_mib_per_card: 24166, tps_short: null, tps_loaded_ctx: null, soak_continuous: pass}
+    smoked_capabilities: [plain-chat]
+    unsmoked_capabilities: [tool-call-nonstream, tool-call-stream, reasoning-stream, vision, structured-output]
+    source: "BENCHMARKS.md#qwen36-27b dual.yml @noonghunna 2026-04-29"
+    provenance: seed-from-measured-corpus
+    confidence: exact
+  - model: qwen3.6-27b
+    arch_family: qwen3-next-hybrid
+    quant: autoround-int4
+    topology_class: dual-3090-tp2
+    engine_pin: vllm-nightly-01d4d1ad+genesis-v7.72.2
+    kv_format: turboquant_3bit_nc
+    selected_ctx: 262144
+    measured: {vram_mib_per_card: 20480, tps_short: 81.21, tps_loaded_ctx: 108.20, soak_continuous: pass}
+    smoked_capabilities: [plain-chat]
+    unsmoked_capabilities: [tool-call-nonstream, tool-call-stream, reasoning-stream, vision, structured-output]
+    source: "BENCHMARKS.md#qwen36-27b dual-turbo.yml @noonghunna 2026-05-05"
+    provenance: seed-from-measured-corpus
+    confidence: exact
+  - model: qwen3.6-27b
+    arch_family: qwen3-next-hybrid
+    quant: autoround-int4
+    topology_class: dual-3090-tp2
+    engine_pin: vllm-nightly-01d4d1ad+genesis-v7.72.2
+    kv_format: fp16
+    selected_ctx: 185000
+    measured: {vram_mib_per_card: 24166, tps_short: 82.0, tps_loaded_ctx: 125.0, soak_continuous: pass}
+    smoked_capabilities: [plain-chat]
+    unsmoked_capabilities: [tool-call-nonstream, tool-call-stream, reasoning-stream, vision, structured-output]
+    source: "BENCHMARKS.md#qwen36-27b dual-dflash.yml @noonghunna 2026-04-29"
+    provenance: seed-from-measured-corpus
+    confidence: exact
+  - model: qwen3.6-27b
+    arch_family: qwen3-next-hybrid
+    quant: autoround-int4
+    topology_class: dual-3090-tp2
+    engine_pin: vllm-nightly-01d4d1ad+genesis-v7.72.2
+    kv_format: fp16
+    selected_ctx: 200000
+    measured: {vram_mib_per_card: 24371, tps_short: 78.0, tps_loaded_ctx: 127.0, soak_continuous: pass}
+    smoked_capabilities: [plain-chat]
+    unsmoked_capabilities: [tool-call-nonstream, tool-call-stream, reasoning-stream, vision, structured-output]
+    source: "BENCHMARKS.md#qwen36-27b dual-dflash-noviz.yml @noonghunna 2026-04-29"
+    provenance: seed-from-measured-corpus
+    confidence: exact
+  - model: qwen3.6-27b
+    arch_family: qwen3-next-hybrid
+    quant: autoround-int4
+    topology_class: multi4-3090-tp4
+    engine_pin: vllm-nightly-01d4d1ad+genesis-v7.72.2
+    kv_format: fp8_e5m2
+    selected_ctx: 262144
+    measured: {vram_mib_per_card: 24064, tps_short: null, tps_loaded_ctx: null, soak_continuous: not-run}
+    smoked_capabilities: [plain-chat]
+    unsmoked_capabilities: [tool-call-nonstream, tool-call-stream, reasoning-stream, vision, structured-output]
+    source: "BENCHMARKS.md#qwen36-27b dual4.yml @whamp 2026-05-03"
+    provenance: seed-from-measured-corpus
+    confidence: exact
+  - model: qwen3.6-27b
+    arch_family: qwen3-next-hybrid
+    quant: autoround-int4
+    topology_class: multi4-3090-tp4
+    engine_pin: vllm-nightly-01d4d1ad+genesis-v7.72.2
+    kv_format: fp16
+    selected_ctx: 262144
+    measured: {vram_mib_per_card: 22528, tps_short: null, tps_loaded_ctx: null, soak_continuous: not-run}
+    smoked_capabilities: [plain-chat]
+    unsmoked_capabilities: [tool-call-nonstream, tool-call-stream, reasoning-stream, vision, structured-output]
+    source: "BENCHMARKS.md#qwen36-27b dual4-dflash.yml @whamp 2026-05-03"
+    provenance: seed-from-measured-corpus
+    confidence: exact
+  - model: qwen3.6-27b
+    arch_family: qwen3-next-hybrid
+    quant: autoround-int4
+    topology_class: single-3090-tp1
+    engine_pin: vllm-nightly-01d4d1ad+genesis-v7.72.2
+    kv_format: turboquant_3bit_nc
+    selected_ctx: 180000
+    measured: {vram_mib_per_card: 22835, tps_short: null, tps_loaded_ctx: null, soak_continuous: fail}
+    smoked_capabilities: [plain-chat]
+    unsmoked_capabilities: [tool-call-nonstream, tool-call-stream, reasoning-stream, vision, structured-output]
+    source: "BENCHMARKS.md#qwen36-27b long-text.yml @noonghunna 2026-04-30"
+    provenance: seed-from-measured-corpus
+    confidence: exact
+  - model: qwen3.6-27b
+    arch_family: qwen3-next-hybrid
+    quant: autoround-int4
+    topology_class: single-3090-tp1
+    engine_pin: vllm-nightly-01d4d1ad+genesis-v7.72.2
+    kv_format: turboquant_3bit_nc
+    selected_ctx: 145000
+    measured: {vram_mib_per_card: 23552, tps_short: null, tps_loaded_ctx: null, soak_continuous: fail}
+    smoked_capabilities: [plain-chat]
+    unsmoked_capabilities: [tool-call-nonstream, tool-call-stream, reasoning-stream, vision, structured-output]
+    source: "BENCHMARKS.md#qwen36-27b long-vision.yml @noonghunna 2026-04-30"
+    provenance: seed-from-measured-corpus
+    confidence: exact
+  - model: qwen3.6-27b
+    arch_family: qwen3-next-hybrid
+    quant: autoround-int4
+    topology_class: single-3090-tp1
+    engine_pin: vllm-nightly-01d4d1ad+genesis-v7.72.2
+    kv_format: turboquant_3bit_nc
+    selected_ctx: 180000
+    measured: {vram_mib_per_card: 22221, tps_short: null, tps_loaded_ctx: null, soak_continuous: fail}
+    smoked_capabilities: [plain-chat]
+    unsmoked_capabilities: [tool-call-nonstream, tool-call-stream, reasoning-stream, vision, structured-output]
+    source: "BENCHMARKS.md#qwen36-27b bounded-thinking.yml @noonghunna 2026-05-04"
+    provenance: seed-from-measured-corpus
+    confidence: exact
+  - model: gemma-4-31b
+    arch_family: gemma4-swa-dense
+    quant: autoround-int4
+    topology_class: dual-3090-tp2
+    engine_pin: vllm-nightly-1acd67a79
+    kv_format: int8_per_token_head
+    selected_ctx: 98000
+    measured: {vram_mib_per_card: 22733, tps_short: 96.16, tps_loaded_ctx: 127.11, soak_continuous: pass}
+    smoked_capabilities: [plain-chat]
+    unsmoked_capabilities: [tool-call-nonstream, tool-call-stream, reasoning-stream, vision, structured-output]
+    source: "BENCHMARKS.md#gemma-4-31b dual/int8.yml @noonghunna 2026-05-08"
+    provenance: seed-from-measured-corpus
+    confidence: exact
+  - model: gemma-4-31b
+    arch_family: gemma4-swa-dense
+    quant: autoround-int4
+    topology_class: dual-3090-tp2
+    engine_pin: vllm-nightly-1acd67a79
+    kv_format: int8_per_token_head
+    selected_ctx: 262144
+    measured: {vram_mib_per_card: 22630, tps_short: 95.27, tps_loaded_ctx: 125.93, soak_continuous: pass}
+    smoked_capabilities: [plain-chat]
+    unsmoked_capabilities: [tool-call-nonstream, tool-call-stream, reasoning-stream, vision, structured-output]
+    source: "BENCHMARKS.md#gemma-4-31b dual/int8.yml matched-config rebench 2026-05-09"
+    provenance: seed-from-measured-corpus
+    confidence: exact
+  - model: gemma-4-31b
+    arch_family: gemma4-swa-dense
+    quant: autoround-int4
+    topology_class: dual-3090-tp2
+    engine_pin: vllm-nightly-e47c98ef
+    kv_format: bf16
+    selected_ctx: 32768
+    measured: {vram_mib_per_card: 23245, tps_short: 104.48, tps_loaded_ctx: 176.66, soak_continuous: pass}
+    smoked_capabilities: [plain-chat]
+    unsmoked_capabilities: [tool-call-nonstream, tool-call-stream, reasoning-stream, vision, structured-output]
+    source: "BENCHMARKS.md#gemma-4-31b dual/dflash.yml @noonghunna 2026-05-08"
+    provenance: seed-from-measured-corpus
+    confidence: exact
+  - model: gemma-4-31b
+    arch_family: gemma4-swa-dense
+    quant: autoround-int4
+    topology_class: dual-3090-tp2
+    engine_pin: vllm-nightly-e47c98ef
+    kv_format: int8_per_token_head
+    selected_ctx: 262144
+    measured: {vram_mib_per_card: 22528, tps_short: 86.86, tps_loaded_ctx: 145.96, soak_continuous: not-run}
+    smoked_capabilities: [plain-chat]
+    unsmoked_capabilities: [tool-call-nonstream, tool-call-stream, reasoning-stream, vision, structured-output]
+    source: "BENCHMARKS.md#gemma-4-31b dual-dflash-int8.yml @noonghunna 2026-05-08"
+    provenance: seed-from-measured-corpus
+    confidence: exact
+  - model: gemma-4-31b
+    arch_family: gemma4-swa-dense
+    quant: awq
+    topology_class: dual-3090-tp2
+    engine_pin: vllm-nightly-1acd67a79
+    kv_format: bf16
+    selected_ctx: 65000
+    measured: {vram_mib_per_card: 20275, tps_short: 104.59, tps_loaded_ctx: 130.56, soak_continuous: not-run}
+    smoked_capabilities: [plain-chat]
+    unsmoked_capabilities: [tool-call-nonstream, tool-call-stream, reasoning-stream, vision, structured-output]
+    source: "BENCHMARKS.md#gemma-4-31b dual/awq.yml @noonghunna 2026-05-08"
+    provenance: seed-from-measured-corpus
+    confidence: exact
+  - model: qwen3.6-35b-a3b
+    arch_family: qwen3-next-moe
+    quant: autoround-int4
+    topology_class: dual-3090-tp2
+    engine_pin: vllm-nightly-bf610c2f
+    kv_format: fp8_e5m2
+    selected_ctx: 16000
+    measured: {vram_mib_per_card: 22467, tps_short: 182.68, tps_loaded_ctx: 177.45, soak_continuous: not-run}
+    smoked_capabilities: [plain-chat]
+    unsmoked_capabilities: [tool-call-nonstream, tool-call-stream, reasoning-stream, vision, structured-output]
+    source: "BENCHMARKS.md#MoE models qwen3.6-35b-a3b/dual/preview.yml @noonghunna 2026-05-15"
+    provenance: seed-from-measured-corpus
+    confidence: exact
+  - model: qwen3.6-35b-a3b
+    arch_family: qwen3-next-moe
+    quant: autoround-int4
+    topology_class: dual-3090-tp2
+    engine_pin: vllm-nightly-bf610c2f
+    kv_format: fp8_e5m2
+    selected_ctx: 16000
+    measured: {vram_mib_per_card: 23265, tps_short: 90.36, tps_loaded_ctx: 115.33, soak_continuous: not-run}
+    smoked_capabilities: [plain-chat]
+    unsmoked_capabilities: [tool-call-nonstream, tool-call-stream, reasoning-stream, vision, structured-output]
+    source: "BENCHMARKS.md#MoE models qwen3.6-35b-a3b/dual/preview-mtp.yml @noonghunna 2026-05-15"
+    provenance: seed-from-measured-corpus
+    confidence: exact
+  - model: gemma-4-26b-a4b
+    arch_family: gemma4-swa-moe
+    quant: awq-compressed-tensors
+    topology_class: dual-3090-tp2
+    engine_pin: vllm-nightly-bf610c2f
+    kv_format: bf16
+    selected_ctx: 32768
+    measured: {vram_mib_per_card: 24013, tps_short: 138.88, tps_loaded_ctx: 138.67, soak_continuous: not-run}
+    smoked_capabilities: [plain-chat]
+    unsmoked_capabilities: [tool-call-nonstream, tool-call-stream, reasoning-stream, vision, structured-output]
+    source: "BENCHMARKS.md#MoE models gemma-4-26b-a4b/dual/awq.yml @noonghunna 2026-05-15"
+    provenance: seed-from-measured-corpus
+    confidence: exact
+  - model: gemma-4-26b-a4b
+    arch_family: gemma4-swa-moe
+    quant: awq-compressed-tensors
+    topology_class: dual-3090-tp2
+    engine_pin: vllm-nightly-bf610c2f
+    kv_format: bf16
+    selected_ctx: 32768
+    measured: {vram_mib_per_card: 24064, tps_short: 155.05, tps_loaded_ctx: 207.02, soak_continuous: not-run}
+    smoked_capabilities: [plain-chat]
+    unsmoked_capabilities: [tool-call-nonstream, tool-call-stream, reasoning-stream, vision, structured-output]
+    source: "BENCHMARKS.md#MoE models gemma-4-26b-a4b/dual/awq-mtp.yml @noonghunna 2026-05-15"
+    provenance: seed-from-measured-corpus
+    confidence: exact

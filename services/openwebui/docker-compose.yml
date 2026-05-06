@@ -1,0 +1,40 @@
+services:
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - open-webui-data:/app/backend/data
+    environment:
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - OPENAI_API_BASE_URL=http://host.docker.internal:4000/v1
+      - OPENAI_API_KEY=sk-litellm-master-key
+      - WEBUI_SECRET_KEY=change-this-secret-key
+
+      # --- Web search / RAG ---
+      - ENABLE_RAG_WEB_SEARCH=true
+      - RAG_WEB_SEARCH_ENGINE=searxng
+      - RAG_WEB_SEARCH_RESULT_COUNT=5
+      - RAG_WEB_SEARCH_CONCURRENT_REQUESTS=5
+      - SEARXNG_QUERY_URL=http://host.docker.internal:8088/search?q=<query>&format=json
+
+      # Fallback / additional providers (keys loaded if set in env)
+      - BRAVE_SEARCH_API_KEY=${BRAVE_SEARCH_API_KEY:-}
+      - TAVILY_API_KEY=${TAVILY_API_KEY:-}
+      - GOOGLE_PSE_API_KEY=${GOOGLE_PSE_API_KEY:-}
+      - GOOGLE_PSE_ENGINE_ID=${GOOGLE_PSE_ENGINE_ID:-}
+      - SERPER_API_KEY=${SERPER_API_KEY:-}
+      - JINA_API_KEY=${JINA_API_KEY:-}
+
+      # --- URL-paste / page loading ---
+      - ENABLE_RAG_LOCAL_WEB_FETCH=true
+
+      # --- Image/file upload, document RAG ---
+      - ENABLE_RAG_HYBRID_SEARCH=true
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  open-webui-data:

@@ -1,0 +1,58 @@
+schema_version: 1
+id: gemma-4-26b-a4b
+display_name: Gemma 4 26B-A4B (MoE)
+family: gemma4-swa-moe
+hidden_size: 2816
+intermediate_size: 2112
+num_hidden_layers: 30
+# Hybrid SWA pattern: 5 full_attention layers at indices [5, 11, 17, 23, 29]
+# (every 6th layer, with last layer always global per Gemma 4 family convention)
+num_full_attn_layers: 5
+num_sliding_attn_layers: 25
+num_attn_heads: 16
+num_kv_heads: 8                       # sliding-layer KV head count
+num_global_kv_heads: 2                # NEW: global-layer KV head count (asymmetric — distinct from sliding)
+head_dim_sliding: 256
+global_head_dim: 512
+sliding_window: 1024
+max_ctx_supported: 262144
+attention_k_eq_v: true                # Gemma 4 family default — K and V share storage
+# MoE (from config.json text_config)
+num_experts: 128
+num_experts_per_tok: 8                # config field: top_k_experts
+moe_intermediate_size: 704
+active_params_b: 4.0
+mtp_num_hidden_layers: null           # MTP drafter is external (gemma-4-26B-A4B-it-assistant), not built-in
+vision_capable: true                  # multimodal — vision_config + audio_config tokens present
+weights:
+  autoround_int4_mixed:
+    path: gemma-4-26b-a4b-autoround-int4-mixed
+    size_gb: 16.0                      # measured post-download 2026-05-15
+    format: autoround
+    status: ampere-blocked             # moe_intermediate_size=704 % group_size=128 = 5.5
+                                       # → Marlin K-dim alignment fails on SM86.
+                                       # Boots fine on SM90+ (Cutlass W4A8 / Machete).
+    hf_repos:
+      - Intel/gemma-4-26B-A4B-it-int4-mixed-AutoRound
+  awq_compressed_tensors:
+    path: gemma-4-26b-a4b-awq-4bit
+    size_gb: 17.0                      # measured post-download 2026-05-15
+    format: compressed-tensors         # AWQ pack-quantized via vLLM compressed-tensors loader
+    status: production                 # via vLLM PR #40886 overlay (Ampere-bootable)
+    hf_repos:
+      - cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit
+default_weight_variant: awq_compressed_tensors
+compatible_drafters:
+  - gemma-26b-it-assistant            # dedicated 26B-A4B MTP assistant (separate weights from 31B)
+# Sliding layers cap TP at num_kv_heads=8 → [1,2,4,8]
+# Global layers cap TP at num_global_kv_heads=2 → [1,2]
+# Effective valid_tp = intersection = [1, 2]
+valid_tp:
+  - 1
+  - 2
+requires_genesis: false               # Gemma 4 family doesn't need Genesis (no DeltaNet quirks)
+# kv-calc.py models MoE + asymmetric KV heads (8 sliding / 2 global) as of
+# v0.7.3. Calibration is low-anchor (AWQ no-MTP + AWQ-MTP rows only); add
+# longer context / lower max_num_seqs rows before treating projections as
+# production-grade.
+kv_calc_supported: true

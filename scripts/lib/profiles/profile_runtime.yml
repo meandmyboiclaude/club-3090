@@ -1,0 +1,1174 @@
+# Phase A-prime runtime profile data (v0.8.0, club-3090 #359 / PR #147).
+#
+# WHY THIS FILE EXISTS (storage decision — documented in docs/PATCH_ATTRIBUTION.md):
+#   The #141 generator (STEP 2/3) needs, per in-scope profile, the whole
+#   shipped service definition classified into param / governed / constant
+#   tokens plus the two patch insertion points, and a genesis discriminator.
+#   It also needs an arch -> model-slug cross-reference and per-model
+#   trust-remote-code precision. The Phase-A `arch_patches.yml` schema is a
+#   STRICT closed key-set enforced by scripts/tests/test-patch-attribution.sh
+#   (`arch_allowed_keys`); adding `model_slugs` directly there would trip the
+#   "unknown keys" guard, and the test is the contract (RED-LINE: the test is
+#   not editable in this commit). Therefore the Phase-A-prime fold-ins that
+#   the brief scopes "onto arch rows" are stored HERE, keyed by the same
+#   `arch:` string, so arch_patches.yml stays schema-clean and the existing
+#   test stays green. profile_runtime.yml was chosen over COMPOSE_REGISTRY
+#   fields because the captured templates are large structured blocks and the
+#   registry is a thin param-value bridge that the test imports as a Python
+#   module (keeping it data-thin avoids import-surface churn).
+#
+# GROUNDING DISCIPLINE: every value below was derived by reading the shipped
+# compose at `compose_path` (verbatim) and each model's own config.json on
+# this stack. Nothing is guessed. Values that could not be established from an
+# artifact are written `unverified` / `none` and listed in the commit report.
+schema_version: 1
+
+# --------------------------------------------------------------------------
+# Per-profile captured runtime template (in-scope vLLM profiles only).
+#   genesis_equipped (locked v6 discriminator): true iff the shipped compose
+#   contains _genesis / GENESIS_PIN / GENESIS_ENABLE OR kv_format starts with
+#   'turboquant'. Computed by reading the compose, not by guessing.
+#   compose_service_template: the WHOLE service definition is the captured
+#   unit (file at `source`); this block records the token CLASSIFICATION the
+#   generator applies (param-slot | governed-slot | constant) + the two named
+#   insertion-point anchors. The `image:` expression is a captured CONSTANT
+#   (correction #2 — never substituted). `--trust-remote-code` is a
+#   GOVERNED-slot (correction #1 — never blind-passthrough).
+# --------------------------------------------------------------------------
+profiles:
+  vllm/default:
+    compose_path: models/qwen3.6-27b/vllm/compose/single/docker-compose.yml
+    genesis_equipped: true
+    genesis_equipped_evidence: compose contains GENESIS_* / _genesis token
+    compose_service_template:
+      source: models/qwen3.6-27b/vllm/compose/single/docker-compose.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8020 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 1 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 48000 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.92 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: turboquant_3bit_nc, value: 'turboquant_3bit_nc' }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 1 }
+        speculative_config: { token: '--speculative-config', source: 'drafter[qwen-mtp-builtin].speculative_config_template' }
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: present  # sidecar invoke anchor
+  vllm/long-text:
+    compose_path: models/qwen3.6-27b/vllm/compose/single/long-text.yml
+    genesis_equipped: true
+    genesis_equipped_evidence: compose contains GENESIS_* / _genesis token
+    compose_service_template:
+      source: models/qwen3.6-27b/vllm/compose/single/long-text.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8020 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 1 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 180000 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.93 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: turboquant_3bit_nc, value: 'turboquant_3bit_nc' }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 1 }
+        speculative_config: { token: '--speculative-config', source: 'drafter[qwen-mtp-builtin].speculative_config_template' }
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: present  # sidecar invoke anchor
+  vllm/long-text-no-mtp:
+    compose_path: models/qwen3.6-27b/vllm/compose/single/long-text-no-mtp.yml
+    genesis_equipped: true
+    genesis_equipped_evidence: compose contains GENESIS_* / _genesis token
+    compose_service_template:
+      source: models/qwen3.6-27b/vllm/compose/single/long-text-no-mtp.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8021 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 1 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 200000 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.95 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: turboquant_3bit_nc, value: 'turboquant_3bit_nc' }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 1 }
+        speculative_config: omitted  # E.drafter is None -> --speculative-config not emitted
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: present  # sidecar invoke anchor
+  vllm/long-vision:
+    compose_path: models/qwen3.6-27b/vllm/compose/single/long-vision.yml
+    genesis_equipped: true
+    genesis_equipped_evidence: compose contains GENESIS_* / _genesis token
+    compose_service_template:
+      source: models/qwen3.6-27b/vllm/compose/single/long-vision.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8020 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 1 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 145000 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.95 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: turboquant_3bit_nc, value: 'turboquant_3bit_nc' }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 1 }
+        speculative_config: { token: '--speculative-config', source: 'drafter[qwen-mtp-builtin].speculative_config_template' }
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: present  # sidecar invoke anchor
+  vllm/bounded-thinking:
+    compose_path: models/qwen3.6-27b/vllm/compose/single/bounded-thinking.yml
+    genesis_equipped: true
+    genesis_equipped_evidence: compose contains GENESIS_* / _genesis token
+    compose_service_template:
+      source: models/qwen3.6-27b/vllm/compose/single/bounded-thinking.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8020 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 1 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 180000 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.95 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: turboquant_3bit_nc, value: 'turboquant_3bit_nc' }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 1 }
+        speculative_config: { token: '--speculative-config', source: 'drafter[qwen-mtp-builtin].speculative_config_template' }
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: present  # sidecar invoke anchor
+  vllm/tools-text:
+    compose_path: models/qwen3.6-27b/vllm/compose/single/tools-text.yml
+    genesis_equipped: true
+    genesis_equipped_evidence: compose contains GENESIS_* / _genesis token
+    compose_service_template:
+      source: models/qwen3.6-27b/vllm/compose/single/tools-text.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8020 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 1 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 75000 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.97 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: fp8_e5m2, value: 'fp8_e5m2' }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 1 }
+        speculative_config: { token: '--speculative-config', source: 'drafter[qwen-mtp-builtin].speculative_config_template' }
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: present  # sidecar invoke anchor
+  vllm/minimal:
+    compose_path: models/qwen3.6-27b/vllm/compose/single/minimal.yml
+    genesis_equipped: false
+    genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
+    compose_service_template:
+      source: models/qwen3.6-27b/vllm/compose/single/minimal.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8020 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 1 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 32768 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.92 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: fp8_e5m2, value: 'fp8_e5m2' }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 1 }
+        speculative_config: omitted  # E.drafter is None -> --speculative-config not emitted
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: present  # sidecar invoke anchor
+  vllm/dual:
+    compose_path: models/qwen3.6-27b/vllm/compose/dual/docker-compose.yml
+    genesis_equipped: false
+    genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
+    compose_service_template:
+      source: models/qwen3.6-27b/vllm/compose/dual/docker-compose.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8010 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 262144 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.92 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: fp8_e5m2, value: 'fp8_e5m2' }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 2 }
+        speculative_config: { token: '--speculative-config', source: 'drafter[qwen-mtp-builtin].speculative_config_template' }
+        nvlink_env: { source: E.requires_nvlink, value: false }
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: present  # sidecar invoke anchor
+  vllm/dual-turbo:
+    compose_path: models/qwen3.6-27b/vllm/compose/dual/turbo.yml
+    genesis_equipped: true
+    genesis_equipped_evidence: compose contains GENESIS_* / _genesis token
+    compose_service_template:
+      source: models/qwen3.6-27b/vllm/compose/dual/turbo.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8011 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 262144 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.85 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: turboquant_3bit_nc, value: 'turboquant_3bit_nc' }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 4 }
+        speculative_config: { token: '--speculative-config', source: 'drafter[qwen-mtp-builtin].speculative_config_template' }
+        nvlink_env: { source: E.requires_nvlink, value: false }
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: present  # sidecar invoke anchor
+  vllm/dual-dflash:
+    compose_path: models/qwen3.6-27b/vllm/compose/dual/dflash.yml
+    genesis_equipped: false
+    genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
+    compose_service_template:
+      source: models/qwen3.6-27b/vllm/compose/dual/dflash.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8012 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 185000 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.95 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: fp16, value: null }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 1 }
+        speculative_config: { token: '--speculative-config', source: 'drafter[zlab-qwen-dflash].speculative_config_template' }
+        nvlink_env: { source: E.requires_nvlink, value: false }
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: present  # sidecar invoke anchor
+  vllm/dual-dflash-noviz:
+    compose_path: models/qwen3.6-27b/vllm/compose/dual/dflash-noviz.yml
+    genesis_equipped: false
+    genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
+    compose_service_template:
+      source: models/qwen3.6-27b/vllm/compose/dual/dflash-noviz.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8013 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 200000 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.95 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: fp16, value: null }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 1 }
+        speculative_config: { token: '--speculative-config', source: 'drafter[zlab-qwen-dflash].speculative_config_template' }
+        nvlink_env: { source: E.requires_nvlink, value: false }
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: present  # sidecar invoke anchor
+  vllm/dual-bf16:
+    compose_path: models/qwen3.6-27b/vllm/compose/dual/bf16.yml
+    genesis_equipped: false
+    genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
+    compose_service_template:
+      source: models/qwen3.6-27b/vllm/compose/dual/bf16.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8012 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 200000 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.92 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: bf16, value: null }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 1 }
+        speculative_config: { token: '--speculative-config', source: 'drafter[qwen-mtp-builtin].speculative_config_template' }
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: present  # sidecar invoke anchor
+  vllm/dual-int8:
+    compose_path: models/qwen3.6-27b/vllm/compose/dual/int8.yml
+    genesis_equipped: false
+    genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
+    compose_service_template:
+      source: models/qwen3.6-27b/vllm/compose/dual/int8.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8011 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 262144 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.92 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: int8_per_token_head, value: 'auto+PTH' }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 2 }
+        speculative_config: { token: '--speculative-config', source: 'drafter[qwen-mtp-builtin].speculative_config_template' }
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: present  # sidecar invoke anchor
+  vllm/dual-tq3-mtp:
+    compose_path: models/qwen3.6-27b/vllm/compose/dual/tq3-mtp.yml
+    genesis_equipped: true
+    genesis_equipped_evidence: kv_format 'turboquant_3bit_nc' starts with 'turboquant'
+    compose_service_template:
+      source: models/qwen3.6-27b/vllm/compose/dual/tq3-mtp.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8013 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 262144 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.92 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: turboquant_3bit_nc, value: 'turboquant_3bit_nc' }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 2 }
+        speculative_config: { token: '--speculative-config', source: 'drafter[qwen-mtp-builtin].speculative_config_template' }
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: present  # sidecar invoke anchor
+  vllm/dual-tq3-mtp-genesis:
+    compose_path: models/qwen3.6-27b/vllm/compose/dual/tq3-mtp-genesis.yml
+    genesis_equipped: true
+    genesis_equipped_evidence: compose contains GENESIS_* / _genesis token
+    compose_service_template:
+      source: models/qwen3.6-27b/vllm/compose/dual/tq3-mtp-genesis.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8015 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 262144 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.85 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: turboquant_3bit_nc, value: 'turboquant_3bit_nc' }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 2 }
+        speculative_config: { token: '--speculative-config', source: 'drafter[qwen-mtp-builtin].speculative_config_template' }
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: present  # sidecar invoke anchor
+  vllm/dual-tq3-nomtp:
+    compose_path: models/qwen3.6-27b/vllm/compose/dual/tq3-nomtp.yml
+    genesis_equipped: true
+    genesis_equipped_evidence: kv_format 'turboquant_3bit_nc' starts with 'turboquant'
+    compose_service_template:
+      source: models/qwen3.6-27b/vllm/compose/dual/tq3-nomtp.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8014 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 262144 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.92 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: turboquant_3bit_nc, value: 'turboquant_3bit_nc' }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 2 }
+        speculative_config: omitted  # E.drafter is None -> --speculative-config not emitted
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: present  # sidecar invoke anchor
+  vllm/dual-carnice-bf16mtp:
+    compose_path: models/qwen3.6-27b/vllm/compose/dual/carnice-bf16mtp.yml
+    genesis_equipped: false
+    genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
+    compose_service_template:
+      source: models/qwen3.6-27b/vllm/compose/dual/carnice-bf16mtp.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8070 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 262144 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.92 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: fp8_e5m2, value: 'fp8_e5m2' }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 2 }
+        speculative_config: { token: '--speculative-config', source: 'drafter[qwen-mtp-builtin].speculative_config_template' }
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: present  # sidecar invoke anchor
+  vllm/dual-qwopus-bf16mtp:
+    compose_path: models/qwen3.6-27b/vllm/compose/dual/qwopus-bf16mtp.yml
+    genesis_equipped: false
+    genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
+    compose_service_template:
+      source: models/qwen3.6-27b/vllm/compose/dual/qwopus-bf16mtp.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8071 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 262144 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.92 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: fp8_e5m2, value: 'fp8_e5m2' }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 2 }
+        speculative_config: { token: '--speculative-config', source: 'drafter[qwen-mtp-builtin].speculative_config_template' }
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: present  # sidecar invoke anchor
+  vllm/dual-nvlink:
+    compose_path: models/qwen3.6-27b/vllm/compose/dual/nvlink.yml
+    genesis_equipped: false
+    genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
+    extends_base: models/qwen3.6-27b/vllm/compose/dual/docker-compose.yml
+    compose_service_template:
+      source: models/qwen3.6-27b/vllm/compose/dual/nvlink.yml  # whole service definition captured verbatim from this file
+      extends_base: models/qwen3.6-27b/vllm/compose/dual/docker-compose.yml  # merged base supplies volumes/entrypoint/command
+      param_slots:
+        ports: { source: E.default_port, value: 8014 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 262144 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.92 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: fp8_e5m2, value: 'fp8_e5m2' }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 2 }
+        speculative_config: { token: '--speculative-config', source: 'drafter[qwen-mtp-builtin].speculative_config_template' }
+        nvlink_env: { source: E.requires_nvlink, value: true }
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: inherited-from-extends-base    # overlay/sidecar mount anchor
+        entrypoint: inherited-from-extends-base  # sidecar invoke anchor
+  vllm/dual-nvlink-turbo:
+    compose_path: models/qwen3.6-27b/vllm/compose/dual/nvlink-turbo.yml
+    genesis_equipped: true
+    genesis_equipped_evidence: kv_format 'turboquant_3bit_nc' starts with 'turboquant'
+    extends_base: models/qwen3.6-27b/vllm/compose/dual/turbo.yml
+    compose_service_template:
+      source: models/qwen3.6-27b/vllm/compose/dual/nvlink-turbo.yml  # whole service definition captured verbatim from this file
+      extends_base: models/qwen3.6-27b/vllm/compose/dual/turbo.yml  # merged base supplies volumes/entrypoint/command
+      param_slots:
+        ports: { source: E.default_port, value: 8017 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 262144 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.85 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: turboquant_3bit_nc, value: 'turboquant_3bit_nc' }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 4 }
+        speculative_config: { token: '--speculative-config', source: 'drafter[qwen-mtp-builtin].speculative_config_template' }
+        nvlink_env: { source: E.requires_nvlink, value: true }
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: inherited-from-extends-base    # overlay/sidecar mount anchor
+        entrypoint: inherited-from-extends-base  # sidecar invoke anchor
+  vllm/dual-nvlink-dflash:
+    compose_path: models/qwen3.6-27b/vllm/compose/dual/nvlink-dflash.yml
+    genesis_equipped: false
+    genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
+    extends_base: models/qwen3.6-27b/vllm/compose/dual/dflash.yml
+    compose_service_template:
+      source: models/qwen3.6-27b/vllm/compose/dual/nvlink-dflash.yml  # whole service definition captured verbatim from this file
+      extends_base: models/qwen3.6-27b/vllm/compose/dual/dflash.yml  # merged base supplies volumes/entrypoint/command
+      param_slots:
+        ports: { source: E.default_port, value: 8018 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 185000 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.95 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: fp16, value: null }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 1 }
+        speculative_config: { token: '--speculative-config', source: 'drafter[zlab-qwen-dflash].speculative_config_template' }
+        nvlink_env: { source: E.requires_nvlink, value: true }
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: inherited-from-extends-base    # overlay/sidecar mount anchor
+        entrypoint: inherited-from-extends-base  # sidecar invoke anchor
+  vllm/dual-nvlink-dflash-noviz:
+    compose_path: models/qwen3.6-27b/vllm/compose/dual/nvlink-dflash-noviz.yml
+    genesis_equipped: false
+    genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
+    extends_base: models/qwen3.6-27b/vllm/compose/dual/dflash-noviz.yml
+    compose_service_template:
+      source: models/qwen3.6-27b/vllm/compose/dual/nvlink-dflash-noviz.yml  # whole service definition captured verbatim from this file
+      extends_base: models/qwen3.6-27b/vllm/compose/dual/dflash-noviz.yml  # merged base supplies volumes/entrypoint/command
+      param_slots:
+        ports: { source: E.default_port, value: 8019 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 200000 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.95 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: fp16, value: null }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 1 }
+        speculative_config: { token: '--speculative-config', source: 'drafter[zlab-qwen-dflash].speculative_config_template' }
+        nvlink_env: { source: E.requires_nvlink, value: true }
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: inherited-from-extends-base    # overlay/sidecar mount anchor
+        entrypoint: inherited-from-extends-base  # sidecar invoke anchor
+  vllm/dual4:
+    compose_path: models/qwen3.6-27b/vllm/compose/multi4/docker-compose.yml
+    genesis_equipped: false
+    genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
+    compose_service_template:
+      source: models/qwen3.6-27b/vllm/compose/multi4/docker-compose.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8015 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 4 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 262144 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.92 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: fp8_e5m2, value: 'fp8_e5m2' }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 4 }
+        speculative_config: { token: '--speculative-config', source: 'drafter[qwen-mtp-builtin].speculative_config_template' }
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: present  # sidecar invoke anchor
+  vllm/dual4-dflash:
+    compose_path: models/qwen3.6-27b/vllm/compose/multi4/dflash.yml
+    genesis_equipped: false
+    genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
+    compose_service_template:
+      source: models/qwen3.6-27b/vllm/compose/multi4/dflash.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8016 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 4 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 262144 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.95 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: fp16, value: null }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 2 }
+        speculative_config: { token: '--speculative-config', source: 'drafter[zlab-qwen-dflash].speculative_config_template' }
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: present  # sidecar invoke anchor
+  vllm/gemma-mtp-tp1:
+    compose_path: models/gemma-4-31b/vllm/compose/single/docker-compose.yml
+    genesis_equipped: false
+    genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
+    compose_service_template:
+      source: models/gemma-4-31b/vllm/compose/single/docker-compose.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8031 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 1 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 8192 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.95 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: fp8_e4m3, value: 'fp8' }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 256 }
+        speculative_config: { token: '--speculative-config', source: 'drafter[gemma-it-assistant].speculative_config_template' }
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: absent  # sidecar invoke anchor
+  vllm/gemma-mtp:
+    compose_path: models/gemma-4-31b/vllm/compose/dual/docker-compose.yml
+    genesis_equipped: false
+    genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
+    compose_service_template:
+      source: models/gemma-4-31b/vllm/compose/dual/docker-compose.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8030 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 32768 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.92 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: bf16, value: null }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 4 }
+        speculative_config: { token: '--speculative-config', source: 'drafter[gemma-it-assistant].speculative_config_template' }
+        nvlink_env: { source: E.requires_nvlink, value: false }
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: present  # sidecar invoke anchor
+  vllm/gemma-int8:
+    compose_path: models/gemma-4-31b/vllm/compose/dual/int8.yml
+    genesis_equipped: false
+    genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
+    compose_service_template:
+      source: models/gemma-4-31b/vllm/compose/dual/int8.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8032 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 98304 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.95 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: int8_per_token_head, value: 'auto+PTH' }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 4 }
+        speculative_config: { token: '--speculative-config', source: 'drafter[gemma-it-assistant].speculative_config_template' }
+        nvlink_env: { source: E.requires_nvlink, value: false }
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: present  # sidecar invoke anchor
+  vllm/gemma-int8-262k:
+    compose_path: models/gemma-4-31b/vllm/compose/dual/int8.yml
+    genesis_equipped: false
+    genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
+    compose_service_template:
+      source: models/gemma-4-31b/vllm/compose/dual/int8.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8032 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 262144 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.95 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: int8_per_token_head, value: 'auto+PTH' }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 1 }
+        speculative_config: { token: '--speculative-config', source: 'drafter[gemma-it-assistant].speculative_config_template' }
+        nvlink_env: { source: E.requires_nvlink, value: false }
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: present  # sidecar invoke anchor
+  vllm/gemma-dflash:
+    compose_path: models/gemma-4-31b/vllm/compose/dual/dflash.yml
+    genesis_equipped: false
+    genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
+    compose_service_template:
+      source: models/gemma-4-31b/vllm/compose/dual/dflash.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8032 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 32768 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.92 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: bf16, value: null }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 4 }
+        speculative_config: { token: '--speculative-config', source: 'drafter[gemma-dflash].speculative_config_template' }
+        nvlink_env: { source: E.requires_nvlink, value: false }
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: present  # sidecar invoke anchor
+  vllm/gemma-dflash-int8:
+    compose_path: models/gemma-4-31b/vllm/compose/dual/dflash-int8.yml
+    genesis_equipped: false
+    genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
+    compose_service_template:
+      source: models/gemma-4-31b/vllm/compose/dual/dflash-int8.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8032 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 65536 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.95 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: int8_per_token_head, value: 'auto+PTH' }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 2 }
+        speculative_config: { token: '--speculative-config', source: 'drafter[gemma-dflash].speculative_config_template' }
+        nvlink_env: { source: E.requires_nvlink, value: false }
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: present  # sidecar invoke anchor
+  vllm/gemma-int8-tq3:
+    compose_path: models/gemma-4-31b/vllm/compose/dual/int8-tq3.yml
+    genesis_equipped: true
+    genesis_equipped_evidence: kv_format 'turboquant_3bit_nc' starts with 'turboquant'
+    compose_service_template:
+      source: models/gemma-4-31b/vllm/compose/dual/int8-tq3.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8034 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 98304 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.95 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: turboquant_3bit_nc, value: 'turboquant_3bit_nc' }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 4 }
+        speculative_config: { token: '--speculative-config', source: 'drafter[gemma-it-assistant].speculative_config_template' }
+        nvlink_env: { source: E.requires_nvlink, value: false }
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: present  # sidecar invoke anchor
+  vllm/gemma-bf16:
+    compose_path: models/gemma-4-31b/vllm/compose/dual/bf16.yml
+    genesis_equipped: false
+    genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
+    compose_service_template:
+      source: models/gemma-4-31b/vllm/compose/dual/bf16.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8033 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 200000 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.95 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: bf16, value: null }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 1 }
+        speculative_config: { token: '--speculative-config', source: 'drafter[gemma-it-assistant].speculative_config_template' }
+        nvlink_env: { source: E.requires_nvlink, value: false }
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: present  # sidecar invoke anchor
+  vllm/gemma-awq:
+    compose_path: models/gemma-4-31b/vllm/compose/dual/awq.yml
+    genesis_equipped: false
+    genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
+    compose_service_template:
+      source: models/gemma-4-31b/vllm/compose/dual/awq.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8033 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 65536 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.85 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: bf16, value: null }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 4 }
+        speculative_config: { token: '--speculative-config', source: 'drafter[gemma-it-assistant].speculative_config_template' }
+        nvlink_env: { source: E.requires_nvlink, value: false }
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: present  # sidecar invoke anchor
+  vllm/gemma-a4b-single:
+    compose_path: models/gemma-4-26b-a4b/vllm/compose/single/docker-compose.yml
+    genesis_equipped: false
+    genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
+    compose_service_template:
+      source: models/gemma-4-26b-a4b/vllm/compose/single/docker-compose.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8040 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 1 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 8192 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.92 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: bf16, value: null }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 256 }
+        speculative_config: omitted  # E.drafter is None -> --speculative-config not emitted
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: absent  # sidecar invoke anchor
+  vllm/gemma-a4b:
+    compose_path: models/gemma-4-26b-a4b/vllm/compose/dual/docker-compose.yml
+    genesis_equipped: false
+    genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
+    compose_service_template:
+      source: models/gemma-4-26b-a4b/vllm/compose/dual/docker-compose.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8041 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 32768 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.92 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: bf16, value: null }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 256 }
+        speculative_config: omitted  # E.drafter is None -> --speculative-config not emitted
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: absent  # sidecar invoke anchor
+  vllm/gemma-a4b-awq:
+    compose_path: models/gemma-4-26b-a4b/vllm/compose/dual/awq.yml
+    genesis_equipped: false
+    genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
+    compose_service_template:
+      source: models/gemma-4-26b-a4b/vllm/compose/dual/awq.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8042 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 32768 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.92 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: bf16, value: null }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 256 }
+        speculative_config: omitted  # E.drafter is None -> --speculative-config not emitted
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: present  # sidecar invoke anchor
+  vllm/gemma-a4b-awq-mtp:
+    compose_path: models/gemma-4-26b-a4b/vllm/compose/dual/awq-mtp.yml
+    genesis_equipped: false
+    genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
+    compose_service_template:
+      source: models/gemma-4-26b-a4b/vllm/compose/dual/awq-mtp.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8043 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 32768 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.92 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: bf16, value: null }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 256 }
+        speculative_config: { token: '--speculative-config', source: 'drafter[gemma-26b-it-assistant].speculative_config_template' }
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: present  # sidecar invoke anchor
+  vllm/qwen-a3b-preview-single:
+    compose_path: models/qwen3.6-35b-a3b/vllm/compose/single/preview.yml
+    genesis_equipped: false
+    genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
+    compose_service_template:
+      source: models/qwen3.6-35b-a3b/vllm/compose/single/preview.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8050 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 1 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 8192 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.92 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: fp8_e5m2, value: 'fp8_e5m2' }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 1 }
+        speculative_config: omitted  # E.drafter is None -> --speculative-config not emitted
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: absent  # sidecar invoke anchor
+  vllm/qwen-a3b-preview:
+    compose_path: models/qwen3.6-35b-a3b/vllm/compose/dual/preview.yml
+    genesis_equipped: false
+    genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
+    compose_service_template:
+      source: models/qwen3.6-35b-a3b/vllm/compose/dual/preview.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8051 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 16384 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.92 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: fp8_e5m2, value: 'fp8_e5m2' }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 1 }
+        speculative_config: omitted  # E.drafter is None -> --speculative-config not emitted
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: absent  # sidecar invoke anchor
+  vllm/qwen-a3b-preview-mtp:
+    compose_path: models/qwen3.6-35b-a3b/vllm/compose/dual/preview-mtp.yml
+    genesis_equipped: false
+    genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
+    compose_service_template:
+      source: models/qwen3.6-35b-a3b/vllm/compose/dual/preview-mtp.yml  # whole service definition captured verbatim from this file
+      param_slots:
+        ports: { source: E.default_port, value: 8052 }
+        tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
+        max_model_len: { token: '${MAX_MODEL_LEN}', source: E.max_ctx, value: 16384 }
+        gpu_memory_utilization: { token: '${GPU_MEMORY_UTILIZATION}', source: E.mem_util, value: 0.92 }
+        kv_cache_dtype: { token: '${KV_CACHE_DTYPE}', source: 'kv_arg(E.kv_format)', kv_format: fp8_e5m2, value: 'fp8_e5m2' }
+        max_num_seqs: { token: '--max-num-seqs', source: E.max_num_seqs, value: 1 }
+        speculative_config: { token: '--speculative-config', source: 'drafter[qwen-mtp-builtin].speculative_config_template' }
+      governed_slots:
+        trust_remote_code:
+          token: '--trust-remote-code'
+          present_in_shipped_compose: true
+          policy: governed   # locked design v6 §88 security model
+          emit_rule: 'only if arch trc gate resolves evidence-cited false-permitted; never blind-passthrough'
+      constants:
+        image: '${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}'   # captured constant; engine pin flows via env, NOT rewritten
+        verbatim_from_compose: [shm_size, ipc, deploy.resources, model_cache_volume, base_environment, base_entrypoint, '--model', '--served-model-name', '--quantization', '--dtype', '--tool-call-parser', '--chat-template', '--reasoning-parser', '--default-chat-template-kwargs', '--enable-prefix-caching', '--enable-chunked-prefill', '--enforce-eager']
+      insertion_points:
+        volumes: present    # overlay/sidecar mount anchor
+        entrypoint: absent  # sidecar invoke anchor
+
+# --------------------------------------------------------------------------
+# Phase A-prime fold-in: arch -> model_slugs + trust-remote-code precision.
+#   Keyed by the same `arch:` string used in arch_patches.yml. `model_slugs`
+#   are the compose_registry `model` values served by that arch on this
+#   stack. `trust_remote_code` is derived from each listed model's OWN
+#   config.json on /mnt/models/huggingface (auto_map absent + no *modeling*.py
+#   modeling file shipped with the weights => false, evidence-cited). Generic
+#   common-transformers lower-bound rows have no on-stack weights to inspect
+#   => model_slugs [] and trust_remote_code stays unverified (honest: nothing
+#   to cite). arch_patches.yml is the C0 authority for requires_trust_remote_code;
+#   this block is the evidence ledger the generator's step-5 trc gate reads to
+#   decide the governed-slot emission. The two MUST agree for in-scope arches.
+# --------------------------------------------------------------------------
+arch_model_xref:
+  Qwen3NextForCausalLM:
+    family: qwen3-next-hybrid
+    model_slugs: [qwen3.6-27b]
+    trust_remote_code: false
+    trust_remote_code_evidence: "qwen3.6-27b weights config.json (qwen3.6-27b-autoround-int4) has architectures=[Qwen3_5ForConditionalGeneration], auto_map absent, no *modeling*.py modeling file shipped with weights -> loads built-in transformers/vLLM class, no remote code execution"
+    golden_triple_profiles: [vllm/minimal, vllm/dual]
+  Qwen3_5MoeForConditionalGeneration:
+    family: qwen3-next-moe
+    model_slugs: [qwen3.6-35b-a3b]
+    trust_remote_code: false
+    trust_remote_code_evidence: "qwen3.6-35b-a3b weights config.json (qwen3.6-35b-a3b-autoround-int4) has architectures=[Qwen3_5MoeForConditionalGeneration], auto_map absent, no *modeling*.py shipped -> built-in class"
+  Gemma4ForConditionalGeneration:
+    family: gemma4-swa-dense
+    model_slugs: [gemma-4-31b]
+    trust_remote_code: false
+    trust_remote_code_evidence: "gemma-4-31b weights config.json (gemma-4-31b-autoround-int4) has architectures=[Gemma4ForConditionalGeneration], auto_map absent, no *modeling*.py shipped -> built-in class"
+    golden_triple_profiles: [vllm/gemma-mtp, vllm/gemma-int8, vllm/gemma-dflash]
+  Gemma4ForCausalLM:
+    family: gemma4-swa-dense
+    model_slugs: []
+    trust_remote_code: unverified
+    trust_remote_code_evidence: none   # no on-stack model uses this exact text-only arch string; brief requires deriving from the model's OWN config -> nothing to cite
+  Gemma4ForConditionalGenerationMoE:
+    family: gemma4-swa-moe
+    model_slugs: [gemma-4-26b-a4b]
+    trust_remote_code: false
+    trust_remote_code_evidence: "gemma-4-26b-a4b weights config.json (gemma-4-26b-a4b-autoround-int4-mixed AND gemma-4-26b-a4b-awq-4bit) both have architectures=[Gemma4ForConditionalGeneration], auto_map absent, no *modeling*.py shipped -> built-in class"
+  LlamaForCausalLM:
+    family: dense
+    model_slugs: []
+    trust_remote_code: unverified
+    trust_remote_code_evidence: none   # generic common-transformers lower-bound row, no on-stack weights to inspect
+  MistralForCausalLM:
+    family: dense
+    model_slugs: []
+    trust_remote_code: unverified
+    trust_remote_code_evidence: none
+  Qwen2ForCausalLM:
+    family: dense
+    model_slugs: []
+    trust_remote_code: unverified
+    trust_remote_code_evidence: none
+  Qwen3ForCausalLM:
+    family: dense
+    model_slugs: []
+    trust_remote_code: unverified
+    trust_remote_code_evidence: none
+  Phi3ForCausalLM:
+    family: dense
+    model_slugs: []
+    trust_remote_code: unverified
+    trust_remote_code_evidence: none
+  Gemma2ForCausalLM:
+    family: dense
+    model_slugs: []
+    trust_remote_code: unverified
+    trust_remote_code_evidence: none

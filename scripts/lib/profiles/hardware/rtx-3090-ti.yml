@@ -1,0 +1,28 @@
+schema_version: 1
+id: rtx-3090-ti
+display_name: NVIDIA RTX 3090 Ti
+sm: 8.6
+vram_gb: 24
+arch: ampere-consumer
+mem_util_safe: 0.95
+supported_kv_formats:
+  - bf16
+  - fp16
+  - fp8_e5m2
+  - turboquant_3bit_nc
+  - int8_per_token_head
+  - q4_0
+  - k8v4
+kv_format_default:
+  long_context: turboquant_3bit_nc
+  multi_stream: int8_per_token_head
+  balanced: fp8_e5m2
+cudagraph: full
+driver_pin_recommended:
+  min: "580.0"
+  notes: "CUDA 13 vLLM nightlies require a 580.x-class NVIDIA driver."
+nvlink_capable: true
+power_cap_w_optimal: 200
+power_cap_w_max: 480
+notes: "Added from eddie's discussion #86 sweep; same SM and VRAM class as RTX 3090."
+

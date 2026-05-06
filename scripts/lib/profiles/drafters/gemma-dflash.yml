@@ -1,0 +1,20 @@
+schema_version: 1
+id: gemma-dflash
+display_name: z-lab Gemma 4 DFlash
+spec_method: dflash
+model_compat:
+  - gemma-4-31b
+n_default: 7
+n_max: 15
+download:
+  hf_repo: z-lab/gemma-4-31b-it-dflash
+  size_gb: 2.9
+  format: fp16
+vram_footprint_gb: 2.9
+status: experimental
+# Phase A-prime fold-in (v0.8.0 #359). Grounded verbatim from the shipped
+# `--speculative-config` JSON in models/gemma-4-31b/vllm/compose/dual/dflash.yml
+# ('{"method":"dflash","model":"/root/.cache/huggingface/gemma-4-31b-it-dflash","num_speculative_tokens":7}').
+# Dir verified at /mnt/models/huggingface/gemma-4-31b-it-dflash.
+speculative_config_template: '{"method":"dflash","model":"{LOCAL_MODEL_PATH}","num_speculative_tokens":{N}}'
+local_model_path: /root/.cache/huggingface/gemma-4-31b-it-dflash

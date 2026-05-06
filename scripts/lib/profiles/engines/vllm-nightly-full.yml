@@ -1,0 +1,66 @@
+schema_version: 1
+id: vllm-nightly-full
+display_name: vLLM nightly plus all overlays
+type: vllm
+stability: experimental
+install:
+  method: docker_image
+  spec: vllm/vllm-openai:nightly-e47c98ef7a38792996e452ef53914e21e41928e9
+min_sm: 7.5
+supported_model_families:
+  - dense
+  - qwen3-next-hybrid
+  - gemma4-swa-dense
+features:
+  int8_per_token_head: true
+  turboquant_3bit_nc: true
+  marlin_pad_sub_tile_n: true
+  qwen3_coder_tool_parser: true
+feature_provenance:
+  int8_per_token_head: vllm-pr42102-dflash-kv-quant
+  turboquant_3bit_nc: genesis-v7.72.2
+  marlin_pad_sub_tile_n: vllm-pr40361-marlin-pad
+  qwen3_coder_tool_parser: vllm-pr35936-qwen3coder-tool-parser
+supported_kv_formats:
+  - bf16
+  - fp16
+  - fp8_e5m2
+  - fp8_e4m3
+  - turboquant_3bit_nc
+  - int8_per_token_head
+  - q4_0
+  - k8v4
+supported_drafters:
+  - eagle3
+  - mtp
+  - mtp_assistant
+  - dflash
+supported_weight_formats:
+  - bf16
+  - fp16
+  - autoround
+  - awq
+  - gptq
+required_overlays: []
+vendored_overlays:
+  - id: vllm-pr40361-marlin-pad
+    pr_url: https://github.com/vllm-project/vllm/pull/40361
+    upstream_status: filed
+    upstream_merged_in_version: null
+    local_status: vendored
+    purpose: "Marlin pad-sub-tile-n support for AutoRound INT4 TP paths."
+  - id: vllm-pr42102-dflash-kv-quant
+    pr_url: https://github.com/vllm-project/vllm/pull/42102
+    upstream_status: filed
+    upstream_merged_in_version: null
+    local_status: vendored
+    purpose: "DFlash and quantized target KV coexistence."
+  - id: vllm-pr35936-qwen3coder-tool-parser
+    pr_url: https://github.com/vllm-project/vllm/pull/35936
+    upstream_status: filed
+    upstream_merged_in_version: null
+    local_status: vendored
+    purpose: "Respect configured Qwen3 Coder tool parser for required tool choice."
+required_genesis: true
+genesis_pin: v7.72.2
+notes: "Full experimental overlay surface for Gemma INT8 PTH and Qwen tool-parser experiments. Launch exports this SHA as VLLM_NIGHTLY_SHA; VLLM_IMAGE can override the full image ref."
