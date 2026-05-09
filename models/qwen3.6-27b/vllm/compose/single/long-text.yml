@@ -141,6 +141,7 @@ services:
       - ../../cache/triton:/root/.triton/cache
       - ../../patches/genesis/vllm/_genesis:/usr/local/lib/python3.12/dist-packages/vllm/_genesis:ro
       - ../../patches/local/qwen3coder_tool_parser_deferred_commit.py:/patches/qwen3coder_tool_parser_deferred_commit.py:ro
+      - ../../../../../fixes:/fixes:ro
       # workspace_lock_disable DROPPED on v7.69 — Genesis PN34 covers the
       # boot-time AND runtime _decode_attention paths. Opt-in via
       # GENESIS_ENABLE_PN34_WORKSPACE_LOCK_RELAX=1 in environment block.
@@ -286,18 +287,13 @@ services:
       - GENESIS_ENABLE_P15B_FA_VARLEN_CLAMP=1
       - GENESIS_PREALLOC_TOKEN_BUDGET=4128
       - GENESIS_BUFFER_MODE=shared
-      # P40 — TQ k8v4 GQA grouping kernel (+15-30% on compute-regime GPUs, L2>=24MB).
-      # Default off (RTX 3090: 6MB L2 = no gain). Enable on RTX 5090/A100/H100.
-      - GENESIS_ENABLE_P40=${GENESIS_ENABLE_P40:-0}
-      # PN54 — GDN contiguous-call deduplication (Cliff 2b OOM mitigation).
-      - GENESIS_ENABLE_PN54=${GENESIS_ENABLE_PN54:-0}
       # Explicit OFFs to match Sandermage's PROD env-var set verbatim:
       # P78 (P78_TOLIST_CAPTURE_GUARD) — superseded by our patch_tolist_cudagraph.py
       # P81 (FP8 block-scaled M<=8) — FP8-specific, no-op on our TQ3 path
       # P82 — biased on small-batch single-stream Lorbus INT4 + MTP K=3 (Sander PROD)
       - GENESIS_ENABLE_P78_TOLIST_CAPTURE_GUARD=0
       - GENESIS_ENABLE_P81_FP8_BLOCK_SCALED_M_LE_8=0
-      - GENESIS_ENABLE_P82=${GENESIS_ENABLE_P82:-0}
+      - GENESIS_ENABLE_P82=0
       - GENESIS_P82_THRESHOLD_SINGLE=0.3
       # P82 stays OFF — biased on small-batch single-stream Lorbus INT4 + MTP K=3
       # per Sandermage's PROD memory feedback_p82_*. P78 stays OFF (deprecated).
@@ -309,7 +305,7 @@ services:
       # temp instead of a compact one, preserving DS layout. +6% TPS retained.
       - VLLM_SSM_CONV_STATE_LAYOUT=DS
       - VLLM_USE_FUSED_MOE_GROUPED_TOPK=1
-    shm_size: "16gb"
+    network_mode: host
     ipc: host
     deploy:
       resources:
@@ -339,8 +335,11 @@ services:
         bash /etc/club3090/install-pr41800.sh
         python3 -m vllm._genesis.patches.apply_all
         # Tool-parser deferred-commit fix for qwen3coder SSE-silence bug (issue #72).
-        # Drops out when vllm-project/vllm lands the upstream fix.
         python3 /patches/qwen3coder_tool_parser_deferred_commit.py
+        # Local sidecars (fixes/README.md): drafter-skip, vision-tower-skip, cliff2b fused GDN.
+        python3 /fixes/patch_drafter_skip.py
+        python3 /fixes/patch_vision_tower_skip.py
+        python3 /fixes/cliff2b/apply_cliff2b.py
         # vllm#40807 .tolist() capture-stream guard fix.
         # patch_inputs_embeds_optional.py — backport of vllm#35975
         # (free ~64 MiB GPU + ~64 MiB pinned CPU on text-only models).
@@ -353,7 +352,11 @@ services:
       - --model
       - /root/.cache/huggingface/qwen3.6-27b-autoround-int4
       - --served-model-name
+      - qwen3.6
+      - qwen3.6-autoround
       - qwen3.6-27b-autoround
+      - qwen3.6-hindsight
+      - qwen3.5-9b-hindsight
       - --quantization
       - auto_round
       - --dtype
@@ -382,7 +385,7 @@ services:
       # club-3090#16 — different bug (Cliff 1 mech B inductor leak), not
       # fixed by mem-util tuning. Use tools-text.yml for those.
       - --max-model-len
-      - "${MAX_MODEL_LEN:-180000}"
+      - "${MAX_MODEL_LEN:-80000}"
       # 0.95 — backed off from 0.97 on 2026-05-01 PM after PN25 v3 closed
       # Cliff 1 mech B at the FFN intermediate buffer (which now sits in
       # PN12+PN25's resident FFNIntermediateCache pool). Pool residence
@@ -391,13 +394,16 @@ services:
       # 0.97 left only 26 MiB free, OOM at 9.8K probe. 0.95 frees ~480 MiB
       # activation budget, validated up to 30K probes.
       - --gpu-memory-utilization
-      - "${GPU_MEMORY_UTILIZATION:-0.93}"
+      - "${GPU_MEMORY_UTILIZATION:-0.95}"
       - --max-num-seqs
-      - "1"
+      - "6"
       - --max-num-batched-tokens
       - "4128"
+      - --num-gpu-blocks-override
+      - "68"
+      - --kv-cache-metrics
       - --kv-cache-dtype
-      - "${KV_CACHE_DTYPE:-turboquant_3bit_nc}"
+      - turboquant_3bit_nc
       # Drops the vision tower → frees ~1 GB VRAM → lifts engine ceiling from
       # 198K (long-vision at 0.98) to 218K (this variant at 0.985). This is the only difference vs long-vision.
       - --language-model-only
@@ -407,8 +413,6 @@ services:
       - /etc/qwen-froggeric-chat-template.jinja
       - --reasoning-parser
       - qwen3
-      - --default-chat-template-kwargs
-      - '{"enable_thinking": false}'
       - --enable-auto-tool-choice
       - --tool-call-parser
       - qwen3_coder
@@ -420,4 +424,4 @@ services:
       - --host
       - 0.0.0.0
       - --port
-      - "8000"
+      - "8020"
