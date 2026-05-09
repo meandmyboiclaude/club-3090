@@ -250,6 +250,7 @@ services:
       - GENESIS_ENABLE_PN11_GDN_AB_CONTIGUOUS=1
       - GENESIS_ENABLE_PN12_FFN_INTERMEDIATE_POOL=1
       - GENESIS_ENABLE_PN13_CUDA_GRAPH_LAMBDA_ARITY=1
+      - VLLM_ENFORCE_EAGER=1
       - GENESIS_ENABLE_PN14_TQ_DECODE_OOB_CLAMP=1
       - GENESIS_ENABLE_PN17_FA2_LSE_CLAMP=1
       - GENESIS_ENABLE_PN25_SILU_INDUCTOR_SAFE=1
@@ -394,9 +395,9 @@ services:
       # 0.97 left only 26 MiB free, OOM at 9.8K probe. 0.95 frees ~480 MiB
       # activation budget, validated up to 30K probes.
       - --gpu-memory-utilization
-      - "${GPU_MEMORY_UTILIZATION:-0.95}"
+      - "${GPU_MEMORY_UTILIZATION:-0.88}"
       - --max-num-seqs
-      - "6"
+      - "3"
       - --max-num-batched-tokens
       - "4128"
       - --num-gpu-blocks-override
