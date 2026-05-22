@@ -2,6 +2,8 @@
 
 The fastest path from `git clone` to serving your first response. No decisions, no menus — just commands.
 
+> New to local AI and the terms below feel like jargon? Read [LOCAL_AI_PRIMER.md](LOCAL_AI_PRIMER.md) first — how hardware, engines, model sizes, and quants fit together in plain English.
+
 ```bash
 # 1. Clone
 git clone https://github.com/noonghunna/club-3090.git

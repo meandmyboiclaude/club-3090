@@ -292,7 +292,7 @@ Q1: Does the model fit your VRAM at desired quant?
 ### ik_llama.cpp
 - **Smaller community than mainline llama.cpp** — bugs take longer to surface, fewer cross-rig data points.
 - **No tagged releases** — rolls on main; no version pinning story for production users.
-- **No official Docker image** — same friction as ktransformers (would need to containerize ourselves).
+- ~~No official Docker image~~ — **corrected 2026-05-21:** an official image ships (`ghcr.io/ikawrakow/ik-llama-cpp:cu13-server`) and this stack now uses it for the **[advanced-quant track](engines/IK_LLAMA.md)** — fork-exclusive **IQK imatrix quants** (`IQ4_KS`), the best quality-per-bit in the GGUF world. See [QUANTIZATION.md](QUANTIZATION.md).
 - **Diverging quant naming from mainline** — IQ_K series flags differ; cross-engine GGUF compatibility caveats.
 - **Spec-decode coverage narrow** — MTP merged but no EAGLE3 / DFlash; lags mainline on those research paths.
 - **Smaller maintainer surface** — primarily Iwan Kawrakow + a handful of contributors. Not the right pick for production where you need >1 person to debug a kernel issue.

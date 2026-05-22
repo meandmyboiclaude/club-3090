@@ -16,6 +16,22 @@ history; SemVer takes over from `v0.3.0` onward.
 
 ---
 
+## v0.8.3 — 2026-05-20
+
+
+### 📝 Documentation
+
+- docs: add LOCAL_AI_PRIMER.md — plain-English on-ramp for newcomers ([b07b2f9](https://github.com/noonghunna/club-3090/commit/b07b2f99e78809641427900044fa73cd41574c0f))
+
+
+### 🧹 Other
+
+- BENCHMARKS: add llamacpp/mtp + llamacpp/mtp-vision rows ([37c739b](https://github.com/noonghunna/club-3090/commit/37c739b4f9e37e3c3a5eb0fe51b5dd8e6b011abc))
+- llama.cpp single: thinking-off policy alignment + MTP profile family ([ed15071](https://github.com/noonghunna/club-3090/commit/ed1507122cfd20627315de99d8258aa494f8cb4a))
+
+
+
+[Pin: `git checkout v0.8.3`] · [Full diff](https://github.com/noonghunna/club-3090/compare/v0.8.2...v0.8.3)
 ## v0.8.2 — 2026-05-19
 
 

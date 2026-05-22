@@ -39,7 +39,9 @@ Five recommended options on Genesis v7.69 + vllm#35975 backport (2026-05-02 PM):
 | **Long ctx, text-only — Balanced MTP** ⭐ (RAG, codebase, IDE agents, default) | [`long-text.yml`](../models/qwen3.6-27b/vllm/compose/single/long-text.yml) | **180K** | 50 / 67 | ~22.3 GB (mem-util 0.93) |
 | **Long ctx, text-only — Max-context** (long single-shot RAG / codebase analysis) | [`long-text-no-mtp.yml`](../models/qwen3.6-27b/vllm/compose/single/long-text-no-mtp.yml) (NEW) | **200K** | TBD/TBD (slow decode, no MTP) | ~21.0 GB (mem-util 0.95) |
 | **Bounded thinking** (coding agents, structured-CoT — recommended grammar: DeepSeek scratchpad, 87.4% combined HE+/LCB v6) — see [STRUCTURED_COT.md](STRUCTURED_COT.md) | [`bounded-thinking.yml`](../models/qwen3.6-27b/vllm/compose/single/bounded-thinking.yml) | **180K** | 50 / 66 | ~21.7 GB (mem-util 0.95) |
-| **Bulletproof, no cliffs** (production service, unpredictable inputs) | [`llamacpp/default`](../models/qwen3.6-27b/llama-cpp/compose/docker-compose.yml) | **262K** | 21 / 21 | ~20 GB |
+| **Bulletproof, no cliffs** (production service, unpredictable inputs) | [`llamacpp/default`](../models/qwen3.6-27b/llama-cpp/compose/single/docker-compose.yml) | **262K** | 21 / 21 | ~20 GB |
+| **llama.cpp + MTP, fast + long ctx** ⭐ (IDE agents, opencode, Hermes, long-multi-turn agentic) | [`llamacpp/mtp`](../models/qwen3.6-27b/llama-cpp/compose/single/mtp.yml) | **131K** | **51 / 60** | ~22.5 GB |
+| **llama.cpp + MTP + vision** (multimodal chat, screenshot-debugging, vision-aware review) | [`llamacpp/mtp-vision`](../models/qwen3.6-27b/llama-cpp/compose/single/mtp-vision.yml) | **49K** | **57 / 66** | ~20.5 GB |
 | **Small-context vLLM safe path** ([@stiggy2k16](https://github.com/noonghunna/club-3090/issues/43) data point) — IDE agents capped at <60K accumulated, when you need vLLM speed but llama.cpp is too slow | [`minimal.yml`](../models/qwen3.6-27b/vllm/compose/single/minimal.yml) at `--gpu-memory-utilization 0.95 --max-model-len 65536` | **64K** | ~32 / ~33 (no MTP) | ~22.4 GB |
 
 Run via `bash scripts/launch.sh` (interactive) or `bash scripts/switch.sh <variant>`.
@@ -115,6 +117,24 @@ For the cross-card TP=2 picture, see [`DUAL_CARD.md`](DUAL_CARD.md).
 
 `bash scripts/switch.sh llamacpp/default`. Q3_K_XL (Unsloth dynamic) + q4_0 KV at 262K + vision (mmproj). Different attention library entirely (ggml-cuda, not FA2) → no Cliff 1 mechanism, no Cliff 2 mechanism. Trade is ~21 TPS (~2.5× slower than vLLM). Quant validated by [Benjamin Marie's Kaitchup eval](https://kaitchup.substack.com/p/summary-of-qwen36-gguf-evals-updating).
 
+### llama.cpp + MTP, fast + long ctx — `llamacpp/mtp` ⭐
+
+**Workload:** IDE agents (opencode, Cline), Hermes, multi-turn agentic. The single-card sweet spot for "fast enough + plenty of context + bulletproof."
+
+`bash scripts/switch.sh llamacpp/mtp`. Q4_K_M MTP-enabled GGUF (`unsloth/Qwen3.6-27B-MTP-GGUF`) + q4_0 KV + MTP `n=2` + `-ub 1024`. Mainline llama.cpp build 9235 (PR #22673 MTP merged). **~51 narr / ~60 code TPS** — ~2.5× faster than `llamacpp/default`, only marginally slower than vLLM single-card paths *and* without the cliffs. **Quality 102/150 (68%) on the 8-pack matrix beats every Qwen vLLM dual config in [#119](https://github.com/noonghunna/club-3090/discussions/119)**; **aider-polyglot 17/30 exactly matches Qwen vLLM bf16 dual on half the hardware**. **Verify-stress 7/7** including 60K + 91K needle recall — the Cliff 2 narrative is **config-driven, not architectural**: at this config the model walks past 91K cleanly on a single 3090. No vision (mmproj cost trades against KV pool); for multimodal, use `llamacpp/mtp-vision` below.
+
+### llama.cpp + MTP + vision — `llamacpp/mtp-vision`
+
+**Workload:** multimodal chat, screenshot-debugging, vision-aware code review, UI-screenshot agents. The first stack profile combining MTP + vision on a single 3090 (the older "strip mmproj when MTP" rule was obsolete on build 9235 — sweep-verified 2026-05-19).
+
+`bash scripts/switch.sh llamacpp/mtp-vision`. Same Q4_K_M MTP GGUF + q4_0 KV + MTP `n=2` + `-ub 1024`, **with `--mmproj mmproj-F16.gguf` mounted**. Ctx 49K is the **speed-optimal** default (vision overhead trades against KV pool). **~57 narr / ~66 code TPS** (text path), vision overhead paid once at image-encode, not per decoded token. Verify-stress 7/7 at this config.
+
+> **Need more context for agentic vision workloads?** Drop `-ub 1024 → 512` and you can push ctx to **192K** with full cliff coverage (verify-stress 7/7 incl. 91K needle), at the cost of ~10% TPS:
+> ```bash
+> UBATCH_SIZE=512 CTX_SIZE=196608 bash scripts/switch.sh llamacpp/mtp-vision
+> ```
+> Sweep data + reasoning in [`models/qwen3.6-27b/llama-cpp/README.md`](../models/qwen3.6-27b/llama-cpp/README.md#speed-vs-context--pick-your-trade-off). Surfaced 2026-05-20 by @JensJN in [#170](https://github.com/noonghunna/club-3090/discussions/170).
+
 ---
 
 ## Other variants in the repo (not recommended for shipping)
@@ -125,34 +145,41 @@ These exist for troubleshooting, niche workloads, or historical comparison. Not 
 - **`tools-text.yml`** — 75K + FP8 KV + PN8. Was the only Cliff-1-safe single-card path before PN12 anchor fix landed. FP8 KV is closer in quality to FP16 than TQ3 is, so kept around for accuracy-sensitive comparisons. Most IDE-agent workloads now run fine on `long-text.yml`.
 - **`minimal.yml`** — 32K + FP8 + no Genesis + no spec-decode. Stripped-down stack for isolating "is this a Genesis bug?" questions. Half the throughput of any other variant.
 
-## Watch list — Luce DFlash (not yet a recommendation)
+## Watch list — Luce DFlash + PFlash (not yet a recommendation)
 
-Re-tested 2026-04-30 PM against [`Luce-Org/lucebox-hub`](https://github.com/Luce-Org/lucebox-hub) on Qwen3.6-27B Q4_K_M target + matched z-lab/Qwen3.6-27B-DFlash draft. **Closer to parity than 2026-04-22 — but several gaps still keep it off the recommended list:**
+Re-tested **2026-05-20** against [`Luce-Org/lucebox-hub`](https://github.com/Luce-Org/lucebox-hub) HEAD `248e191` on Qwen3.6-27B Q4_K_M target + the released [`Lucebox/Qwen3.6-27B-DFlash-GGUF`](https://huggingface.co/Lucebox/Qwen3.6-27B-DFlash-GGUF) draft. **The 3.6 draft has shipped and PFlash now exists in the binary — but Luce still loses to [`llamacpp/mtp`](../models/qwen3.6-27b/llama-cpp/compose/single/mtp.yml) (v0.8.3) on every realistic workload except greedy-only code:**
 
-Measured TPS on this rig (RTX 3090, greedy, single-stream, n_gen=1000):
+Measured TPS on this rig (RTX 3090, single-stream, n_gen=1000):
 
-| Workload | Luce DFlash 3.6+3.6 (TQ3 KV, max_ctx=65K) | vLLM long-text 214K |
-|---|---|---|
-| Narrative essay | 37–47 TPS (mean ~40) | 50 TPS |
-| Code (heap/LRU/AST) | 63–76 TPS (mean ~72) | 67 TPS |
-| AL (code) | 5.9–7.1 | 3.4–3.8 (MTP) |
+| Workload | Luce DFlash @ temp=0.0 (greedy) | Luce DFlash @ temp=0.6 (realistic) | **llamacpp/mtp (any temp)** |
+|---|---|---|---|
+| Narrative essay | 37–47 TPS (mean ~40) | ~20 TPS (DDTree silent → AR-equivalent) | **51 TPS** ⭐ |
+| Code (heap/LRU/AST) | 63–76 TPS (mean ~72) | ~20 TPS | **60 TPS** |
+| AL (code) | 5.9–7.1 | n/a (DDTree off) | 3.4 (MTP) |
 
-What works since 2026-04-22:
-- ✅ **Tool calls** via `server_tools.py` — parses Qwen `<tool_call>` format → returns OpenAI `tool_calls[]`. The big server-UX gap from last bench is closed.
+What works at HEAD 248e191:
+- ✅ **Tool calls** via native Qwen3 path (no `server_tools.py` patch needed anymore).
 - ✅ **Streaming SSE** with `reasoning_content` deltas.
 - ✅ **Daemon mode** with cache-reuse for fast cold starts.
-- ✅ **Verify-stress 25K tool-prefill passes** at TQ3 KV + max_ctx=65K.
+- ✅ **PFlash compresses at small source ctx** — verified 2026-05-20: 12K source → 1011 tokens kept (8.2%) → 3.3s response. PFlash drafter (Qwen3-0.6B BF16) loads cleanly when max-ctx ≤ 16K. No truncation when prompt format avoids tight-instruction phrasings.
 
-What still keeps it off the recommended list:
-- ❌ **Greedy only** — `temperature` / `top_p` ignored. Real downside for creative-writing workloads.
-- ❌ **3.6 draft under-trained** (z-lab snapshot 2026-04-26). Narrative AL ~3.7 vs code ~7.0; narr loses ~20% TPS to vLLM until training completes.
+What still keeps it off the recommended list (re-confirmed 2026-05-20):
+- ❌ **Greedy only.** At temp > 0, DDTree silently disables and decode collapses to ~20 TPS (AR-equivalent). Kills chat / IDE-agent / creative-writing workloads. This is THE shipping gate.
+- ❌ **Loses to llamacpp/mtp at realistic temperatures.** 20 t/s vs 51–60 t/s — AND llamacpp/mtp ships clean via `ghcr.io/ggml-org/llama.cpp:server-cuda` (no source build, no Python+CUDA toolchain).
+- ❌ **PFlash on single 3090 is structurally constrained via the C++ HTTP server.** Drafter (1.43 GB) + target + KV + DDTree workspace = OOM at max-ctx ≥ 32K. Working ceiling is max-ctx=16K → caps source prompts at 16K, far below the headline 128K claim. Luce's published 128K bench is via different binaries (Python `server.py` or `test_dflash`), not the production HTTP server we'd ship. Dual GPU may unlock the C++ HTTP path at long source ctx — untested.
+- ❌ **Verify-stress prompt format triggers premature EOS at long-ctx + greedy.** "Reply with only the phrase, no other text" returns one word; rephrased prompts recall correctly. Same shape as Luce upstream [#121](https://github.com/Luce-Org/lucebox-hub/issues/121) (closed via PR #128, which IS in our build) but extends to the non-PFlash + FP16-KV path. Not a script bug; a Luce + greedy + tight-instruction interaction.
 - ❌ **No vision** tower.
 - ❌ **`enable_thinking` chat_template_kwargs handled differently** than vLLM — verify-full check 6 fails.
-- ❌ **Prefill cliff at higher max_ctx** — 25K tool prefill OOMs in `fattn-chunked.cu` at Q8_0 KV + max_ctx=65K (TQ3 KV closes it). At max_ctx=131K + TQ3, the daemon subprocess crashes (broken-pipe to FastAPI) on 30K+ probes.
-- ❌ **Build fragility** — fresh `git clone` of `dflash` main HEAD fails to compile (`ggml_turbo_wht` / `GGML_TYPE_TQ3_0` undefined) until you `git submodule update --init` after manual `git fetch` in `dflash/deps/llama.cpp`.
-- ❌ **Daemon-mode "empty prompt" regression** — after streaming requests, subsequent requests sometimes return 0 tokens; needs server restart.
+- ❌ **Daemon-mode hang at long source ctx.** Observed 2026-05-20: the first ≥50K request can lock the GPU for minutes, blocking subsequent requests; cleared by server restart.
+- ❌ **Build fragility** — fresh `git clone` of `dflash` requires `git submodule update --init`, plus `-DCMAKE_CUDA_ARCHITECTURES=86 -DDFLASH27B_ENABLE_BSA=ON`. No upstream docker image.
 
-**Re-test trigger:** z-lab tags the Qwen3.6-27B-DFlash draft as training-complete OR Luce-Org publishes a tagged release with the daemon-mode bug fixed. Track in [`docs/UPSTREAM.md`](UPSTREAM.md#luce-dflash-luce-orglucebox-hub).
+**Re-test triggers (any one would change the verdict):**
+- Luce upstream adds non-greedy sampling support to DDTree (single biggest unblock — opens chat/IDE workloads)
+- Luce-Org publishes an official docker image (removes build/toolchain burden, satisfies the club-3090 "image pulls and runs" substrate)
+- Luce's C++ HTTP server validates source length **after** PFlash compression (would let single 3090 reach the 128K source claim through the production server)
+- We add a dual-GPU compose target and confirm PFlash drafter fits
+
+Track in [`docs/UPSTREAM.md`](UPSTREAM.md#luce-dflash-luce-orglucebox-hub).
 
 ---
 

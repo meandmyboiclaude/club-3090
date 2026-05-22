@@ -2,6 +2,8 @@
 
 Plain-language definitions for terms used throughout the docs. Roughly grouped by topic.
 
+> Want the *narrative* version — how hardware / engines / sizes / quants fit together — instead of isolated definitions? See [LOCAL_AI_PRIMER.md](LOCAL_AI_PRIMER.md).
+
 > Coming from a different background and don't see something here? Open an issue and we'll add it.
 
 ---

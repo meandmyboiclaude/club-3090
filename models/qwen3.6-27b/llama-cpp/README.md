@@ -22,7 +22,7 @@ For full pros/cons + general llama.cpp tuning, see [`/docs/engines/LLAMA_CPP.md`
 
 ## Docker compose (recommended)
 
-Two compose files in [`compose/`](compose/) — both use the official `ghcr.io/ggml-org/llama.cpp:server-cuda` image, no custom build needed.
+Three compose variants in [`compose/single/`](compose/single/) — all use the official rolling `ghcr.io/ggml-org/llama.cpp:server-cuda` image, **no custom build needed**, **no club-3090 patches** (unlike our vLLM track). MTP PR #22673 has merged upstream so the rolling tag has it natively. Pin to a specific build via `LLAMACPP_IMAGE=ghcr.io/ggml-org/llama.cpp:server-cuda-bXXXX` env if you want to lock against upstream drift; otherwise `docker compose pull` picks up upstream's latest. Bench numbers were measured on build `b9246` (2026-05-20); expect ±5% drift on newer builds.
 
 ### `docker-compose.yml` — max context, single slot, vision
 
@@ -35,22 +35,51 @@ MODEL_DIR=/your/models/dir docker compose up -d
 
 Memory budget: 14.5 GB (Q3_K_XL) + 4.5 GB KV @ 262K + 0.8 GB mmproj ≈ 20 GB / 24 GB.
 
-### `single/concurrent.yml` — 4 parallel slots, vision
+### `single/mtp.yml` — MTP n=2, 131K ctx, no vision
 
-Trade max context for parallelism. Same image, `--parallel 4` + smaller ctx pool.
+The single-card speed + context workhorse: ~51/60 TPS (narr/code), 131K ctx (sweep-verified safe-headroom max), 7/7 verify-stress boundary checks (incl. 60K + 91K needle recall), 102/150 (68%) on the 8-pack quality matrix. Best for IDE agents, opencode, Hermes, long-multi-turn agentic. Q4_K_M MTP GGUF (`unsloth/Qwen3.6-27B-MTP-GGUF` Q4_K_M).
+
+### `single/mtp-vision.yml` — MTP n=2, 49K ctx, vision on
+
+Multimodal speed profile — the first stack config combining MTP + vision (the older "strip mmproj when MTP" rule was obsolete on build 9235, sweep-verified 2026-05-19). 49K safe-headroom ceiling on 24 GB with mmproj F16 mounted.
 
 ### Tuning knobs
 
-Both Docker composes expose llama.cpp's batch-size controls without editing YAML:
+All three Docker composes expose llama.cpp's batch-size + KV controls without editing YAML:
 
 | Env var | llama.cpp flag | Default | Sensible range on 24 GB | Notes |
 |---|---|---:|---:|---|
+| `CTX_SIZE` | `-c` | varies by variant | up to ~256K (q4_0 KV) | KV pool size. See per-variant defaults below. |
 | `BATCH_SIZE` | `-b` | `4096` | `2048`-`8192` | Logical prompt-processing batch. Higher can improve prefill throughput if VRAM headroom allows. |
-| `UBATCH_SIZE` | `-ub` | `2048` | `1024`-`4096` | Physical microbatch. Lower this first if long prompts OOM during prefill. |
+| `UBATCH_SIZE` | `-ub` | `1024` | `512`-`4096` | Physical microbatch. **Lower this first if long prompts OOM during prefill** — but it also has a major impact on max-context (see next section). |
+| `KV_TYPE` | `--cache-type-k/-v` | `q4_0` | `q4_0`, `q5_0`, `q8_0` | Lower KV bits-per-value = more ctx fits at same VRAM (quality trade-off is small at q4_0 for this model). |
 
 These are throughput-tuning knobs inside llama.cpp. They are orthogonal to
 `ESTATE_GPUS` and `ESTATE_PORT`, which only isolate GPU assignment and host port
 when `scripts/launch.sh --estate` boots multiple instances.
+
+### Speed vs context — pick your trade-off
+
+`UBATCH_SIZE` (the `-ub` chunked-prefill chunk) is doing two jobs at once: it caps the **per-pass activation buffer** (cliff-survival for tool prefill) AND it eats into the **VRAM budget that could otherwise go to KV cache**. We ship `1024` as the default sweet spot, but you can rebalance:
+
+**For `llamacpp/mtp-vision` specifically** — the vision encoder (mmproj F16, ~0.8 GB) competes for the same VRAM budget. The shipped 49K ctx + ub=1024 is the **speed-optimal** point on a single 3090. If you need more ctx for agentic vision workloads (UI navigation, multi-step tool use, long screenshots-in-context), drop `-ub` to 512 and you can push context up to 192K with full cliff coverage:
+
+```bash
+# Tested 2026-05-20 on single 3090, verify-stress 7/7 (incl. 60K + 91K needle):
+UBATCH_SIZE=512 CTX_SIZE=196608 bash scripts/switch.sh llamacpp/mtp-vision
+```
+
+| Config | ctx | VRAM | narr TPS | verify-stress | When to pick |
+|---|---|---:|---:|:---:|---|
+| shipped: `ub=1024` | 49K | 22.0 GB | **56.5** | 7/7 ✓ | speed-first, short context |
+| override: `ub=512 CTX=131072` | 131K | 21.0 GB | 50.0 | 7/7 ✓ | balanced (extra headroom) |
+| override: `ub=512 CTX=196608` | **192K** | 22.5 GB | 50.9 | 7/7 ✓ | **max ctx with cliff coverage** |
+
+So ~10% TPS hit (56.5 → 50.9 narr) buys ~4× more context (49K → 192K). For pure-chat / short-prompt workloads, keep the default. For agentic vision, override.
+
+**For `llamacpp/mtp` (no vision)** — the same `-ub` 512 trade applies but with smaller margins (no mmproj competing for VRAM). Probe with `UBATCH_SIZE=512 CTX_SIZE=196608 bash scripts/switch.sh llamacpp/mtp` if you need more than the shipped 131K — we haven't shipped this as a default but the lever is there.
+
+**For `llamacpp/default`** — already at the model's training-max 262K ctx; `-ub` is not a useful lever (no ctx upside, only TPS cost). Keep the default `1024`.
 
 ---
 

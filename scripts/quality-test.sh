@@ -53,18 +53,32 @@ OPTIONS
                    Skips the deterministic packs — useful when iterating on
                    sandbox verifiers without paying the deterministic-pack cost.
 
+OPTIONS (extra)
+  --model NAME     Pin the served-model-name. When set (here or via MODEL env),
+                   we use YOUR value and never override it from /v1/models —
+                   required for llama-swap / multi-model endpoints where
+                   /v1/models returns the first (often wrong) registered model.
+  --timeout-per-case N
+                   Pass through to benchlocal-cli as --timeout-per-case N
+                   (seconds). Default: 60. For aider-polyglot-30 on low-power
+                   single-card rigs, bump to 3600+ to avoid mid-batch kills.
+
 ENV VARS
   URL              Endpoint base URL (default: auto-detected via preflight,
                    falls back to http://localhost:8020)
-  MODEL            Served model name (default: auto-detected from /v1/models;
-                   override only if you have a non-standard served-model-name)
-  TIMEOUT_PER_CASE Per-scenario HTTP timeout in seconds (default: 60)
+  MODEL            Served model name. If set (env or --model), it's respected
+                   verbatim — no /v1/models override. If UNSET, auto-detected
+                   from /v1/models (fixes the wrong-name → HTTP 404 footgun on
+                   single-model composes). --model and MODEL are equivalent.
+  TIMEOUT_PER_CASE Per-scenario HTTP timeout in seconds (default: 60).
+                   --timeout-per-case overrides this when both are set.
 
 EXAMPLES
   bash scripts/quality-test.sh                          # --medium against running compose
   bash scripts/quality-test.sh --quick                  # quicker, 2 packs only
   bash scripts/quality-test.sh --full                   # everything, needs Docker
   bash scripts/quality-test.sh --pack toolcall-15       # just the tool-call pack
+  bash scripts/quality-test.sh --pack aider-polyglot-30 --timeout-per-case 3600
   URL=http://localhost:8030 bash scripts/quality-test.sh # against a different port
 
 INSTALL benchlocal-cli (one-time)
@@ -91,6 +105,13 @@ if [[ -f "${ROOT_DIR}/scripts/preflight.sh" ]]; then
 fi
 
 URL="${URL:-http://localhost:8020}"
+# Track whether the user explicitly set MODEL (via env or the --model flag).
+# If they did, we respect it and do NOT clobber it with the /v1/models
+# auto-detect below — critical for llama-swap / multi-model endpoints where
+# /v1/models returns the first (often wrong) registered model. Auto-detect
+# only kicks in when the user left MODEL unset.
+MODEL_EXPLICIT=0
+[[ -n "${MODEL:-}" ]] && MODEL_EXPLICIT=1
 MODEL="${MODEL:-qwen3.6-27b-autoround}"
 TIMEOUT_PER_CASE="${TIMEOUT_PER_CASE:-60}"
 
@@ -116,6 +137,15 @@ while [[ $# -gt 0 ]]; do
       fi
       shift 2
       ;;
+    --model)
+      MODEL="${2:-}"
+      if [[ -z "$MODEL" ]]; then
+        echo "✗ --model requires a served-model-name" >&2
+        exit 2
+      fi
+      MODEL_EXPLICIT=1
+      shift 2
+      ;;
     --no-sandboxed)
       NO_SANDBOX=1
       shift
@@ -127,6 +157,14 @@ while [[ $# -gt 0 ]]; do
     --list-packs)
       LIST_PACKS=1
       shift
+      ;;
+    --timeout-per-case)
+      TIMEOUT_PER_CASE="${2:-}"
+      if [[ -z "$TIMEOUT_PER_CASE" ]] || ! [[ "$TIMEOUT_PER_CASE" =~ ^[0-9]+$ ]]; then
+        echo "✗ --timeout-per-case requires a positive integer (seconds)" >&2
+        exit 2
+      fi
+      shift 2
       ;;
     -h|--help)
       usage
@@ -168,13 +206,26 @@ if ! curl -sf -m 5 "${URL}/v1/models" >/dev/null 2>&1; then
   exit 1
 fi
 
-# Resolve actual served model id from the running endpoint, in case MODEL was wrong
+# Resolve the served model id from /v1/models. Behaviour depends on whether
+# the user explicitly set MODEL:
+#   - MODEL unset  → trust the endpoint, auto-detect (fixes the common "wrong
+#                    model name → HTTP 404" footgun on single-model composes).
+#   - MODEL set    → respect the user's value, do NOT override. Only warn if
+#                    the endpoint disagrees. This is the llama-swap / multi-model
+#                    case: /v1/models returns the first registered model (often
+#                    the wrong one), and clobbering the user's choice routes the
+#                    whole run at the wrong model (see disc #152, @ampersandru).
 DETECTED_MODEL=$(curl -sf -m 5 "${URL}/v1/models" 2>/dev/null \
   | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data'][0]['id'])" 2>/dev/null \
   || echo "")
 if [[ -n "$DETECTED_MODEL" && "$DETECTED_MODEL" != "$MODEL" ]]; then
-  echo "[quality-test] model id from endpoint: ${DETECTED_MODEL} (overriding MODEL=${MODEL})" >&2
-  MODEL="$DETECTED_MODEL"
+  if [[ "$MODEL_EXPLICIT" == "1" ]]; then
+    echo "[quality-test] NOTE: endpoint /v1/models reports '${DETECTED_MODEL}', but you set MODEL='${MODEL}' — using YOUR value." >&2
+    echo "[quality-test]   (Expected on llama-swap/multi-model endpoints. Leave MODEL unset to auto-detect the first served model instead.)" >&2
+  else
+    echo "[quality-test] model id auto-detected from endpoint: ${DETECTED_MODEL} (set MODEL=... or --model to pin it)" >&2
+    MODEL="$DETECTED_MODEL"
+  fi
 fi
 
 # hermesagent-20 runs its agent inside a Docker sandbox container. Localhost-style

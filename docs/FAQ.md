@@ -131,6 +131,17 @@ So pick by workload: INT8 PTH if you want max single-stream TPS and don't need m
 
 If your numbers on the same compose look different from ours by >15%, the most likely sources of the gap are: power cap (370W vs 290W = ~10-15%), vLLM nightly (pre-#41434 was ~15% slower on Qwen3-Next due to GPU↔CPU syncs in attention), Genesis patches loaded vs not (~10-15% via P67 + PN12 + PN25 on Qwen3-Next), MTP `n` value, or the prompt shape. Run `bash scripts/rebench-full.sh` to capture the canonical 5-phase numbers and we can compare apples-to-apples — see the [Numbers from your rig](https://github.com/noonghunna/club-3090/issues/new?template=numbers-from-your-rig.yml) issue template to share them back.
 
+If you're running an OpenAI-compatible endpoint that **isn't** one of our pre-baked Docker composes — `llama-swap`, `ramalama`, a host-build `llama-server`, `ik_llama.cpp`, raw vLLM, etc. — pass it explicitly:
+
+```bash
+bash scripts/rebench-full.sh \
+  --url http://HOST:PORT \
+  --model 'served-model-name' \
+  --engine vllm|llama-cpp|sglang|other
+```
+
+The chained scripts run in host-only mode (no `docker logs` / `docker inspect` scrapes) when `--url` is set, so the entire suite works against any OpenAI-API endpoint.
+
 ---
 
 ## Community
@@ -284,7 +295,9 @@ Symptoms users report: "performance degrades after 20 turns", "throughput drops 
 bash scripts/switch.sh vllm/dual    # 111+ TPS p50, 0 errors, 0 MiB growth across 5 sessions
 
 # 1× 3090 — different engine, different kernels, different allocator
-bash scripts/switch.sh llamacpp/default    # 21 TPS, 262K context, cliff-immune
+bash scripts/switch.sh llamacpp/default      # 21 TPS, 262K context, cliff-immune, vision
+bash scripts/switch.sh llamacpp/mtp          # ~60 code TPS, 131K, MTP, 7/7 verify-stress (incl. 91K needle)
+bash scripts/switch.sh llamacpp/mtp-vision   # ~66 code TPS, 49K + vision (multimodal MTP — drop UBATCH_SIZE to 512 + raise CTX_SIZE to 196608 if you need long ctx; see SINGLE_CARD.md)
 ```
 
 **Want to verify your rig hits the same class:**
@@ -301,6 +314,16 @@ SOAK_MODE=continuous SOAK_SESSIONS=5 SOAK_TURNS=5 \
 **What's in flight:** Genesis sidecar streaming refactor of `chunk_gated_delta_rule_fwd` being filed with Sandermage. ETA 2-4 weeks if accepted. Check [#41](https://github.com/noonghunna/club-3090/issues/41) for the canonical fix-tracking thread.
 
 **Why this happens** (one-paragraph): the GDN forward kernel holds ~500 MiB of simultaneous intermediate tensors at T=4128 prefill chunks. With accumulated multi-turn KV cache (~5 GiB at 25K context) + model weights (14 GiB) + MTP draft (5 GiB) + other workspace, the per-card peak exceeds the 24 GiB ceiling. The fix is rewriting the kernel to stream those intermediates segment-by-segment instead of holding them simultaneously — that's upstream work in `vllm/model_executor/layers/fla/ops/` or via Genesis sidecar. Detailed mechanism analysis in [`docs/CLIFFS.md`](CLIFFS.md) "Why TP=2 escapes" and "Why llama.cpp escapes" sections.
+
+### Random crashes under sustained load on an AMD platform (Threadripper / Ryzen / EPYC)?
+
+Intermittent crashes during long runs — a `tokenizers` Rust segfault (`free(): invalid next size`), a Triton "unspecified launch failure", or both GPUs dropping out at once — are often the **AMD-Vi IOMMU** faulting under sustained TP=2 DMA, not a model bug. Check the kernel log:
+
+```bash
+dmesg | grep -E "AMD-Vi.*IO_PAGE_FAULT|Xid.*154"
+```
+
+If you see `AMD-Vi … IO_PAGE_FAULT` + `Xid … 154`, add **`iommu=pt`** to your kernel command line — the IOMMU stays on (isolation / PCIe grouping intact) but device DMA bypasses page-table translation, which clears it. No-op on Intel. Full writeup + kernel-log signature in [HARDWARE.md](HARDWARE.md) ("Note for AMD platforms"). Diagnosed by @mgabor3141 ([#178](https://github.com/noonghunna/club-3090/issues/178)).
 
 ## Troubleshooting ladder — boot the simplest stack first
 

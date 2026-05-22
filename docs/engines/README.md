@@ -12,6 +12,7 @@ This repo's main path is **vLLM** because it has the deepest support for Qwen3-N
 |---|---|---|---|---|---|---|---|
 | **[vLLM](VLLM.md)** ⭐ | **Validated, production-grade** (this repo) | 50-53 narr / 66-70 code | 48K default · 75K IDE-agent · **198K vision · 214K text-only** | ✅ | ✅ | ✅ MTP n=3 | ✅ Full |
 | **[llama.cpp](LLAMA_CPP.md)** | Works mainline + [Luce DFlash fork](https://github.com/Luce-Org/lucebox-hub) for spec-decode | 35-60 (varies by quant + KV type) | **262K** (Q4_K_M + q4_0 KV) | ✅ (via mmproj) | ⚠️ Limited (no auto-tool-choice in server) | ✅ DFlash N=5 in fork | ⚠️ Partial |
+| **[ik_llama.cpp](IK_LLAMA.md)** ⭐ *advanced quants* | **Shipped — advanced-quant track** | ~62 narr / ~69 code (IQ4_KS+MTP) | **262K** (IQ4_KS + q4_0 KV) | ✅ (mmproj) | ✅ (template + parser) | ✅ MTP n=2 | ⚠️ Partial (llama.cpp-class) |
 | **[SGLang](../../models/qwen3.6-27b/sglang/README.md)** | **Re-test pending** (May 2026). Historical block partially out-of-date — DFlash + MTP have landed natively on SGLang mainline; Marlin pad-sub-tile-n fix status unknown. See sglang README for re-test plan. | n/a (untested) | n/a | ✅ | ✅ | ✅ DFlash + MTP native upstream (untested here) | ✅ Full |
 
 ---
@@ -100,7 +101,7 @@ Full plan in [models/qwen3.6-27b/sglang/README.md](../../models/qwen3.6-27b/sgla
 
 ## Quant choice (orthogonal to engine choice)
 
-The model itself comes in several quant formats. Engine-quant compatibility:
+The model itself comes in several quant formats. Engine-quant compatibility (full primer: **[QUANTIZATION.md](../QUANTIZATION.md)**):
 
 | Quant | Disk size | Engine fit | Notes |
 |---|---|---|---|
@@ -110,6 +111,7 @@ The model itself comes in several quant formats. Engine-quant compatibility:
 | GGUF Q4_K_M | ~16.8 GB | llama.cpp ✅ · vLLM ⚠️ experimental · SGLang ❌ | The default GGUF mid-range quant. Strong quality, broad ecosystem (Ollama, LM Studio, etc). |
 | GGUF UD-Q3_K_XL ([Unsloth](https://huggingface.co/unsloth/Qwen3.6-27B-GGUF)) | **~14.5 GB** | llama.cpp ✅ | Smaller than 4-bit options. Quality cost is small on Qwen3.6 (quantization-friendly), buys substantial KV cache room. |
 | GGUF Q3_K_M | ~13.6 GB | llama.cpp ✅ | More aggressive 3-bit; quality cost real but acceptable for many workloads. |
+| **GGUF IQ4_KS (imatrix)** ⭐ ([ubergarm](https://huggingface.co/ubergarm/Qwen3.6-27B-GGUF)) | **~15.1 GB** | **[ik_llama.cpp](IK_LLAMA.md) only** · llama.cpp ❌ · vLLM ❌ | Best quality-per-bit GGUF (imatrix + kernels co-designed for IQK grids). Smaller than Q4_K_M → **262K single-card**. Fork-exclusive — see [QUANTIZATION.md](../QUANTIZATION.md). |
 
 ### AutoRound vs GPTQ vs AWQ (within vLLM)
 
@@ -136,6 +138,7 @@ If MTP isn't a priority for your workload, GPTQ or AWQ are equally valid.
 - **[VLLM.md](VLLM.md)** — current setup (what this repo ships). Brief recap + tuning levers.
 - **[LLAMA_CPP.md](LLAMA_CPP.md)** — quick GGUF recipe, vision via mmproj, Luce DFlash fork pointer for spec-decode, gotchas around server feature parity.
 - **[SGLANG.md](SGLANG.md)** — current blocked state, what would unblock, when to revisit. TBD recipe placeholder until either Marlin pad lands upstream or DeltaNet rollback lands.
+- **[IK_LLAMA.md](IK_LLAMA.md)** ⭐ — the advanced-quant engine: fork-exclusive IQK imatrix quants (`IQ4_KS`), 262K single-card, MTP, `-khad` / `--merge-qkv`. Pairs with [QUANTIZATION.md](../QUANTIZATION.md).
 
 ---
 

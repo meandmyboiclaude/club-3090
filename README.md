@@ -29,7 +29,9 @@ bash scripts/launch.sh
 #    Or skip the wizard:
 #      bash scripts/launch.sh --variant vllm/default      # single-card chat (recommended)
 #      bash scripts/launch.sh --variant vllm/dual         # dual-card 262K + vision
-#      bash scripts/launch.sh --variant llamacpp/default  # single-card 262K, no cliffs
+#      bash scripts/launch.sh --variant llamacpp/default     # single-card 262K vanilla, no cliffs
+#      bash scripts/launch.sh --variant llamacpp/mtp         # single-card 131K + MTP (fast, ~60 code TPS)
+#      bash scripts/launch.sh --variant llamacpp/mtp-vision  # single-card 49K + MTP + vision
 #    Or partial flags (wizard fills the rest):
 #      bash scripts/launch.sh --model qwen3.6-27b --gpus 0,1
 #      bash scripts/launch.sh --tp 2 --pp 1               # override vLLM parallelism
@@ -68,9 +70,11 @@ bash scripts/update.sh
 - **Model-agnostic**: today ships curated configs for Qwen3.6-27B and friends; structure scales as we add models
 - **Universal `pull`** (v0.8.0; extended in v0.8.2) — evaluate any safetensors HF repo, get an honest one-line fit verdict (`--recommend`), and when a pull hard-blocks, send the redacted diagnostic back in one consented step (`--submit-last`). Broader arch coverage each release. See [`docs/PULL.md`](docs/PULL.md)
 
+**New to local AI itself?** → [`docs/LOCAL_AI_PRIMER.md`](docs/LOCAL_AI_PRIMER.md) — plain-English: how hardware / engines / model sizes / quants fit together.
 **New here?** → [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) — 5-minute clone-to-curl path.
 **Already running, want to compare engines?** → [docs/engines/](docs/engines/)
-**Picking an engine** (vLLM / llama.cpp / SGLang)? → [docs/INFERENCE_ENGINES.md](docs/INFERENCE_ENGINES.md)
+**Picking an engine** (vLLM / llama.cpp / SGLang / ik_llama)? → [docs/INFERENCE_ENGINES.md](docs/INFERENCE_ENGINES.md)
+**Confused by quant names** (Q4_K_M vs IQ4_KS vs AWQ)? → [docs/QUANTIZATION.md](docs/QUANTIZATION.md)
 **Hardware questions** (4090, NVLink, power caps)? → [docs/HARDWARE.md](docs/HARDWARE.md)
 **Don't know what TPS / KV / MTP mean?** → [docs/GLOSSARY.md](docs/GLOSSARY.md)
 
@@ -121,6 +125,7 @@ club-3090/
 ├── CHANGELOG.md                           cross-cutting changes (engine pin bumps, script updates)
 ├── LICENSE                                Apache-2.0
 ├── docs/
+│   ├── LOCAL_AI_PRIMER.md                 plain-English on-ramp: hardware / engines / sizes / quants
 │   ├── ARCHITECTURE.md                    how this stack thinks about LLM serving on 24 GB
 │   ├── HARDWARE.md                        Ampere SM 8.6+, NVLink note, 24 GB ceilings
 │   ├── GLOSSARY.md                        plain-language definitions (TPS / KV / MTP / TP / etc.)

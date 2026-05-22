@@ -30,22 +30,27 @@ OUT = Path(__file__).resolve().parents[2] / "docs" / "img"
 # Luce DFlash measured 2026-04-30 PM on Qwen3.6-27B Q4_K_M + matched 3.6
 # draft (TQ3 KV, max_ctx=65K, greedy only). Group "single-luce-watch" =
 # experimental / not recommended for shipping yet; see docs/UPSTREAM.md.
+# (compose-name, narr_tps, code_tps, group, description)
+# Labels on the chart show the compose name only; description rendered as a
+# legend block below the chart so x-axis stays readable at any density.
 configs_all = [
-    ("v714 48K\n(default)",       55.00, 70.50, "single-vllm"),
-    ("long-vision 145K\n+ vision",       50.32, 66.12, "single-vllm"),
-    ("long-text 180K\nBalanced MTP",      49.74, 67.39, "single-vllm"),
+    ("v714",                55.00,  70.50, "single-vllm",       "48K default"),
+    ("long-vision",         50.32,  66.12, "single-vllm",       "145K +vision"),
+    ("long-text",           49.74,  67.39, "single-vllm",       "180K MTP"),
     # long-text-no-mtp 200K (Max-context) bench pending — not on chart yet.
     # Estimated ~33 narr / ~40 code TPS based on no-spec-decode regime.
-    ("tools-text 75K\nfp8 IDE-agent",  53.32, 69.66, "single-vllm"),
-    ("bounded-thinking 180K\nstructured-CoT",  49.77, 65.80, "single-vllm"),
-    ("minimal\n(no spec-dec)",    32.41, 32.56, "single-vllm"),
-    ("llama.cpp Q3_K_XL\n262K + vision", 21.22, 20.79, "single-llama"),
-    ("llama.cpp Q4_K_M\n+ ngram-mod 32K",22.04, 26.11, "single-llama"),
-    ("Luce DFlash 3.6+3.6*\nTQ3, 65K, greedy", 40.00, 71.65, "single-luce-watch"),
-    ("dual.yml\n262K + vision",   69.05, 88.58, "dual-vllm"),
-    ("dual-turbo\n4 streams 262K",58.33, 76.01, "dual-vllm"),
-    ("dual-dflash\n185K + vision",81.94, 124.93, "dual-vllm"),
-    ("dual-dflash-noviz\n200K",   78.19, 126.99, "dual-vllm"),
+    ("tools-text",          53.32,  69.66, "single-vllm",       "75K fp8 IDE-agent"),
+    ("bounded-thinking",    49.77,  65.80, "single-vllm",       "180K structured-CoT"),
+    ("minimal",             32.41,  32.56, "single-vllm",       "no spec-dec"),
+    ("llamacpp/mtp",        51.28,  59.72, "single-llama",      "131K Q4_K_M + MTP"),
+    ("llamacpp/mtp-vision", 56.52,  66.17, "single-llama",      "49K Q4_K_M + MTP + vision"),
+    ("llamacpp/default",    21.22,  20.79, "single-llama",      "262K Q3_K_XL + vision"),
+    ("llama.cpp+ngram",     22.04,  26.11, "single-llama",      "32K Q4_K_M + ngram-mod"),
+    ("Luce DFlash*",        40.00,  71.65, "single-luce-watch", "65K TQ3, greedy"),
+    ("dual.yml",            69.05,  88.58, "dual-vllm",         "262K + vision"),
+    ("dual-turbo",          58.33,  76.01, "dual-vllm",         "262K, 4 streams"),
+    ("dual-dflash",         81.94, 124.93, "dual-vllm",         "185K + vision"),
+    ("dual-dflash-noviz",   78.19, 126.99, "dual-vllm",         "200K"),
 ]
 
 GROUP_COLORS = {
@@ -67,6 +72,7 @@ def make_chart(configs, out_stem, title_subject, figsize):
     narr = [c[1] for c in configs]
     code = [c[2] for c in configs]
     groups = [c[3] for c in configs]
+    descriptions = [c[4] if len(c) > 4 else "" for c in configs]
 
     x = np.arange(len(configs))
     w = 0.38
@@ -102,9 +108,9 @@ def make_chart(configs, out_stem, title_subject, figsize):
                 fontsize=9.5, fontweight="bold", color="#222")
 
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, fontsize=9)
+    ax.set_xticklabels(labels, fontsize=9, rotation=30, ha="right", rotation_mode="anchor")
     ax.set_ylabel("TPS  (3 warm + 5 measured, canonical bench)", fontsize=10)
-    ax.set_title(f"Qwen3.6-27B  —  measured TPS {title_subject}  on  noonghunna/club-3090  (2026-05-02)",
+    ax.set_title(f"Qwen3.6-27B  —  measured TPS {title_subject}  on  noonghunna/club-3090  (updated 2026-05-20)",
                  fontsize=12, pad=36)
     ax.set_ylim(0, max(max(narr), max(code)) * 1.30)
     ax.grid(axis="y", linestyle=":", alpha=0.4)
@@ -115,22 +121,45 @@ def make_chart(configs, out_stem, title_subject, figsize):
         Patch(facecolor="#cccccc", edgecolor="#333", label="narrative (essay prompt, 1000 tok)"),
         Patch(facecolor="#666666", edgecolor="#333", label="code (quicksort prompt, 800 tok)"),
     ]
-    ax.legend(handles=legend_elements, loc="upper center", bbox_to_anchor=(0.5, -0.10),
-              ncol=2, fontsize=9, frameon=False)
+    ax.legend(handles=legend_elements, loc="upper left",
+              fontsize=8.5, frameon=True, framealpha=0.9, edgecolor="#ccc")
+
+    # Compose-name legend: groups → "name = description · name = description"
+    # rendered below the x-axis labels. Keeps x-axis short while preserving
+    # the per-compose detail.
+    legend_group_order = ["single-vllm", "single-llama", "single-luce-watch", "dual-vllm"]
+    legend_group_titles = {
+        "single-vllm":       "1× vLLM",
+        "single-llama":      "1× llama.cpp",
+        "single-luce-watch": "1× Luce*",
+        "dual-vllm":         "2× vLLM",
+    }
+    legend_y = -0.22  # below x-axis labels (rotated 30° extend to ~-0.15)
+
+    for g in legend_group_order:
+        entries = [(labels[i], descriptions[i]) for i in range(len(labels)) if groups[i] == g and descriptions[i]]
+        if not entries:
+            continue
+        body = "  ·  ".join(f"$\\bf{{{name.replace('_', chr(92)+'_')}}}$ = {desc}" for name, desc in entries)
+        line = f"{legend_group_titles[g]}:  {body}"
+        ax.text(0.5, legend_y, line,
+                transform=ax.transAxes, ha="center", va="top",
+                fontsize=8.5, color="#333")
+        legend_y -= 0.05
 
     substrate_parts = ["vLLM 0.20.1rc1.dev16+g7a1eb8ac2 + Genesis v7.69 dev (2db18df) + vllm#35975 backport"]
     if any(g == "single-llama" for g in groups):
-        substrate_parts.append("llama.cpp mainline 0d0764dfd")
+        substrate_parts.append("llama.cpp mainline d14ce3dab (build 9235, MTP)")
     if any(g == "single-luce-watch" for g in groups):
         substrate_parts.append("Luce DFlash dflash@f12a87c (greedy only)")
     substrate_parts.append("RTX 3090 sm_86, PCIe-only, 230W")
-    ax.text(0.5, -0.22,
+    ax.text(0.5, legend_y - 0.02,
             "Substrate: " + "  •  ".join(substrate_parts),
-            transform=ax.transAxes, ha="center", va="top", fontsize=8, color="#555", style="italic")
+            transform=ax.transAxes, ha="center", va="top", fontsize=7.5, color="#555", style="italic")
     if any(g == "single-luce-watch" for g in groups):
-        ax.text(0.5, -0.30,
+        ax.text(0.5, legend_y - 0.09,
                 "* Luce DFlash 3.6+3.6 = experimental: matched draft still under training (z-lab 2026-04-26 snapshot), greedy-only sampling, no vision, daemon-mode bugs. Not yet recommended for shipping. See docs/UPSTREAM.md.",
-                transform=ax.transAxes, ha="center", va="top", fontsize=7.5, color="#777", style="italic", wrap=True)
+                transform=ax.transAxes, ha="center", va="top", fontsize=7, color="#777", style="italic", wrap=True)
 
     plt.tight_layout()
     svg_path = OUT / f"{out_stem}.svg"

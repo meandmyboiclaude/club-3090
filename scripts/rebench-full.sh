@@ -29,7 +29,18 @@
 #   bash scripts/rebench-full.sh --resume             # skip steps that have
 #                                                       artifacts already
 #
-# Env overrides (rarely needed — preflight auto-detects):
+# Endpoint-first mode (for non-Docker engines: llama-swap, ramalama, host-
+# build llama-server, or any OpenAI-compatible server):
+#   bash scripts/rebench-full.sh \
+#     --url http://192.168.1.50:8887 \
+#     --model 'Qwen3.6-27B MTP ik_llama:instruct' \
+#     --engine llama-cpp                              # vllm|llama-cpp|sglang|other
+#
+#   When --url is passed, autodetect is skipped and the chained scripts run
+#   in host-only mode (CONTAINER=none) — no docker logs / docker inspect
+#   scrapes, which are graceful no-ops when absent.
+#
+# Env overrides (rarely needed — preflight auto-detects when running our composes):
 #   URL                 endpoint (default: auto-detect from running container)
 #   MODEL               served-model-name (default: GET /v1/models)
 #   TAG                 output-dir basename (default: ${MODEL}-YYYYMMDD-HHMM)
@@ -40,6 +51,11 @@
 #                       canonical stability matrix when validating new
 #                       compose paths.)
 #   SOAK_TURNS          passed through to soak-test.sh (default: 5)
+#   AIDER_TIMEOUT_PER_CASE
+#                       Per-case timeout (seconds) for aider-polyglot-30
+#                       (default: 3600 — bumped from benchlocal-cli's
+#                       default to avoid mid-batch kills on slower /
+#                       power-capped / single-card rigs).
 #
 
 set -euo pipefail
@@ -55,13 +71,19 @@ cd "$ROOT_DIR"
 SKIP_CSV=""
 RESUME=0
 TAG_OVERRIDE=""
+URL_FLAG=""
+MODEL_FLAG=""
+ENGINE_FLAG=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --skip)     SKIP_CSV="$2"; shift 2 ;;
     --tag)      TAG_OVERRIDE="$2"; shift 2 ;;
     --resume)   RESUME=1; shift ;;
+    --url)      URL_FLAG="$2"; shift 2 ;;
+    --model)    MODEL_FLAG="$2"; shift 2 ;;
+    --engine)   ENGINE_FLAG="$2"; shift 2 ;;
     -h|--help)
-      sed -n '2,40p' "$0"
+      sed -n '2,55p' "$0"
       exit 0
       ;;
     *)
@@ -71,6 +93,19 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# --- endpoint-first mode ----------------------------------------------------
+# When --url is passed, the user is targeting an OpenAI-compatible endpoint
+# that may not be one of our pre-baked containers (llama-swap, ramalama,
+# host-build llama-server, raw vLLM, etc). Skip container autodetect and
+# tell the chained scripts to run in host mode (CONTAINER=none).
+if [[ -n "$URL_FLAG" ]]; then
+  export URL="$URL_FLAG"
+  export PREFLIGHT_NO_AUTODETECT=1
+  export CONTAINER="none"
+  [[ -n "$MODEL_FLAG" ]] && export MODEL="$MODEL_FLAG"
+  [[ -n "$ENGINE_FLAG" ]] && export ENGINE_KIND="$ENGINE_FLAG"
+fi
+
 skip_step() {
   IFS=',' read -ra SKIPS <<< "$SKIP_CSV"
   for s in "${SKIPS[@]}"; do [[ "$s" == "$1" ]] && return 0; done
@@ -79,6 +114,7 @@ skip_step() {
 
 # --- endpoint + model auto-detect ------------------------------------------
 # Source preflight if available; it sets URL + CONTAINER from running compose.
+# Skipped silently when PREFLIGHT_NO_AUTODETECT=1 (set above by --url).
 if [[ -f "$ROOT_DIR/scripts/preflight.sh" ]]; then
   # shellcheck source=preflight.sh
   source "$ROOT_DIR/scripts/preflight.sh"
@@ -88,7 +124,13 @@ URL="${URL:-http://localhost:8010}"
 
 if ! curl -sf -m 5 "$URL/v1/models" >/dev/null 2>&1; then
   echo "✗ endpoint $URL/v1/models not responding" >&2
-  echo "  start a compose first: gpu-mode <mode>" >&2
+  if [[ -n "$URL_FLAG" ]]; then
+    echo "  --url '$URL_FLAG' not reachable; check the host/port + model server health." >&2
+  else
+    echo "  start a compose first: gpu-mode <mode>" >&2
+    echo "  or pass an external endpoint:" >&2
+    echo "    bash scripts/rebench-full.sh --url http://HOST:PORT --model NAME --engine vllm|llama-cpp|sglang|other" >&2
+  fi
   exit 1
 fi
 
@@ -133,17 +175,20 @@ date +"  started:     %Y-%m-%dT%H:%M:%SZ" -u
 echo
 
 # --- capture container snapshot (one-shot, used by rebench-report.py) ------
-# Picks the first vllm-*/llama-cpp-* container — same heuristic preflight uses.
-CONTAINER_NAME=$(docker ps --format '{{.Names}}' 2>/dev/null \
-  | grep -E '^(vllm-|llama-cpp-)' | head -1 || true)
-if [[ -n "$CONTAINER_NAME" ]]; then
-  docker inspect "$CONTAINER_NAME" > "$OUT_DIR/container-config.json" 2>/dev/null || true
-  # Boot log: capture lines that the report parser needs (KV pool size,
-  # max concurrency, model load footprint, MTP detection). Trimmed to keep
-  # the file small; full container log is still available via `docker logs`.
-  docker logs "$CONTAINER_NAME" 2>&1 \
-    | grep -E "GPU KV cache size|Maximum concurrency|Available KV cache memory|Model loading took|Detected MTP|kv_cache_dtype|num_speculative_tokens" \
-    > "$OUT_DIR/vllm-boot.log" 2>/dev/null || true
+# Picks the first vllm-*/llama-cpp-*/sglang-* container — same heuristic
+# preflight uses. Silently no-ops in endpoint-first mode (CONTAINER=none).
+if [[ "${CONTAINER:-}" != "none" ]] && command -v docker >/dev/null 2>&1; then
+  CONTAINER_NAME=$(docker ps --format '{{.Names}}' 2>/dev/null \
+    | grep -E '^(vllm-|llama-cpp-|sglang-)' | head -1 || true)
+  if [[ -n "$CONTAINER_NAME" ]]; then
+    docker inspect "$CONTAINER_NAME" > "$OUT_DIR/container-config.json" 2>/dev/null || true
+    # Boot log: capture lines that the report parser needs (KV pool size,
+    # max concurrency, model load footprint, MTP detection). Trimmed to keep
+    # the file small; full container log is still available via `docker logs`.
+    docker logs "$CONTAINER_NAME" 2>&1 \
+      | grep -E "GPU KV cache size|Maximum concurrency|Available KV cache memory|Model loading took|Detected MTP|kv_cache_dtype|num_speculative_tokens" \
+      > "$OUT_DIR/vllm-boot.log" 2>/dev/null || true
+  fi
 fi
 nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu \
   --format=csv,noheader > "$OUT_DIR/gpu-state-start.log" 2>/dev/null || true
@@ -237,9 +282,15 @@ URL="$URL" MODEL="$MODEL" \
     bash "$ROOT_DIR/scripts/soak-test.sh"
 
 # --- step 5: aider-polyglot-30 ----------------------------------------------
+# Default to 3600s per-case for aider on slower/single-card rigs. The 30
+# multi-turn coding exercises can run > 45 min on power-capped or single-card
+# setups; benchlocal-cli will kill mid-batch if its internal default fires.
+# Override via env: AIDER_TIMEOUT_PER_CASE=7200 bash scripts/rebench-full.sh
+AIDER_TIMEOUT_PER_CASE="${AIDER_TIMEOUT_PER_CASE:-3600}"
 URL="$URL" MODEL="$MODEL" \
   run_step aider-polyglot "$OUT_DIR/aider-polyglot.log" \
-    bash "$ROOT_DIR/scripts/quality-test.sh" --pack aider-polyglot-30
+    bash "$ROOT_DIR/scripts/quality-test.sh" --pack aider-polyglot-30 \
+      --timeout-per-case "$AIDER_TIMEOUT_PER_CASE"
 snapshot_quality_json "$OUT_DIR/aider-polyglot.json"
 
 # --- final GPU state snapshot ----------------------------------------------

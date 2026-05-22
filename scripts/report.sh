@@ -524,11 +524,21 @@ else
     status=$(docker ps --filter "name=$CONTAINER" --format '{{.Status}}' 2>/dev/null | head -1)
     ports=$(docker ps --filter "name=$CONTAINER" --format '{{.Ports}}' 2>/dev/null | head -1)
     image=$(docker ps --filter "name=$CONTAINER" --format '{{.Image}}' 2>/dev/null | head -1)
+    # Digest + OCI labels (load-bearing when tag is rolling, e.g. llama.cpp
+    # `:server-cuda`). Without these, a bug report can't reproduce the bytes.
+    image_digest=$(docker inspect "$CONTAINER" --format '{{.Image}}' 2>/dev/null | head -1)
+    image_revision=$(docker inspect "$CONTAINER" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' 2>/dev/null)
+    image_version=$(docker inspect "$CONTAINER" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' 2>/dev/null)
+    image_source=$(docker inspect "$CONTAINER" --format '{{ index .Config.Labels "org.opencontainers.image.source" }}' 2>/dev/null)
     echo "- **Name:** \`$CONTAINER\`"
     echo "- **Engine:** \`${ENGINE_KIND}\`"
     echo "- **Status:** ${status:-unknown}"
     echo "- **Ports:** ${ports:-unknown}"
     echo "- **Image:** \`${image:-unknown}\`"
+    [[ -n "$image_digest" ]]   && echo "- **Image digest:** \`${image_digest}\`"
+    [[ -n "$image_version"  && "$image_version"  != "<no value>" ]] && echo "- **Build tag (OCI version):** \`${image_version}\`"
+    [[ -n "$image_revision" && "$image_revision" != "<no value>" ]] && echo "- **Upstream commit (OCI revision):** \`${image_revision}\`"
+    [[ -n "$image_source"   && "$image_source"   != "<no value>" ]] && echo "- **Upstream source:** ${image_source}"
   } | redact
 
   # Engine-specific probes from this point. vLLM container has Python +
