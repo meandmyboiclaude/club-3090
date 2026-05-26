@@ -59,7 +59,6 @@ the whole.
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Repo/stack architecture overview. |
 | [`UPSTREAM.md`](UPSTREAM.md) | Upstream PR / issue tracker for this stack. |
 | [`NIGHTLY_BUMP_RUNBOOK.md`](NIGHTLY_BUMP_RUNBOOK.md) | Procedure for bumping the vLLM nightly pin. |
-| [`CI_RUNNER_SETUP.md`](CI_RUNNER_SETUP.md) | CI runner provisioning. |
 | [`CONTAINER_RUNTIMES.md`](CONTAINER_RUNTIMES.md) | Docker / container runtime notes. |
 
 ---

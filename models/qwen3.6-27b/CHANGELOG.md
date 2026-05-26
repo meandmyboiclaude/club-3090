@@ -366,13 +366,13 @@ Configs migrated from the predecessor repos (`qwen36-27b-single-3090`, `qwen36-d
 |---|---|
 | `qwen36-27b-single-3090/compose/docker-compose.yml` | `models/qwen3.6-27b/vllm/compose/docker-compose.yml` |
 | `qwen36-27b-single-3090/compose/docker-compose.fast-chat.yml` | `models/qwen3.6-27b/vllm/compose/docker-compose.fast-chat.yml` |
-| `qwen36-27b-single-3090/compose/single/tools-text.yml` | `models/qwen3.6-27b/vllm/compose/single/tools-text.yml` |
+| `qwen36-27b-single-3090/compose/single/tools-text.yml` | `models/qwen3.6-27b/vllm/compose/single/autoround-int4/tools-text.yml` |
 | `qwen36-27b-single-3090/compose/docker-compose.no-genesis-mtp.yml` | `models/qwen3.6-27b/vllm/compose/docker-compose.no-genesis-mtp.yml` |
-| `qwen36-27b-single-3090/compose/single/minimal.yml` | `models/qwen3.6-27b/vllm/compose/single/minimal.yml` |
-| `qwen36-dual-3090/compose/docker-compose.yml` | `models/qwen3.6-27b/vllm/compose/dual/docker-compose.yml` |
-| `qwen36-dual-3090/compose/docker-compose.turbo.yml` | `models/qwen3.6-27b/vllm/compose/dual/turbo.yml` |
-| `qwen36-dual-3090/compose/docker-compose.dflash.yml` | `models/qwen3.6-27b/vllm/compose/dual/dflash.yml` |
-| `qwen36-dual-3090/compose/docker-compose.dflash-noviz.yml` | `models/qwen3.6-27b/vllm/compose/dual/dflash-noviz.yml` |
+| `qwen36-27b-single-3090/compose/single/minimal.yml` | `models/qwen3.6-27b/vllm/compose/single/autoround-int4/minimal.yml` |
+| `qwen36-dual-3090/compose/docker-compose.yml` | `models/qwen3.6-27b/vllm/compose/dual/autoround-int4/fp8-mtp.yml` |
+| `qwen36-dual-3090/compose/docker-compose.turbo.yml` | `models/qwen3.6-27b/vllm/compose/dual/autoround-int4/turbo.yml` |
+| `qwen36-dual-3090/compose/docker-compose.dflash.yml` | `models/qwen3.6-27b/vllm/compose/dual/autoround-int4/dflash.yml` |
+| `qwen36-dual-3090/compose/docker-compose.dflash-noviz.yml` | `models/qwen3.6-27b/vllm/compose/dual/autoround-int4/dflash-noviz.yml` |
 | `qwen36-27b-single-3090/patches/patch_tolist_cudagraph.py` | `models/qwen3.6-27b/vllm/patches/patch_tolist_cudagraph.py` |
 
 Functional content identical — only paths changed. Anyone with scripts referencing the old paths needs to update; the old repos still serve the old paths read-only.

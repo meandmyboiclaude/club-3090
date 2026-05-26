@@ -43,9 +43,52 @@ vLLM: NVIDIA-only (CUDA). llama.cpp: yes — pick the right Docker image (`ghcr.
 
 ### Does this work on Windows / WSL2?
 
-WSL2: yes, both engines. Make sure GPU passthrough is set up (`nvidia-smi` works inside WSL). Native Windows: vLLM doesn't support it; llama.cpp does — but use a native llama.cpp build, not Docker.
+Yes — both engines work on WSL2. Make sure GPU passthrough is set up (`nvidia-smi` works inside WSL). Native Windows (no WSL): vLLM doesn't support it, and **club-3090's scripts/composes don't run there either** (bash + Docker + Linux paths) — only the *upstream* llama.cpp binary works, by hand. For club-3090's tooling on Windows, use WSL2 (see [WSL_SETUP.md](WSL_SETUP.md)).
 
-Two gotchas to know about up front, both documented in HARDWARE.md alongside the WSL2 section: (1) Windows' default 2-second TDR can kill long kernels mid-flight (WSL2-specific) — see ["extend the TDR delay"](HARDWARE.md#fix--extend-the-tdr-delay-on-the-windows-host); (2) PyTorch's `expandable_segments:True` allocator can crash boot at `gptq_marlin_repack` on some setups (a WSL2 single-card 3090 Ti hit it; JusefPol previously hit it on NVLink dual-3090) — override available via `.env`, see ["disable PyTorch expandable_segments"](HARDWARE.md#fix--disable-pytorch-expandable_segments-if-boot-crashes-at-weight-repack).
+> **Setting up from scratch?** Start with the step-by-step [WSL2 setup guide](WSL_SETUP.md) (install → driver → `.wslconfig` RAM → Docker → ext4/CRLF gotchas → weights → boot). The rest of this answer is the **runtime tuning** that guide links back to.
+
+**WSL2 adds ~1.3 GiB of invisible GPU overhead** — the Windows display driver, CUDA runtime, and WDDM reserve VRAM that `nvidia-smi` doesn't report at idle but is locked once a container starts. On a 24 GB card that leaves you with **~22.7 GB usable** instead of 24 GB.
+
+**Dual-card vLLM**: mostly unaffected. Each card runs at ~17 GB with ~7 GB headroom — 1.3 GB overhead is noise.
+
+**Single-card vLLM**: drop a `.env` with `GPU_MEMORY_UTILIZATION=0.94` (default 0.95 assumes headless Linux). Already documented with a combined `.env` template — see [HARDWARE.md WSL2 section](HARDWARE.md#note-for-wsl2--windows-users).
+
+**Single-card llama.cpp / ik_llama**: this is the gap. llama.cpp composes allocate by fixed sizes, not a utilization ratio, so there's no `GPU_MEMORY_UTILIZATION` knob to dial. The shipped defaults are tight for headless Linux:
+
+| Compose | Default ctx | Total VRAM | Headroom on Linux | Headroom on WSL2 | Status |
+|---|---|---|---|---|---|
+| `llamacpp/mtp` | 262K | 22.5 GB | ~1.5 GB | **~0.2 GB** | ❌ will OOM |
+| `llamacpp/mtp` | **131K** | 20.0 GB | ~4.0 GB | **~2.7 GB** | ✅ safe |
+| `llamacpp/mtp-vision` | 160K | 22.3 GB | ~1.7 GB | **~0.4 GB** | ⚠️ marginal |
+| `llamacpp/mtp-vision` | **131K** | ~21 GB | ~3.0 GB | **~1.7 GB** | ✅ safe |
+| `ik-llama/iq4ks-mtp` | 262K | 20.6 GB | ~3.4 GB | **~2.1 GB** | ✅ safe |
+| `ik-llama/iq4ks-mtp-vision` | 160K | ~21 GB | ~3.0 GB | **~1.7 GB** | ✅ safe |
+
+**Fix**: on WSL2, lower the context for the mainline llama.cpp composes:
+
+```sh
+# llamacpp/mtp — drop to 131K for WSL2 headroom
+CTX_SIZE=131072 UBATCH_SIZE=1024 docker compose -f models/qwen3.6-27b/llama-cpp/compose/single/unsloth-q4km/mtp.yml up -d
+
+# llamacpp/mtp-vision — drop to 131K
+CTX_SIZE=131072 UBATCH_SIZE=1024 docker compose -f models/qwen3.6-27b/llama-cpp/compose/single/unsloth-q4km/mtp-vision.yml up -d
+```
+
+The ik_llama composes (IQ4_KS quants are smaller, ~15.1 GB weights) fit at defaults on WSL2.
+
+**Other WSL2 gotchas** (all documented in [HARDWARE.md](HARDWARE.md#note-for-wsl2--windows-users)):
+
+1. **TDR timeout** — Windows force-resets the GPU after 2 seconds of kernel time. Long-context prompts trigger this. Fix: extend TDR to 60s via registry.
+2. **PyTorch `expandable_segments` crash** — `device not ready` at `gptq_marlin_repack` on some WSL2 drivers. Fix: `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False`.
+3. **GDN activation spike** — OOM at ~50-65K tokens on reduced-VRAM rigs. Fix: `VLLM_ENFORCE_EAGER=1` (vLLM only, ~20-30% TPS cost).
+
+Combined `.env` for vLLM single-card WSL2 (drop into `models/qwen3.6-27b/vllm/compose/.env`):
+
+```sh
+GPU_MEMORY_UTILIZATION=0.94
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False,max_split_size_mb:512
+VLLM_ENFORCE_EAGER=1
+```
 
 ---
 
@@ -93,7 +136,7 @@ AutoRound (Lorbus) gave us +9% TPS over AWQ on this model. GPTQ has a similar qu
 
 Look at the [TPS chart](../README.md#measured-tps-at-a-glance) — single-card vLLM is 51-55 TPS narrative / 67-70 code at 48K, which beats most consumer-3090 numbers we've seen reported. If you're seeing materially lower, the most common causes are:
 1. Power cap < 230 W (this rig benches at 230 W; 280 W gives ~+5%, 350 W ~+10%)
-2. Wrong compose for your prompt shape (use the `docker-compose.yml` 48K default for chat — don't pick `long-vision.yml` if you don't need 198K)
+2. Wrong compose for your prompt shape (use the `tq3-mtp.yml` 48K single-card default for chat — don't pick `long-vision.yml` if you don't need 198K)
 3. Genesis tree drift — `git pull origin main` between bench runs can change AL by ±15%. We pin to commit `bf667c7` for this reason.
 
 ### My TPS dropped after switching to 198K context. Why?
@@ -112,7 +155,7 @@ For the full deep dive — empirical bisection, root-cause walk-through, who-can
 
 Sandermage's K+1 verify routing PR for TurboQuant spec-decode. We tested a local post-#41434 rebase on 2026-05-11 and it is **not** enough for our Qwen3.6-27B Genesis-free TQ+MTP path: MTP acceptance becomes perfect, but long-context recall corrupts into repeated tokens and tool/multi-turn paths regress. Removing the overlay is better, but TQ3/TQ4/k8v4 + MTP still fail needle recall.
 
-The working paths today are `dual/tq3-nomtp.yml` without Genesis, or Genesis-backed TQ+MTP with P67/P67b. Treat #40914 as adjacent upstream work, not a shippable closure for this stack.
+The working paths today are `dual/autoround-int4/tq3-nomtp.yml` without Genesis, or Genesis-backed TQ+MTP with P67/P67b. Treat #40914 as adjacent upstream work, not a shippable closure for this stack.
 
 ### What's PN8?
 
@@ -124,10 +167,10 @@ Not a bug — it's the canonical signature of `int8_per_token_head` quantization
 
 This shows up clearly in the head-to-head matrix on dual-3090:
 
-- **INT8 PTH** (`dual/int8.yml`) — 85 narr / 121 code TPS single-stream, 605K KV pool / 2.31× concurrency at 262K, p50 decode TPS stays near baseline at concurrency (no aggregate lift)
-- **fp8 default** (`dual/docker-compose.yml`) — lower per-stream but scales to ~9× concurrency at 262K, aggregate throughput goes up almost linearly with stream count
+- **INT8 PTH** (`dual/autoround-int4/int8.yml`) — 85 narr / 121 code TPS single-stream, 605K KV pool / 2.31× concurrency at 262K, p50 decode TPS stays near baseline at concurrency (no aggregate lift)
+- **fp8 default** (`dual/autoround-int4/fp8-mtp.yml`) — lower per-stream but scales to ~9× concurrency at 262K, aggregate throughput goes up almost linearly with stream count
 
-So pick by workload: INT8 PTH if you want max single-stream TPS and don't need many concurrent users; fp8 if you want aggregate throughput across many streams. If you want **both** — high single-stream *and* high concurrency on the same compose — the answer is the Genesis-backed TQ3+MTP path (`dual/tq3-mtp-genesis.yml`): 89 / 119 narr / code TPS single-stream + 1.22M KV pool / 4.66× concurrency on the same PCIe dual-3090 rig (~5pp quality cost vs INT8 PTH on the 150-scenario quality suite, within noise on aider-polyglot-30 — see [docs/TQ3_MTP_GENESIS.md](TQ3_MTP_GENESIS.md) for the full writeup). This is also why `dual/turbo.yml` (4-stream production variant) ships TQ3+MTP rather than INT8 PTH — INT8 PTH wouldn't scale across the 4 concurrent streams.
+So pick by workload: INT8 PTH if you want max single-stream TPS and don't need many concurrent users; fp8 if you want aggregate throughput across many streams. If you want **both** — high single-stream *and* high concurrency on the same compose — the answer is the Genesis-backed TQ3+MTP path (`dual/autoround-int4/tq3-mtp-genesis.yml`): 89 / 119 narr / code TPS single-stream + 1.22M KV pool / 4.66× concurrency on the same PCIe dual-3090 rig (~5pp quality cost vs INT8 PTH on the 150-scenario quality suite, within noise on aider-polyglot-30 — see [docs/TQ3_MTP_GENESIS.md](TQ3_MTP_GENESIS.md) for the full writeup). This is also why `dual/autoround-int4/turbo.yml` (4-stream production variant) ships TQ3+MTP rather than INT8 PTH — INT8 PTH wouldn't scale across the 4 concurrent streams.
 
 If your numbers on the same compose look different from ours by >15%, the most likely sources of the gap are: power cap (370W vs 290W = ~10-15%), vLLM nightly (pre-#41434 was ~15% slower on Qwen3-Next due to GPU↔CPU syncs in attention), Genesis patches loaded vs not (~10-15% via P67 + PN12 + PN25 on Qwen3-Next), MTP `n` value, or the prompt shape. Run `bash scripts/rebench-full.sh` to capture the canonical 5-phase numbers and we can compare apples-to-apples — see the [Numbers from your rig](https://github.com/noonghunna/club-3090/issues/new?template=numbers-from-your-rig.yml) issue template to share them back.
 

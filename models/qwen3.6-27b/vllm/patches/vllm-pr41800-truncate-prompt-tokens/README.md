@@ -36,10 +36,10 @@ Why anchor-based and not full-file replacement: the PR diff is +14 / -0 across a
 
 ## Composes that wire this overlay in (as of v0.7.3 ship)
 
-* `models/qwen3.6-27b/vllm/compose/dual/docker-compose.yml` (gpu-mode `27b`)
-* `models/qwen3.6-27b/vllm/compose/dual/turbo.yml` (gpu-mode `27b-turbo`)
-* `models/qwen3.6-27b/vllm/compose/dual/dflash.yml` (gpu-mode `27b-dflash`)
-* `models/qwen3.6-27b/vllm/compose/dual/dflash-noviz.yml` (gpu-mode `27b-dflash-noviz`, the compose from issue #138)
+* `models/qwen3.6-27b/vllm/compose/dual/autoround-int4/fp8-mtp.yml` (gpu-mode `27b`)
+* `models/qwen3.6-27b/vllm/compose/dual/autoround-int4/turbo.yml` (gpu-mode `27b-turbo`)
+* `models/qwen3.6-27b/vllm/compose/dual/autoround-int4/dflash.yml` (gpu-mode `27b-dflash`)
+* `models/qwen3.6-27b/vllm/compose/dual/autoround-int4/dflash-noviz.yml` (gpu-mode `27b-dflash-noviz`, the compose from issue #138)
 
 ## How to add this overlay to another affected compose
 

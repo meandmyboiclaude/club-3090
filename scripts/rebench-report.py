@@ -216,7 +216,28 @@ def parse_verify_stress(log: str) -> dict:
     overall = "PASS" if "All stress / boundary checks passed" in log else (
         "FAIL" if any(c["verdict"] == "FAIL" for c in checks) else "?"
     )
-    return {"checks": checks, "overall": overall}
+    result = {"checks": checks, "overall": overall}
+
+    # Ceiling VRAM margin (#184). verify-stress.sh prints free VRAM at the
+    # deepest rung and hard-fails below the guard, but a margin that *passes*
+    # the guard yet sits close to it can still OOM on a second run / server
+    # restart (laurimyllari's marginal-but-passing case). Surface the number so
+    # a PASS isn't mistaken for comfortable headroom.
+    free = thresh = None
+    m_thin = re.search(r"VRAM margin thin at ceiling:\s*(\d+)\s*MB free\s*<\s*(\d+)\s*MB", log)
+    if m_thin:
+        free, thresh = int(m_thin.group(1)), int(m_thin.group(2))
+    else:
+        m_ok = re.search(r"VRAM:\s*\d+\s*\S+\s*(\d+)\s*MB[^\n]*margin threshold=(\d+)", log)
+        if m_ok:
+            free, thresh = int(m_ok.group(1)), int(m_ok.group(2))
+    if free is not None and thresh:
+        result["ceiling_vram_free_mb"] = free
+        result["vram_threshold_mb"] = thresh
+        result["vram_status"] = (
+            "thin" if free < thresh else "marginal" if free < 2 * thresh else "comfortable"
+        )
+    return result
 
 
 # --- section: quality-full --------------------------------------------------
@@ -479,6 +500,16 @@ def render(report: dict) -> str:
         lines.append("|---|---|---|")
         for c in stress["checks"]:
             lines.append(f"| {c['idx']} | {c['desc']} | {c['verdict']} |")
+        if stress.get("ceiling_vram_free_mb") is not None:
+            free = stress["ceiling_vram_free_mb"]
+            thresh = stress["vram_threshold_mb"]
+            note = {
+                "thin": " — ⚠ **THIN** (below the sustained-agent guard; verify-stress fails this check)",
+                "marginal": " — ⚠ **marginal**: within 2× the guard, so a second run or server restart may OOM. Lower `CTX_SIZE` for sustained agent load.",
+                "comfortable": " — ✓ comfortable",
+            }[stress["vram_status"]]
+            lines.append("")
+            lines.append(f"**Ceiling VRAM margin:** {free} MB free (guard {thresh} MB){note}")
     else:
         lines.append("_(verify-stress log missing or unparsed)_")
     lines.append("")

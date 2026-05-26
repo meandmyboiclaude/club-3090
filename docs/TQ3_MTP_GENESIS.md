@@ -62,7 +62,7 @@ We rebased and vendored every PR we could find that touched TQ + MTP + spec-deco
 
 We A/B'd across 4 TurboQuant precision tiers (3-bit, 4-bit, k8v4 = 8/4-bit) — the failure was **format-independent**. Every tier failed long-context needle recall with first-word repetition under MTP. The same TQ3 with MTP *disabled* (`tq3-nomtp.yml`) passes 7/7 verify-stress cleanly, so the bug is specifically the **MTP × TQ × multi-query interaction**, not TQ precision.
 
-Then the [vllm.ai/blog/turboquant](https://vllm.ai/blog/turboquant) post made the upstream position explicit: **"TurboQuant supports only models with standard attention mechanisms (e.g. GQA) — models with sliding-window or hybrid attention are not yet supported."** Qwen3.6-27B is Qwen3-Next hybrid (DeltaNet + full-attention interleaved). So 4 of those 5 PRs wouldn't fix this anyway — there's no upstream multi-query TQ verify kernel that handles hybrid attention. Closed the patch-only investigation; tombstoned `dual/tq3-mtp.yml`.
+Then the [vllm.ai/blog/turboquant](https://vllm.ai/blog/turboquant) post made the upstream position explicit: **"TurboQuant supports only models with standard attention mechanisms (e.g. GQA) — models with sliding-window or hybrid attention are not yet supported."** Qwen3.6-27B is Qwen3-Next hybrid (DeltaNet + full-attention interleaved). So 4 of those 5 PRs wouldn't fix this anyway — there's no upstream multi-query TQ verify kernel that handles hybrid attention. Closed the patch-only investigation; tombstoned `dual/autoround-int4/tq3-mtp.yml`.
 
 ### Path 2 — Genesis P67
 
@@ -75,7 +75,7 @@ OSError: Repo id must be in the form 'repo_name' or 'namespace/repo_name':
 '/root/.cache/huggingface/qwen3.6-27b-autoround-int4'
 ```
 
-Pin-downgraded `dual/tq3-mtp-genesis.yml` to `nightly-01d4d1ad3` (= `0.20.2rc1.dev9`, allowlist-included), and the boot lit up green. Genesis P67 enabled on Ampere consumer (`[ON]` in the platform regime), P66 filtered cudagraph capture sizes for spec-decode `uniform_query_len=4` (kept [4, 8, 16]; removed [1, 2]).
+Pin-downgraded `dual/autoround-int4/tq3-mtp-genesis.yml` to `nightly-01d4d1ad3` (= `0.20.2rc1.dev9`, allowlist-included), and the boot lit up green. Genesis P67 enabled on Ampere consumer (`[ON]` in the platform regime), P66 filtered cudagraph capture sizes for spec-decode `uniform_query_len=4` (kept [4, 8, 16]; removed [1, 2]).
 
 ---
 
@@ -101,30 +101,30 @@ The Genesis row delivers near-baseline quality at **roughly 2× the concurrency*
 
 ## When to pick this — and when not to
 
-Pick **`dual/tq3-mtp-genesis.yml`** when **all three** of:
+Pick **`dual/autoround-int4/tq3-mtp-genesis.yml`** when **all three** of:
 
 1. You're running on dual 3090 (TP=2) and want max concurrent streams or max effective long-context throughput.
 2. You're OK with the Genesis modular patch stack as a dependency (Sander's [genesis-vllm-patches](https://github.com/Sandermage/genesis-vllm-patches), v7.72.2 pinned).
 3. The ~5pp quality drop on the 150-scenario suite (vs INT8 PTH) is acceptable for your workload — it's basically invisible on coding (-1 aider task) and visible on math reasoning.
 
-Pick **`dual/tq3-nomtp.yml`** when you want the **biggest possible KV pool** (1.73M / 6.59× concurrency) and don't need MTP throughput — this path is Genesis-free, vanilla upstream + marlin-pad only, and passes 7/7 verify-stress.
+Pick **`dual/autoround-int4/tq3-nomtp.yml`** when you want the **biggest possible KV pool** (1.73M / 6.59× concurrency) and don't need MTP throughput — this path is Genesis-free, vanilla upstream + marlin-pad only, and passes 7/7 verify-stress.
 
-Pick **`dual/int8.yml`** (Qwen INT8 PTH) when you want the **simplest, baseline-quality setup** with MTP and no Genesis dependency — 605K pool, 2.31× concurrency, 94/150 quality, 19/30 aider. Production-safe.
+Pick **`dual/autoround-int4/int8.yml`** (Qwen INT8 PTH) when you want the **simplest, baseline-quality setup** with MTP and no Genesis dependency — 605K pool, 2.31× concurrency, 94/150 quality, 19/30 aider. Production-safe.
 
-Pick **`dual/turbo.yml`** (4-stream `max-num-seqs=4` production variant) for **multi-tenant serving** — same Genesis P67 stack, tuned for 4 concurrent streams at 262K. (This page benches the 2-seq matched-config sibling for the head-to-head.)
+Pick **`dual/autoround-int4/turbo.yml`** (4-stream `max-num-seqs=4` production variant) for **multi-tenant serving** — same Genesis P67 stack, tuned for 4 concurrent streams at 262K. (This page benches the 2-seq matched-config sibling for the head-to-head.)
 
 ---
 
 ## What's the path forward without Genesis?
 
-Genesis is great but a non-trivial dependency. The Genesis-free path is gated on **an upstream P67-equivalent landing**: a proper multi-query Triton kernel for spec-decode K+1 verify against compressed TurboQuant cache that handles hybrid attention. None of the open PRs do this today (we checked — see `docs/UPSTREAM.md` "TQ + MTP" section and the `dual/tq3-mtp.yml` tombstone header).
+Genesis is great but a non-trivial dependency. The Genesis-free path is gated on **an upstream P67-equivalent landing**: a proper multi-query Triton kernel for spec-decode K+1 verify against compressed TurboQuant cache that handles hybrid attention. None of the open PRs do this today (we checked — see `docs/UPSTREAM.md` "TQ + MTP" section and the `dual/autoround-int4/tq3-mtp.yml` tombstone header).
 
 Two upstream signals to watch:
 
 1. **vllm.ai's TurboQuant blog** explicitly notes hybrid-attention support is "not yet supported" — an open scoping item, not a "won't fix".
 2. **Sander has signalled he'll upstream P67** once Genesis matures past the v7.73.x rework currently in flight.
 
-When either of those lands, the upstream-only path opens. Until then, `dual/tq3-mtp-genesis.yml` is the working TQ+MTP path on dual 3090.
+When either of those lands, the upstream-only path opens. Until then, `dual/autoround-int4/tq3-mtp-genesis.yml` is the working TQ+MTP path on dual 3090.
 
 ---
 
@@ -138,7 +138,7 @@ bash scripts/setup.sh
 
 # 2. Bring up the Genesis-backed TQ3+MTP compose (pin-downgraded to Genesis v7.72.2 known-good)
 MODEL_DIR=/path/to/huggingface docker compose \
-  -f models/qwen3.6-27b/vllm/compose/dual/tq3-mtp-genesis.yml up -d
+  -f models/qwen3.6-27b/vllm/compose/dual/autoround-int4/tq3-mtp-genesis.yml up -d
 
 # 3. Run the full 5-phase rebench (~1.75-2 hr)
 URL=http://localhost:8015 TAG=my-tq3-mtp-genesis bash scripts/rebench-full.sh

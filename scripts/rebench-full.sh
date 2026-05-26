@@ -56,6 +56,19 @@
 #                       (default: 3600 — bumped from benchlocal-cli's
 #                       default to avoid mid-batch kills on slower /
 #                       power-capped / single-card rigs).
+#   SAMPLING_FROM_SERVER
+#                       Set to 1 to inherit sampling from the serving config
+#                       instead of the pack's default temp=0. Passed through
+#                       to quality-test.sh --sampling-from-server. Useful when
+#                       the compose encodes the model's recommended sampling
+#                       (e.g. Qwopus temp=0.8). Tags runs as non-canonical.
+#   ENABLE_THINKING
+#                       Set to 1 to pass request-level enable_thinking=true
+#                       through bench.sh and both quality-test.sh invocations.
+#                       Required to measure reasoning-on models honestly.
+#   THINKING_MAX_TOKENS
+#                       Optional thinking budget forwarded to quality-test.sh
+#                       when ENABLE_THINKING=1.
 #
 
 set -euo pipefail
@@ -170,6 +183,7 @@ echo "  out dir:     $OUT_DIR"
 echo "  resume:      $RESUME"
 echo "  skips:       ${SKIP_CSV:-(none)}"
 echo "  hermes env:  BENCHLOCAL_HERMES_RESOLVE_LOCALHOST=${BENCHLOCAL_HERMES_RESOLVE_LOCALHOST:-0}"
+echo "  thinking:    ${ENABLE_THINKING:-0}${THINKING_MAX_TOKENS:+ (max_tokens=$THINKING_MAX_TOKENS)}"
 echo "==============================================================="
 date +"  started:     %Y-%m-%dT%H:%M:%SZ" -u
 echo
@@ -258,6 +272,7 @@ snapshot_quality_json() {
 
 # --- step 1: bench ----------------------------------------------------------
 URL="$URL" MODEL="$MODEL" RUNS="${RUNS:-3}" WARMUPS="${WARMUPS:-1}" \
+  ENABLE_THINKING="${ENABLE_THINKING:-0}" \
   run_step bench "$OUT_DIR/bench.log" \
     bash "$ROOT_DIR/scripts/bench.sh" || true
 
@@ -268,8 +283,11 @@ URL="$URL" MODEL="$MODEL" \
 
 # --- step 3: quality-test --full --------------------------------------------
 URL="$URL" MODEL="$MODEL" \
+  SAMPLING_FROM_SERVER="${SAMPLING_FROM_SERVER:-0}" \
+  ENABLE_THINKING="${ENABLE_THINKING:-0}" \
+  THINKING_MAX_TOKENS="${THINKING_MAX_TOKENS:-}" \
   run_step quality-full "$OUT_DIR/quality-full.log" \
-    bash "$ROOT_DIR/scripts/quality-test.sh" --full
+    bash "$ROOT_DIR/scripts/quality-test.sh" --full --sandbox-log-dir "$OUT_DIR"
 snapshot_quality_json "$OUT_DIR/quality-full.json"
 
 # --- step 4: soak-test ------------------------------------------------------
@@ -287,10 +305,19 @@ URL="$URL" MODEL="$MODEL" \
 # setups; benchlocal-cli will kill mid-batch if its internal default fires.
 # Override via env: AIDER_TIMEOUT_PER_CASE=7200 bash scripts/rebench-full.sh
 AIDER_TIMEOUT_PER_CASE="${AIDER_TIMEOUT_PER_CASE:-3600}"
-URL="$URL" MODEL="$MODEL" \
+# ik_llama reports its model id as the full GGUF path (leading + embedded
+# slashes); litellm inside the aider sandbox can't route a slash-laden model
+# id (#15/#16 family) → every exercise errors before the model → 0/30.
+# Mainline llama.cpp already reports a basename. Strip to basename for the
+# aider/litellm path — the server accepts any id (serves the one loaded model).
+AIDER_MODEL="${MODEL##*/}"
+URL="$URL" MODEL="$AIDER_MODEL" \
+  SAMPLING_FROM_SERVER="${SAMPLING_FROM_SERVER:-0}" \
+  ENABLE_THINKING="${ENABLE_THINKING:-0}" \
+  THINKING_MAX_TOKENS="${THINKING_MAX_TOKENS:-}" \
   run_step aider-polyglot "$OUT_DIR/aider-polyglot.log" \
     bash "$ROOT_DIR/scripts/quality-test.sh" --pack aider-polyglot-30 \
-      --timeout-per-case "$AIDER_TIMEOUT_PER_CASE"
+      --timeout-per-case "$AIDER_TIMEOUT_PER_CASE" --sandbox-log-dir "$OUT_DIR"
 snapshot_quality_json "$OUT_DIR/aider-polyglot.json"
 
 # --- final GPU state snapshot ----------------------------------------------

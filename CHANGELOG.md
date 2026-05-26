@@ -16,6 +16,144 @@ history; SemVer takes over from `v0.3.0` onward.
 
 ---
 
+## v0.8.5 — 2026-05-24
+
+
+### ✨ Features
+
+- feat(llama.cpp): Structured-CoT bounded-thinking compose + grammar-dialect fix (#214) ([#214](https://github.com/noonghunna/club-3090/pull/214) by @noonghunna)
+- feat(kv-calc): opt-in --kv-breakdown architecture cache planning layer (#213) ([#213](https://github.com/noonghunna/club-3090/pull/213) by @noonghunna)
+- feat(ik-llama/two-stage): ctx default 131072→200000 + promote 🧪→⭐ code option (#212) ([#212](https://github.com/noonghunna/club-3090/pull/212) by @noonghunna)
+
+
+### 🐛 Bug fixes
+
+- fix(rebench-report): surface ceiling VRAM margin in verify-stress section (#184) ([1055c91](https://github.com/noonghunna/club-3090/commit/1055c9162fe49f96025c21f4508dca8c009e4775))
+- fix(switch): shell env wins over .env (MODEL_DIR etc.) + CRLF-tolerant (#425) ([9a27de8](https://github.com/noonghunna/club-3090/commit/9a27de83d7e6aff293d9f423bc926ff9366ed993))
+- fix(ik-llama/two-stage): default ngram n_max 64→4 (tuned code-decode optimum) (#210) ([#210](https://github.com/noonghunna/club-3090/pull/210) by @noonghunna)
+- fix(#168): scope report.sh kv-calc calibration to the running model ([477873a](https://github.com/noonghunna/club-3090/commit/477873af93e35c6978b42abf11b890935909ae5b))
+- fix(#169): distinct default container_name per llama.cpp/ik single variant ([9e5f200](https://github.com/noonghunna/club-3090/commit/9e5f200449ceb87a64838e60e8f074d468326ed3))
+
+
+### 📝 Documentation
+
+- docs(BENCHMARKS): 4090 ik-two-stage cross-rig row + 4090 ctx-derate note (#184) ([703fa3c](https://github.com/noonghunna/club-3090/commit/703fa3cc119b590198551da7c844f906c00505cb))
+- docs(README): direct docker-compose fallback when launch/switch error + default capture to --full ([27e818f](https://github.com/noonghunna/club-3090/commit/27e818f559f125d3ab438a62f4db84bf353dd45c))
+- docs(BENCHMARKS): add thinking-on vs no-think code-gen baseline (Qwen3.6-27B) ([d8adf55](https://github.com/noonghunna/club-3090/commit/d8adf55b4b582ff70dffbaf536f7cad8bf0e3d8a))
+- docs(README): Windows/WSL2 signpost at top of Quick start ([f954692](https://github.com/noonghunna/club-3090/commit/f954692676107aef38e7794ea3150079db9c8817))
+- docs(WSL): add Diagnostics section — suggest pciutils, set lspci/WSL2 expectation ([d36eb63](https://github.com/noonghunna/club-3090/commit/d36eb633c6d7e5ace99faa40dc9725ae0ccf6ad6))
+- docs(WSL,FAQ): clarify club-3090 needs WSL2 — native Windows = upstream engine only ([6fa639b](https://github.com/noonghunna/club-3090/commit/6fa639bb5ad85231de55446775139a9851e5c845))
+- docs(README,WSL): fold reasoning suite into Benchmarks; add native llama.cpp + overhead-reduction to WSL guide ([80527f9](https://github.com/noonghunna/club-3090/commit/80527f99708a1c0af972b8e8b3507c341faa98c8))
+- Document reasoning quality suite ([605f1df](https://github.com/noonghunna/club-3090/commit/605f1df52e4f7bb2a85cd676ebe56827c163ef9d))
+- docs: add WSL2/Windows from-scratch setup guide (#187) ([3c1a6e9](https://github.com/noonghunna/club-3090/commit/3c1a6e962a1206f920e28009c4055fa11f9dcc08))
+- docs(README): add Benchmarks + Diagnostics sections ([37574fe](https://github.com/noonghunna/club-3090/commit/37574fe4c00a39059631069876e4131842588601))
+- docs(diagnostics): redact internal paths in structured-cot-bench.md ([3b270b9](https://github.com/noonghunna/club-3090/commit/3b270b99a35636070cba0f15b25ae1cdec4715c1))
+- docs: promote iq4ks-two-stage 🧪→⭐ (code, 200K) + BENCHMARKS row ([7e6eaf8](https://github.com/noonghunna/club-3090/commit/7e6eaf8f005a84ef968ead7a0138267298834706))
+- docs(SINGLE_CARD): add measured two-stage TPS (~59/~98, code +35% vs MTP-only) ([b10096c](https://github.com/noonghunna/club-3090/commit/b10096cca016fe6e4782a7d7f83055801dcedf10))
+- docs(SINGLE_CARD): mark the #167-blocked vLLM configs in "Pick a config" ([cb19d68](https://github.com/noonghunna/club-3090/commit/cb19d6829c49af606970676b2840fadefdcc36ed))
+- docs(README): drop SGLang from the headline engine claims (blocked, not a route) ([678fd00](https://github.com/noonghunna/club-3090/commit/678fd006c5036ab930f3aaf3a32d0c996eb28170))
+- docs(README): single-card "recommended" → llamacpp/default (was #167-blocked vllm/default) ([44c08b6](https://github.com/noonghunna/club-3090/commit/44c08b614668771a3cc637c7222197b90ab4b821))
+- docs(DUAL_CARD): distinguish decode-concurrent vs long-prefill-overlap (#208) ([36767f1](https://github.com/noonghunna/club-3090/commit/36767f1dff66d1e7dac5e180a8b229144a935f32))
+- docs(README): fix stale 'llama.cpp single = full 262K' → 200K in supported-models cell ([2a8357f](https://github.com/noonghunna/club-3090/commit/2a8357f2815423f3ae6ab0919c9c59211f870413))
+- docs+registry: surface ik-llama on the single-card front door + fix stale max_ctx ([7f73361](https://github.com/noonghunna/club-3090/commit/7f733618e60899cb6878f16a5ba32b96daabd91c))
+- docs(BENCHMARKS): refresh llamacpp/mtp row to the 200K thinking-off rebench ([2eca18d](https://github.com/noonghunna/club-3090/commit/2eca18d23399759cf38d08a28c49cbb4ecffa0cd))
+- docs(#169 branch): fix stale 262K→200K cross-refs in single compose headers ([62a0f4b](https://github.com/noonghunna/club-3090/commit/62a0f4be63144dfe5d652861a650b7917cdc2f6f))
+- docs: correct single-card llama.cpp/ik_llama ctx 262K -> 200K (shipped default) ([c7fc9ca](https://github.com/noonghunna/club-3090/commit/c7fc9ca638ab6b80a110fffff5637bfc0842aa4c))
+
+
+### 🧹 Maintenance
+
+- chore: retire the club-3090 pre-built vLLM image (workflow + docs) ([7003e61](https://github.com/noonghunna/club-3090/commit/7003e6141b8399fb2fe14019241f6f5d171e84a9))
+
+
+### 🧹 Other
+
+- Add profile-backed model weight fetch registry ([5f37ae6](https://github.com/noonghunna/club-3090/commit/5f37ae6d4d299e0ece942c6475d1b8ae7b275a4d))
+- Generalize compose model preflight ([99d264b](https://github.com/noonghunna/club-3090/commit/99d264b2c460247091b8f10c4853e988f2a9ff90))
+- Expose benchlocal reasoning suite ([caf6fc2](https://github.com/noonghunna/club-3090/commit/caf6fc2b723c46c70a6dcd38d2778f1d5e1e469c))
+
+
+
+[Pin: `git checkout v0.8.5`] · [Full diff](https://github.com/noonghunna/club-3090/compare/v0.8.4...v0.8.5)
+## v0.8.4 — 2026-05-23
+
+
+### ✨ Features
+
+- feat(verify-stress): capture prefill throughput during NIAH rungs (#199) ([07d478c](https://github.com/noonghunna/club-3090/commit/07d478c1abfb9873cb106708ee05aa94473866f0))
+- feat(eval): expose request-level thinking toggles (#196) ([#196](https://github.com/noonghunna/club-3090/pull/196) by @noonghunna)
+- feat(scripts): pass --sampling-from-server through quality-test.sh + rebench-full.sh ([dd1f070](https://github.com/noonghunna/club-3090/commit/dd1f07062642e7a583b19c4e977885ea8404f404))
+- feat(compose): expose sampling defaults via env (#194) ([#194](https://github.com/noonghunna/club-3090/pull/194) by @noonghunna)
+- feat(setup): WEIGHTS=gguf to fetch the llama.cpp GGUF (not just the vLLM model) (#191) ([#191](https://github.com/noonghunna/club-3090/pull/191) by @noonghunna)
+- feat(ik-llama): wire iq4ks-mtp + iq4ks-mtp-vision into launch.sh + switch.sh (#189) ([#189](https://github.com/noonghunna/club-3090/pull/189) by @noonghunna)
+- feat(models): add ik_llama Qwen3.6-27B IQ4_KS composes — text 262K + vision 160K (#180) ([#180](https://github.com/noonghunna/club-3090/pull/180) by @noonghunna)
+
+
+### 🐛 Bug fixes
+
+- fix(rebench): basename model id for the aider/litellm step (ik_llama full-path id → 0/30) ([3b20ce3](https://github.com/noonghunna/club-3090/commit/3b20ce3c7cb53f49512f2af098fe175db5683d8b))
+- fix(soak,preflight): recognize llama-cpp / ik-llama containers in autodetect (#403) ([d9fdab2](https://github.com/noonghunna/club-3090/commit/d9fdab296103e240527210fb5af131361fe07223))
+- fix(compose): ik iq4ks-mtp header — record measured ceiling-ladder result (200K confirmed) ([1d93343](https://github.com/noonghunna/club-3090/commit/1d9334335f278dcef89f0b817815f243e9d42b57))
+- fix(compose): lower single-card MTP CTX_SIZE default 262144 → 200000 (llama.cpp + ik_llama) ([2e45928](https://github.com/noonghunna/club-3090/commit/2e45928e4c455115f509555e54c6c0e6223499e4))
+- fix(verify-stress): three live-caught bugs in ceiling ladder (#199) ([b84249c](https://github.com/noonghunna/club-3090/commit/b84249c805d7ce9f311e215f227e32049917ce87))
+- fix(verify-stress): add CTX_SIZE-scaled ceiling ladder (#199) ([5a825a4](https://github.com/noonghunna/club-3090/commit/5a825a428a43bcd54fa1b6a3e9a91a2767c5be63))
+- fix(report): PyYAML/idle-VRAM/P2P/redaction/kv-calc polish + review fixes (#178/#137) ([#192](https://github.com/noonghunna/club-3090/pull/192) by @noonghunna)
+- fix(launch): point users at MODEL_DIR/.env when weights aren't found (#190) ([#190](https://github.com/noonghunna/club-3090/pull/190) by @noonghunna)
+- fix(llamacpp): pin image to server-cuda-b9246 (rolling tag broke at b9282) (#188) ([#188](https://github.com/noonghunna/club-3090/pull/188) by @noonghunna)
+- fix(launch): single-card default suggestion → llamacpp/default (#185) ([#185](https://github.com/noonghunna/club-3090/pull/185) by @noonghunna)
+- fix(rebench): always capture sandboxed-pack logs to the per-tag results dir (#179) ([#179](https://github.com/noonghunna/club-3090/pull/179) by @noonghunna)
+
+
+### 📝 Documentation
+
+- docs: correct ik_llama verdict — ~18-20% FASTER than mainline, not a "tie" (#184) ([b7353da](https://github.com/noonghunna/club-3090/commit/b7353daa52f851e71ea2974b673ed1329372c234))
+- docs: add @mgabor3141 X399/TR-1950X dual.yml row + pre-Zen2 CPU-IPC note (#178) ([6e49960](https://github.com/noonghunna/club-3090/commit/6e499609b4566830b603ec024cd311db0bbadcae))
+- docs(CLIFFS): document llama.cpp "boots ≠ fills" false ceiling; 200K = max-safe single-card CTX_SIZE ([9be237d](https://github.com/noonghunna/club-3090/commit/9be237da7407478a61a5f6a7212ad686375f86d1))
+- docs: QUALITY_TEST.md — fix stale pack-status (sandboxed packs now implemented) ([f6bdc06](https://github.com/noonghunna/club-3090/commit/f6bdc067dc8dc4992f2c67e23d28a8a9ab50a4eb))
+- docs: document sampling/temperature eval options (#193/#194 + benchlocal #19/#21) ([9fd634a](https://github.com/noonghunna/club-3090/commit/9fd634a5b5ef13a902b201db60fd5a8bb666cef9))
+- docs(single-card): strike Genesis-pinned vLLM rows (blocked by purged pin #167) ([a30bdfd](https://github.com/noonghunna/club-3090/commit/a30bdfd812a8fcd912b3764d49ba1e204351ace7))
+- docs(upstream): correct the #40875 row (open tool-call-corruption bug, not "closed coexistence") ([25f130a](https://github.com/noonghunna/club-3090/commit/25f130a2868a1a79329baca8bbe3fca51035e313))
+- docs: correct ik_llama claims to the matched-power tie (#184) ([c470d9a](https://github.com/noonghunna/club-3090/commit/c470d9a32dbcbb66b54a214a44abddaf11f8a80f))
+- docs: surface WEIGHTS=gguf + switch.sh ik-llama paths (match #189/#191) ([412315d](https://github.com/noonghunna/club-3090/commit/412315d9ccf9fd251dfff3e3d3a88a0347d67315))
+- docs(HARDWARE/FAQ): AMD-Vi IOMMU Xid 154 under TP=2 → iommu=pt fix (#178) ([fe86b72](https://github.com/noonghunna/club-3090/commit/fe86b72a73ec94e6a610711f33778465f8c004d1))
+- docs: add ik_llama engine page + QUANTIZATION primer; surface IQK quants ([554b85b](https://github.com/noonghunna/club-3090/commit/554b85b8ea3cc7bdb3cb69a0a37f551870e74037))
+- docs(BENCHMARKS): @duart dual NVLink Proxmox VFIO-passthrough, stock-upstream no-Genesis (disc #162) ([bc6e20b](https://github.com/noonghunna/club-3090/commit/bc6e20bb8e110372381f5dd930b1e111141e15f2))
+- docs(BENCHMARKS): @mgabor3141 dual.yml — Z77/i7-3770K, PCIe 2.0 x4 slowest cross-card link (#178) ([626fa68](https://github.com/noonghunna/club-3090/commit/626fa68a7fa4be0a70f0e53cfe514e86c8e2d7ed))
+- docs(mtp-vision): surface the -ub 512 → 192K context recipe in the compose header ([70bf7e7](https://github.com/noonghunna/club-3090/commit/70bf7e74be185a0f20a5d4cacd4c356aa7c4cf08))
+- docs: cross-link the -ub vs ctx trade-off into SINGLE_CARD + CLIFFS + FAQ ([035261b](https://github.com/noonghunna/club-3090/commit/035261bc5831090dd2da4190e6262d4679336afd))
+- charts: compose names on x-axis + description legend block below ([07c7cd0](https://github.com/noonghunna/club-3090/commit/07c7cd0222dc5ce646703137515a4aad2d0c8908))
+- charts: tighten single-card label format (line 1 = variant + ctx, line 2 = modifier) ([9aa8fa7](https://github.com/noonghunna/club-3090/commit/9aa8fa71ab99306ba730d29686e5963a1ef1bebc))
+
+
+### 🛠️ Scripts + tooling
+
+- scripts: endpoint-first --url/--model/--engine for non-Docker engines (#174) ([#174](https://github.com/noonghunna/club-3090/pull/174) by @noonghunna)
+- report.sh: capture image digest + OCI labels (build tag, upstream commit) ([78556f8](https://github.com/noonghunna/club-3090/commit/78556f88158be9e5baeda6fee03e15d5787077b0))
+
+
+### 🧹 Maintenance
+
+- chore(compose): drop accidentally-committed qwopus3.6-27b-v2 llama.cpp compose ([b8aeb93](https://github.com/noonghunna/club-3090/commit/b8aeb93333e904f2cef01069a0402b34aa8c731e))
+- refactor(llamacpp): collapse single-card composes 3→2 (default = mtp alias) (#181) ([#181](https://github.com/noonghunna/club-3090/pull/181) by @noonghunna)
+
+
+### 🧹 Other
+
+- Fix verify-full to accept reasoning_content ([3a04ae5](https://github.com/noonghunna/club-3090/commit/3a04ae50843c9aa04c7e1f13e37c67de85586554))
+- quality-test: respect explicit MODEL/--model, don't clobber from /v1/models (#177) ([#177](https://github.com/noonghunna/club-3090/pull/177) by @noonghunna)
+- sglang: park EAGLE-3 path for Qwen3-Next (MTP wins everywhere) (#176) ([#176](https://github.com/noonghunna/club-3090/pull/176) by @noonghunna)
+- quality-test: expose --timeout-per-case + bump aider-polyglot-30 to 3600s (#175) ([#175](https://github.com/noonghunna/club-3090/pull/175) by @noonghunna)
+- sglang: experimental EAGLE-3 + Qwen3-Next dual-3090 path (Codex-led patch) ([941fa06](https://github.com/noonghunna/club-3090/commit/941fa0644ec3e98ee0fa0a190f87fdec3d923784))
+- SINGLE_CARD: refresh Luce DFlash + PFlash watch-list (2026-05-20) ([f9f9640](https://github.com/noonghunna/club-3090/commit/f9f9640a5148df8c451cb99ac3f409a898830bda))
+- AGENTS: pin engine images only when we vendor patches ([6810768](https://github.com/noonghunna/club-3090/commit/68107680e092cf04ee4bc3ab086687eed8b433fb))
+- llama-cpp: document speed-vs-context trade-off + fix stale ub default ([1b2a76c](https://github.com/noonghunna/club-3090/commit/1b2a76ca897ae8df351989a585d54e9c3940e55e))
+- llama-cpp: switch to rolling :server-cuda tag (no patches → no pin needed) ([4a53eda](https://github.com/noonghunna/club-3090/commit/4a53edab43cd649eaa1ac4c80a13bbb5a7b17437))
+- llama-cpp: replace orphan llama-cpp:local with upstream pinned image (#170) ([c3e7c7e](https://github.com/noonghunna/club-3090/commit/c3e7c7ed8036810e0c172f8b1cd7332ac33ac924))
+- gpu-mode status: probe :8020 + detect engine on :8030 ([db9c5e1](https://github.com/noonghunna/club-3090/commit/db9c5e1bb9bfd01bd37e4c23038c62805db40b26))
+
+
+
+[Pin: `git checkout v0.8.4`] · [Full diff](https://github.com/noonghunna/club-3090/compare/v0.8.3...v0.8.4)
 ## v0.8.3 — 2026-05-20
 
 

@@ -63,6 +63,8 @@ Trade: llama.cpp gives up ~3× decode speed (21 TPS vs 67 on vLLM single when si
 
 > **2026-05-20 refinement — `-ub` is doing two jobs at once.** Surfaced by @JensJN in [#170](https://github.com/noonghunna/club-3090/discussions/170): on `llamacpp/mtp-vision` (where mmproj F16 competes for headroom), dropping `-ub 1024 → 512` frees ~1 GB to the KV pool. That trades ~10% TPS for **4× more context** (49K → 192K) with verify-stress 7/7 still passing including the 91K needle. So `-ub` simultaneously caps the per-pass activation peak (cliff-survival) AND eats into the KV-cache budget (ctx ceiling). The optimal value is **configuration-conditional**: with mmproj loaded, smaller `-ub` is meaningfully better for context-heavy workloads. Documented in [`models/qwen3.6-27b/llama-cpp/README.md`](../models/qwen3.6-27b/llama-cpp/README.md#speed-vs-context--pick-your-trade-off).
 
+> **2026-05-23 finding — the `CTX_SIZE` default itself is a "boots ≠ fills" false ceiling; 200K is the max-safe single-card value.** Surfaced diagnosing @syangsao's single-card OOM in [#197](https://github.com/noonghunna/club-3090/issues/197). The shipped `llamacpp/mtp` default `CTX_SIZE=262144` *boots*, pre-reserves its KV pool, and passes `verify-stress` to the 91K needle — yet it only **fills to ~125K** (47% of declared) before OOMing. The wall is **not** the GDN cliff (Cliff 2) and **not** the pre-reserved KV pool: it's the **flash-attention transient scratch at high fill** (`launch_fattn` / `cuMemCreate`), which scales with how much context is actually *populated*, not with what was reserved at boot. Measured via the [#200](https://github.com/noonghunna/club-3090/pull/200) ceiling-ladder probe (Q4_K_M, q4_0 KV, MTP n=2, `-ub 512`, single 3090): 262K → walls at the 155K rung (353 MB free at boot); **200K → fills 183K (91%) with 1177 MB free, clearing the 1024 MB margin gate**; 224K (by the rate math) → fills but ends ~400 MB free, below margin. So **200K is the max-safe single-card `CTX_SIZE`** — above it the config *advertises* more context than it can fill. Calibrated rates: KV-pool reservation ≈ **25 MB/1K tok**, at-fill at-rest growth ≈ **7.9 MB/1K tok**. This is also *why* the old fixed-depth (91K) needle gave a false all-clear — the probe didn't scale to `CTX_SIZE`, so it never reached the wall; [#200](https://github.com/noonghunna/club-3090/pull/200) makes the ladder scale to 0.92×`n_ctx`. **Practical impact:** the `Max ctx: 262144` header on [`models/qwen3.6-27b/llama-cpp/compose/single/unsloth-q4km/mtp.yml`](../models/qwen3.6-27b/llama-cpp/compose/single/unsloth-q4km/mtp.yml) overstates fillable context — treat ~125K as that config's real ceiling, or set `CTX_SIZE=200000` for a fully-fillable single-card config. Note also the **prefill cost at depth**: 1057 t/s short-prompt → 457 t/s at 183K (~245 s/prefill) — "fits ≠ usable" for interactive agents.
+
 ---
 
 ## vLLM pin compatibility status (master ships on v0.20 + Genesis v7.69 — 2026-05-02 PM)
@@ -161,8 +163,8 @@ Plus MTP-off + 0.95: 60K passes in 504s with full 5+ GiB KV pool — separate "m
 
 | Variant | File | max_model_len | mem-util | MTP | Cliff 2 60K | Use case |
 |---|---|---|---|---|---|---|
-| **Balanced MTP** | [`long-text.yml`](../models/qwen3.6-27b/vllm/compose/single/long-text.yml) | 180K | 0.93 | ✅ K=3 | ✅ 623s | Default — multi-turn agentic coding |
-| **Max-context safety** | [`long-text-no-mtp.yml`](../models/qwen3.6-27b/vllm/compose/single/long-text-no-mtp.yml) (NEW) | 200K | 0.95 | ❌ off | ✅ 537s | Long single-shot RAG / codebase analysis |
+| **Balanced MTP** | [`long-text.yml`](../models/qwen3.6-27b/vllm/compose/single/autoround-int4/long-text.yml) | 180K | 0.93 | ✅ K=3 | ✅ 623s | Default — multi-turn agentic coding |
+| **Max-context safety** | [`long-text-no-mtp.yml`](../models/qwen3.6-27b/vllm/compose/single/autoround-int4/long-text-no-mtp.yml) (NEW) | 200K | 0.95 | ❌ off | ✅ 537s | Long single-shot RAG / codebase analysis |
 
 Both top out at 60K Cliff 2 ceiling — that's the hardware-physical wall on 24 GB single-card. 90K probes hit OOM (Balanced MTP) or fail to complete in 25-min budget (Max-context). For prompts >60K, route to `dual.yml` (TP=2 splits state) or `llamacpp/default` (262K, different engine).
 
@@ -523,7 +525,7 @@ This is why our launch frame is **two routes, not one**: vLLM dual-card for max 
 
 | Mitigation | Closes which cliff? | Where shipped |
 |---|---|---|
-| Cap `max-model-len` at 48K (TQ3) | Cliff 1 (under threshold) | `docker-compose.yml` (default) |
+| Cap `max-model-len` at 48K (TQ3) | Cliff 1 (under threshold) | `tq3-mtp.yml` (single default) |
 | FP8 KV + PN8 + cap at 75K | Cliff 1 (PN8 absorbs leak) | `tools-text.yml` |
 | TP=2 (dual-card) | Cliff 2 (state splits across cards) | `dual.yml`, `dual-turbo.yml` |
 | llama.cpp engine swap | Both (different library entirely) | `llamacpp/default`, `llamacpp/mtp`, `llamacpp/mtp-vision` |

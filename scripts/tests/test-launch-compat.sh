@@ -95,11 +95,11 @@ out="$(python3 "$HELPER" resolve-variant-pin --variant vllm/gemma-dflash --forma
 assert_contains "$out" "VLLM_NIGHTLY_SHA=${DFLASH_SHA}"
 
 if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-  out="$(VLLM_NIGHTLY_SHA="$CLEAN_SHA" docker compose -f "$ROOT_DIR/models/qwen3.6-27b/vllm/compose/dual/docker-compose.yml" config 2>/dev/null)"
-  assert_contains "$out" "image: vllm/vllm-openai:nightly-${CLEAN_SHA}"
+  out="$(VLLM_NIGHTLY_SHA="$CLEAN_SHA" docker compose -f "$ROOT_DIR/models/qwen3.6-27b/vllm/compose/dual/autoround-int4/fp8-mtp.yml" config 2>/dev/null)"
+  assert_contains "$out" "image: vllm/vllm-openai:v0.21.0"
 
-  out="$(VLLM_NIGHTLY_SHA="$CLEAN_SHA" VLLM_IMAGE=ghcr.io/noonghunna/vllm-club3090:latest docker compose -f "$ROOT_DIR/models/qwen3.6-27b/vllm/compose/dual/docker-compose.yml" config 2>/dev/null)"
-  assert_contains "$out" "image: ghcr.io/noonghunna/vllm-club3090:latest"
+  out="$(VLLM_NIGHTLY_SHA="$CLEAN_SHA" VLLM_IMAGE=vllm/vllm-openai:latest docker compose -f "$ROOT_DIR/models/qwen3.6-27b/vllm/compose/dual/autoround-int4/fp8-mtp.yml" config 2>/dev/null)"
+  assert_contains "$out" "image: vllm/vllm-openai:latest"
 fi
 
 out="$(python3 - <<'PY'

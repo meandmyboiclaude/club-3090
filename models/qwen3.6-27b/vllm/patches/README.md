@@ -9,24 +9,24 @@ This directory contains the model + engine-specific patches that compose variant
 | `genesis/` | every Genesis-loaded compose | Sandermage's [genesis-vllm-patches](https://github.com/Sandermage/genesis-vllm-patches) tree (gitignored; checked out at the pin in `scripts/setup.sh` — currently `7b9fd319`, v7.72.2) |
 | `vllm-marlin-pad/marlin.py` + `MPLinearKernel.py` | every TP=2 compose with AutoRound INT4 | Vendored vLLM PR #40361 fix for Marlin `GPTQ_MARLIN_MIN_THREAD_N=64` blocking sub-tile-N output dim shards |
 | `local/qwen3coder_tool_parser_deferred_commit.py` | every Genesis-loaded compose | Local sidecar for the `qwen3_coder` tool parser SSE-silence bug — defers `is_tool_call_started` commit until `<function=` confirms within 64-char slack window. Filed at [club-3090 issue #72](https://github.com/noonghunna/club-3090/issues/72) (originally reported by @troymroberts as P61c V2). Applied after `apply_all` in entrypoint. Drops out when vllm-project/vllm lands the canonical fix. |
-| `carnice-chat-template.jinja` | `dual/carnice-bf16mtp.yml` only | Patched chat template for Carnice-V2-27B's Hermes-style tool format |
+| `carnice-chat-template.jinja` | `dual/carnice-bf16mtp/bf16-mtp.yml` only | Patched chat template for Carnice-V2-27B's Hermes-style tool format |
 
 ## Composes that load Genesis
 
 8 composes currently bootstrap the Genesis tree + apply_all entrypoint:
 
-- `docker-compose.yml` (single-card default, 48K ctx)
-- `dual/turbo.yml` (TP=2, TQ3 KV, MTP — daily-driver)
-- `dual/nvlink-turbo.yml` (TP=2, NVLink, TQ3 KV, MTP)
-- `single/long-text.yml` (TP=1, 180K ctx, MTP)
-- `single/long-text-no-mtp.yml` (TP=1, 200K ctx, no MTP)
-- `single/long-vision.yml` (TP=1 with vision tower)
-- `single/bounded-thinking.yml` (TP=1, FSM bounded-thinking)
-- `single/tools-text.yml` (TP=1, 75K ctx, no MTP)
+- `single/autoround-int4/tq3-mtp.yml` (single-card default, 48K ctx)
+- `dual/autoround-int4/turbo.yml` (TP=2, TQ3 KV, MTP — daily-driver)
+- `dual/autoround-int4/nvlink-turbo.yml` (TP=2, NVLink, TQ3 KV, MTP)
+- `single/autoround-int4/long-text.yml` (TP=1, 180K ctx, MTP)
+- `single/autoround-int4/long-text-no-mtp.yml` (TP=1, 200K ctx, no MTP)
+- `single/autoround-int4/long-vision.yml` (TP=1 with vision tower)
+- `single/autoround-int4/bounded-thinking.yml` (TP=1, FSM bounded-thinking)
+- `single/autoround-int4/tools-text.yml` (TP=1, 75K ctx, no MTP)
 
 These same 8 composes also receive the `qwen3coder_tool_parser_deferred_commit.py` sidecar (see Active patches table above) since they all share the same entrypoint pattern.
 
-Composes that do **not** mount Genesis (intentionally — Genesis-free fallback / different attention path / minimal config): `dual/docker-compose.yml` (fp8 KV TP=2 — kept Genesis-free as a debugging fallback for cross-engine bisect), `multi4.yml`, `multi4-dflash.yml`, `dual-dflash.yml`, `dual-dflash-noviz.yml`, `dual-nvlink.yml`, `minimal.yml`, `carnice-bf16mtp.yml`, `qwopus-bf16mtp.yml`. **These composes do NOT currently receive the qwen3coder tool-parser sidecar** — they have no entrypoint script to run it from. If you hit the `<tool_call>`-in-prose silent-drop bug on one of these composes, you can either (a) set `--tool-call-parser hermes` instead of `qwen3_coder` if your model template tolerates it, (b) add an entrypoint script following the dual-turbo.yml pattern, or (c) wait for the upstream vLLM fix to land. See [issue #72](https://github.com/noonghunna/club-3090/issues/72) for context.
+Composes that do **not** mount Genesis (intentionally — Genesis-free fallback / different attention path / minimal config): `dual/autoround-int4/fp8-mtp.yml` (fp8 KV TP=2 — kept Genesis-free as a debugging fallback for cross-engine bisect), `multi4.yml`, `multi4-dflash.yml`, `dual-dflash.yml`, `dual-dflash-noviz.yml`, `dual-nvlink.yml`, `minimal.yml`, `carnice-bf16mtp.yml`, `qwopus-bf16mtp.yml`. **These composes do NOT currently receive the qwen3coder tool-parser sidecar** — they have no entrypoint script to run it from. If you hit the `<tool_call>`-in-prose silent-drop bug on one of these composes, you can either (a) set `--tool-call-parser hermes` instead of `qwen3_coder` if your model template tolerates it, (b) add an entrypoint script following the dual-turbo.yml pattern, or (c) wait for the upstream vLLM fix to land. See [issue #72](https://github.com/noonghunna/club-3090/issues/72) for context.
 
 ## What was retired in v7.72.2-uplift (2026-05-05)
 

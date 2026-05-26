@@ -107,12 +107,12 @@ BLOCKED: unified_attention compiles for e5m2 but exceeds Ampere shared memory:
 
 Runtime plan after the shared-memory issue is fixed upstream:
 
-1. TP=2 first: `dual/docker-compose.yml` plus this RO mount and
+1. TP=2 first: `dual/autoround-int4/bf16-mtp.yml` plus this RO mount and
    `--kv-cache-dtype fp8_e5m2`.
 2. Check boot logs for doubled KV capacity versus bf16 baseline:
    `Available KV cache memory` and `GPU KV cache size`.
 3. Run `scripts/verify-full.sh` against the service.
-4. TP=1 next: `single/docker-compose.yml` plus this RO mount and
+4. TP=1 next: `single/autoround-int4/fp8-mtp.yml` plus this RO mount and
    `--kv-cache-dtype fp8_e5m2`.
 
 ## Drop Conditions

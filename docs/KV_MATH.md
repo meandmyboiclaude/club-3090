@@ -24,11 +24,48 @@ bash tools/kv-calc.py --model gemma-4-31b --solve-max-ctx --tp 2 --kv-format int
 
 # How accurate is the model? Show predicted vs measured for our shipped composes (both models):
 bash tools/kv-calc.py --calibration
+
+# Optional architecture-level cache breakdown for home/workstation rig planning:
+bash tools/kv-calc.py --compose dual --vram 24 --gpus 2 --kv-breakdown
+
+# Same fit path, but use calculator-style wording for concurrency:
+bash tools/kv-calc.py --model qwen3.6-27b --max-ctx 32768 --sequences 2 --tp 2 --vram 24 --kv-breakdown
 ```
 
 `--model` defaults to `qwen3.6-27b` for backward compatibility with earlier invocations.
 
 The predictor is a directional estimator, not a precise allocator. The vLLM engine's `gpu_worker.py` boot-log report is authoritative — the calculator is for *before* boot.
+
+## Home/workstation planning mode
+
+`tools/kv-calc.py` is still a deployment-fit calculator first. Existing scripts and compose checks should keep using the calibrated prediction path (`predict()`, `raw_verdict()`, `--calibration`, `--json`) as the source of truth. The optional `--kv-breakdown` mode adds architecture-level cache buckets inspired by public KV calculators, but it is reporting-only unless a future profile explicitly opts into those fields.
+
+Useful flags:
+
+| Flag | Purpose | Default behavior |
+|---|---|---|
+| `--gpus N` | Physical GPUs in a single-node home/workstation rig. Informational; TP still controls memory sharding. | Defaults to `TP` |
+| `--sequences N` | Calculator-style alias for `--max-num-seqs`. | Existing `--max-num-seqs` behavior |
+| `--kv-breakdown` | Prints raw cache/state buckets in addition to the calibrated fit verdict. | Off |
+| `--include-draft-kv --draft-kv-gb X` | Adds a per-card draft-KV estimate to the breakdown. Drafter weights remain modelled by `--drafter-gb`. | Off / 0 GB |
+| `--compressed-layers`, `--compression-ratio`, `--compressed-head-dim` | Optional compressed/sparse KV estimate for future sparse-cache model families. | 0 layers |
+| `--indexer-ratio-layers`, `--indexer-compress-ratio`, `--indexer-head-dim`, `--indexer-format` | Optional indexer-cache estimate for models with separate sparse-cache indexers. | 0 layers, `fp4` |
+
+The intended envelope is local single-node rigs: 1-8 consumer/prosumer/workstation GPUs. This includes serious home workstations such as 4× RTX 6000-class rigs, but deliberately does not try to model datacenter scheduling, multi-node cache offload, or SLA/eviction policy.
+
+Example output buckets:
+
+```text
+Cache architecture breakdown
+----------------------------
+  Layout:                   hybrid_mamba
+  Scope:                    2 GPU(s), TP=2, sequences=2
+  Attention KV — growing:     8.59 GB / card
+  Recurrent / SSM state:      0.01 GB / card
+  Cache/state subtotal:       8.60 GB / card
+```
+
+Important distinction: if `--compressed-*` or `--indexer-*` fields are used manually, they are architecture math estimates. The calibrated fit verdict remains the Club-3090 estimate that includes weights, activation peak, vLLM workspace/cudagraph overhead, drafter residency, and vLLM KV-pool capping behavior.
 
 ## General KV cache formula
 
@@ -470,7 +507,7 @@ peak ≈ weights/N + kv_pool_growing + kv_pool_sliding + activation_peak + cudag
 | AWQ-4bit (`cyankiwi/gemma-4-31B-it-AWQ-4bit`) | ~17 GB | 8.5 GB |
 | BF16 (unquantized) | ~58 GB | 29 GB (does not fit on 24 GB) |
 
-Two shipped quants on this stack: AutoRound INT4 (default) and AWQ-4bit (Tier 2 reproducer of #103). INT4 weights + INT8-per-token-head KV is the matched-config dual-3090 recipe (see `models/gemma-4-31b/vllm/compose/dual/int8.yml`).
+Two shipped quants on this stack: AutoRound INT4 (default) and AWQ-4bit (Tier 2 reproducer of #103). INT4 weights + INT8-per-token-head KV is the matched-config dual-3090 recipe (see `models/gemma-4-31b/vllm/compose/dual/autoround-int4/int8.yml`).
 
 ### 2. KV pool — growing portion (10 full-attention layers)
 
@@ -495,7 +532,7 @@ Per-token growing-KV bytes by format:
 
 Total growing-KV pool per card = `per_token_bytes_growing / TP × max_ctx × max_num_seqs`.
 
-**Note**: on Ampere consumer cards (sm_86), `fp8_e4m3` is NOT supported. Use `int8_per_token_head` (PR #40391, vendored on this stack via PR #42102). See `models/gemma-4-31b/vllm/compose/dual/int8.yml`.
+**Note**: on Ampere consumer cards (sm_86), `fp8_e4m3` is NOT supported. Use `int8_per_token_head` (PR #40391, vendored on this stack via PR #42102). See `models/gemma-4-31b/vllm/compose/dual/autoround-int4/int8.yml`.
 
 ### 3. KV pool — fixed sliding portion (50 SWA layers)
 
@@ -535,8 +572,8 @@ Two drafter families on this stack:
 
 | Drafter | Size | Composes |
 |---|---:|---|
-| `gemma-4-31b-it-assistant` (Google MTP) | 0.97 GB FP16 | `dual/docker-compose.yml`, `dual/int8.yml`, `dual/awq.yml` (with MTP n=4) |
-| `gemma-4-31b-it-dflash` (z-lab DFlash) | 2.9 GB FP16 | `dual/dflash.yml`, `dual/dflash-int8.yml` |
+| `gemma-4-31b-it-assistant` (Google MTP) | 0.97 GB FP16 | `dual/autoround-int4/bf16-mtp.yml`, `dual/autoround-int4/int8.yml`, `dual/awq/default.yml` (with MTP n=4) |
+| `gemma-4-31b-it-dflash` (z-lab DFlash) | 2.9 GB FP16 | `dual/autoround-int4/dflash.yml`, `dual/autoround-int4/dflash-int8.yml` |
 
 At TP > 1, drafter weights shard across cards (`drafter_gb / TP`).
 
@@ -729,7 +766,7 @@ Run `bash tools/kv-calc.py --calibration` to see predicted vs measured for all s
 | Model | Verdict accuracy | Notes |
 |---|---|---|
 | Qwen 3.6 27B | 11/11 = 100% (±1.5 GB band) | Refactored Phase 3 of v0.7.0 preserved this byte-for-byte |
-| Gemma 4 31B | 7/7 = 100% (±1.5 GB band) | Calibrated against `dual/int8.yml` 98K+262K rows, `dual/dflash.yml`, `dual/awq.yml`, `dual/docker-compose.yml` |
+| Gemma 4 31B | 7/7 = 100% (±1.5 GB band) | Calibrated against `dual/autoround-int4/int8.yml` 98K+262K rows, `dual/autoround-int4/dflash.yml`, `dual/awq/default.yml`, `dual/autoround-int4/bf16-mtp.yml` |
 | Qwen 3.6 35B-A3B | not on stack | Pending download + first calibration |
 | Gemma 4 26B-A4B | not on stack | Pending download + first calibration |
 
@@ -745,7 +782,7 @@ Always pass `--model {qwen3.6-27b,gemma-4-31b}` matching the compose you're targ
 | "Will it boot?" — for a *novel* config (custom ctx, kv format, or VRAM class) | `kv-calc.py --model <M> --compose <X>` for a directional answer; then boot and read `gpu_worker.py` |
 | "What's my max ctx?" — given my hardware | `kv-calc.py --model <M> --solve-max-ctx ...` for an estimate; vLLM's pre-check `estimated max model length is N` line at boot is authoritative |
 | "Is TQ3 or fp8 better for my hardware?" (Qwen 3.6) | `kv-calc.py --model qwen3.6-27b` with both options; cross-check [HARDWARE.md](HARDWARE.md#note-for-sub-24-gb-cards) |
-| "Is INT8 PTH or BF16 KV better for Gemma 4?" | `kv-calc.py --model gemma-4-31b --kv-format bf16` vs `int8_per_token_head` — BF16 caps at ~32K on dual-3090, INT8 PTH unlocks 262K. See `models/gemma-4-31b/vllm/compose/dual/int8.yml` header. |
+| "Is INT8 PTH or BF16 KV better for Gemma 4?" | `kv-calc.py --model gemma-4-31b --kv-format bf16` vs `int8_per_token_head` — BF16 caps at ~32K on dual-3090, INT8 PTH unlocks 262K. See `models/gemma-4-31b/vllm/compose/dual/autoround-int4/int8.yml` header. |
 
 ## Sources of error & accuracy
 

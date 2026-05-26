@@ -121,9 +121,9 @@ If you're running long-ctx tool flows (50K+ tokens with multiple tools active), 
 
 | Workload | Compose | Why |
 |---|---|---|
-| IDE agents (Cline / Cursor / Copilot) + long prompts | `single/tools-text.yml` | fp8 + 75K + no vision; PN8 closes Cliff 1 |
-| No spec-decode (debugging) | `single/minimal.yml` | 32K + fp8 + no MTP — simplest stack |
-| Minimal (no Genesis, no spec-decode) | `single/minimal.yml` | 32K + fp8 — escape hatch if Genesis clone fails |
+| IDE agents (Cline / Cursor / Copilot) + long prompts | `single/autoround-int4/tools-text.yml` | fp8 + 75K + no vision; PN8 closes Cliff 1 |
+| No spec-decode (debugging) | `single/autoround-int4/minimal.yml` | 32K + fp8 + no MTP — simplest stack |
+| Minimal (no Genesis, no spec-decode) | `single/autoround-int4/minimal.yml` | 32K + fp8 — escape hatch if Genesis clone fails |
 
 See [SINGLE_CARD.md](../SINGLE_CARD.md) and [DUAL_CARD.md](../DUAL_CARD.md) for full per-workload guidance.
 

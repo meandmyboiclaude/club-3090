@@ -14,7 +14,7 @@
 - **27B parameter dense LLM** with vision support (Qwen3-Next family — hybrid DeltaNet + standard attention)
 - **Quant on this stack:** [`Lorbus/Qwen3.6-27B-int4-AutoRound`](https://huggingface.co/Lorbus/Qwen3.6-27B-int4-AutoRound) — INT4 weights with BF16 `mtp.fc` head preserved (lets vLLM use MTP spec-decode)
 - **GGUF alternative:** [`unsloth/Qwen3.6-27B-GGUF`](https://huggingface.co/unsloth/Qwen3.6-27B-GGUF) — Q3_K_XL ⭐ (validated by [Marie's Kaitchup eval](https://kaitchup.substack.com/p/summary-of-qwen36-gguf-evals-updating)), Q4_K_M, Q5_K_S
-- **Engines:** vLLM (full features) · llama.cpp (max context, lighter footprint) · SGLang (currently blocked, watch list)
+- **Engines:** vLLM (full features) · llama.cpp (max context, lighter footprint) · ik_llama (best quality-per-bit GGUF) · SGLang (currently blocked, watch list)
 
 ---
 
@@ -58,7 +58,7 @@ As of 2026-05-02 PM (vLLM v0.20 + Genesis v7.69 dev tip + local vllm#35975 backp
 
 The **remaining shipped limitation** on the vLLM single-card variants: single prompts >60K still hit the 24 GB hardware-physical wall. Use llama.cpp single (262K, slower) or dual-card TP=2 (262K, splits state across cards) for one-shot big prompts. See [`docs/CLIFFS.md`](../../docs/CLIFFS.md).
 
-Other variants (`docker-compose.yml` 48K · `tools-text.yml` 75K FP8 · `minimal.yml` 32K) are kept in the repo as fallbacks / diagnostics, not promoted as primary.
+Other variants (`tq3-mtp.yml` 48K · `tools-text.yml` 75K FP8 · `minimal.yml` 32K) are kept in the repo as fallbacks / diagnostics, not promoted as primary.
 
 TP=2 unlocks **262K + 4 concurrent streams** on dual-card (`dual.yml`).
 
@@ -155,6 +155,7 @@ Forensic chain + per-patch attribution → [INTERNALS.md](INTERNALS.md).
 - **[/docs/EXAMPLES.md](../../docs/EXAMPLES.md)** — Python / TS / curl client snippets + Open WebUI / Cline / Cursor connection settings.
 - **[vllm/](vllm/)** — vLLM-specific recipes (compose YAMLs are documented in their own headers).
 - **[llama-cpp/](llama-cpp/)** — llama.cpp recipes (max context on single card, no prefill cliffs).
+- **[ik-llama/](../ik-llama/)** — ik_llama.cpp recipes (IQK imatrix quants, best quality-per-bit).
 - **[sglang/](sglang/)** — SGLang status (currently blocked).
 - **[/docs/engines/](../../docs/engines/)** — cross-model engine comparison + per-engine deep dives.
 - **[/docs/HARDWARE.md](../../docs/HARDWARE.md)** — hardware notes (Ampere, NVLink, power).

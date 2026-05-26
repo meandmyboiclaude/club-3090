@@ -13,7 +13,7 @@ download:
 vram_footprint_gb: 0.97
 status: production
 # Phase A-prime fold-in (v0.8.0 #359). Grounded verbatim from the shipped
-# `--speculative-config` JSON in models/gemma-4-31b/vllm/compose/dual/docker-compose.yml
+# `--speculative-config` JSON in models/gemma-4-31b/vllm/compose/dual/autoround-int4/bf16-mtp.yml
 # ('{"model":"/root/.cache/huggingface/gemma-4-31b-it-assistant","num_speculative_tokens":4}').
 # local_model_path is the container path the compose passes (model-cache
 # volume maps host models-cache -> /root/.cache/huggingface; dir verified on

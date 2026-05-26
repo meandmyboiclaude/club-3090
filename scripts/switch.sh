@@ -40,9 +40,13 @@
 #     vllm/gemma-mtp        Gemma-4-31B + Google MTP drafter (32K, bf16 KV, vision — community/experimental, pre-merge)
 #
 #   Single-card llama.cpp:
-#     llamacpp/default      Q3_K_XL + 262K + q4_0 KV + vision (max ctx, no cliffs)
-#     llamacpp/mtp          Q4_K_M MTP + 131K + q4_0 KV (fast: ~60 TPS code; no vision)
-#     llamacpp/mtp-vision   Q4_K_M MTP + 49K + q4_0 KV + mmproj (fast + multimodal)
+#     llamacpp/default      alias for llamacpp/mtp (Q4_K_M MTP, no vision)
+#     llamacpp/mtp          Q4_K_M MTP + 200K (max-safe @ -ub 512; 131K @ -ub 1024 faster prefill) + q4_0 KV (fast ~60 TPS code; no vision; cliff-immune)
+#     llamacpp/bounded-thinking Q4_K_M MTP + 200K + reasoning on + per-request GBNF grammar
+#     llamacpp/mtp-vision   Q4_K_M MTP + 150K @ 1M-px + q4_0 KV + mmproj (multimodal; 4M-px = override, lower ctx)
+#   Single-card ik_llama (IQ4_KS — ~0.5-0.8 GB leaner; best for VRAM-tight / WSL):
+#     ik-llama/iq4ks-mtp         IQ4_KS MTP + 200K + q4_0 KV (own image: ikawrakow/ik-llama-cpp)
+#     ik-llama/iq4ks-mtp-vision  IQ4_KS MTP + 160K @ 1M-px + q4_0 KV + mmproj (multimodal; 4M-px = override, lower ctx)
 #
 # Env overrides (rarely needed):
 #   COMPOSE_BIN     Default: "docker compose" (set to e.g. "podman compose" if needed)
@@ -60,11 +64,35 @@ LAUNCH_PROFILE="${LAUNCH_PROFILE:-${ROOT_DIR}/scripts/lib/profiles/launch_compat
 
 # Load .env if present, so PORT / MODEL_DIR / etc. flow through to docker
 # compose AND to the ready-URL probe below.
+#
+# Precedence matches docker compose (and launch.sh): a variable already set in
+# the shell environment WINS over the .env file — so `export MODEL_DIR=…` is no
+# longer clobbered by a stale .env entry (#425). We parse line-by-line instead
+# of `source` (a) to honour that precedence per-variable and (b) to tolerate
+# CRLF line endings from Windows editors (#187). Values are taken literally
+# (no shell expansion), matching docker compose's own .env semantics.
 if [[ -f "${ROOT_DIR}/.env" ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  source "${ROOT_DIR}/.env"
-  set +a
+  while IFS= read -r _env_line || [[ -n "$_env_line" ]]; do
+    _env_line="${_env_line#"${_env_line%%[![:space:]]*}"}"   # strip leading whitespace
+    _env_line="${_env_line%$'\r'}"                           # strip trailing CR (CRLF .env)
+    [[ -z "$_env_line" || "$_env_line" == '#'* ]] && continue
+    _env_line="${_env_line#export }"
+    _env_key="${_env_line%%=*}"
+    [[ "$_env_key" == "$_env_line" || -z "$_env_key" ]] && continue   # no '=' on the line
+    [[ -n "${!_env_key+x}" ]] && continue                    # already set in env → shell wins
+    _env_val="${_env_line#*=}"
+    _env_val="${_env_val#\"}"; _env_val="${_env_val%\"}"     # strip surrounding double quotes
+    _env_val="${_env_val#\'}"; _env_val="${_env_val%\'}"     # strip surrounding single quotes
+    export "${_env_key}=${_env_val}"
+  done < "${ROOT_DIR}/.env"
+  unset _env_line _env_key _env_val
+fi
+
+# Surface the resolved MODEL_DIR + its source so the precedence is unambiguous
+# (the exact confusion behind #425 / #187). Unset → the compose's built-in
+# default applies; preflight_compose_deps notes that case.
+if [[ -n "${MODEL_DIR:-}" ]]; then
+  echo "[switch] MODEL_DIR=${MODEL_DIR}"
 fi
 
 # Variant tables are DERIVED from the single source of truth

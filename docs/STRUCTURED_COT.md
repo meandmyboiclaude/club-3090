@@ -53,17 +53,17 @@ Our FSM pass@1 lands within 2pp of theirs on both benchmarks — the technique r
 
 Pick a bounded-thinking variant when **all three** of:
 
-1. You're calling the API with `extra_body={"structured_outputs": {...}}` (grammar / JSON / regex / etc).
+1. You're calling the API with a grammar (`extra_body={"structured_outputs": {...}}` on vLLM, or the request body `grammar` field on llama.cpp).
 2. You want bounded thinking cost as a structural guarantee (not just "the prompt asks nicely").
 3. Your workload tolerates a ~10% per-token TPS hit in exchange for ~7-30× cheaper think output (per-problem wall-clock is faster, not slower).
 
-Pick `long-text` (the regular variant) when none of those apply. The bounded-thinking variants are otherwise identical to long-text (same 214K context, same MTP n=3, same TQ3 KV, same patches). The only difference is one vLLM flag — `--structured-outputs-config.enable_in_reasoning true`, which is what makes grammar enforcement actually fire inside the `<think>` block on this stack.
+Pick `long-text` (the regular variant) when none of those apply. The vLLM bounded-thinking variant is otherwise identical to long-text (same 214K context, same MTP n=3, same TQ3 KV, same patches). The only difference on that path is one vLLM flag — `--structured-outputs-config.enable_in_reasoning true`, which is what makes grammar enforcement actually fire inside the `<think>` block on this stack.
 
-### One compose ships — `bounded-thinking.yml` with the DeepSeek scratchpad as the recommended grammar
+### One vLLM compose ships — `bounded-thinking.yml` with the DeepSeek scratchpad as the recommended grammar
 
 After the Phase 3 grammar A/B (2026-05-04, full HE+ 164 + LCB v6 50, 5 grammars × 214 problems), the defensible finding is that **DeepSeek scratchpad is the only grammar that doesn't lose combined accuracy vs the original andthattoo G/A/E baseline while improving the harder LCB v6 slice** (LCB +4pp = 2 additional problems on n=50; design signal, not statistical proof). The +0.47pp combined edge (1 problem on n=214) is well below the noise floor and shouldn't be framed as a categorical accuracy win. The stronger evidence for DeepSeek is the LCB tie with Holiday + near-andthattoo HE+ retention, not the +1 combined number alone. The original andthattoo grammar remains excellent and ~4× tighter on think budget; we ship DeepSeek as the recommended default because preserving HE+ accuracy while gaining LCB headroom is the most defensible per-workload posture.
 
-We ship one compose, with the DeepSeek scratchpad as the recommended grammar:
+On vLLM, we ship one compose, with the DeepSeek scratchpad as the recommended grammar:
 
 ```bash
 bash scripts/switch.sh vllm/bounded-thinking
@@ -94,7 +94,7 @@ cd /path/to/club-3090
 bash scripts/switch.sh vllm/bounded-thinking
 # Or directly:
 cd models/qwen3.6-27b/vllm/compose
-docker compose -f single/bounded-thinking.yml up -d
+docker compose -f single/autoround-int4/bounded-thinking.yml up -d
 ```
 
 Endpoint: `http://localhost:8020/v1` (set `PORT=...` to override).
@@ -136,7 +136,74 @@ print("code :", m.content)
 
 The reasoning channel will contain exactly `GOAL: ... APPROACH: ... EDGE: ...`; the content channel will have the runnable code.
 
-### 3. (Optional) Reproduce the bench
+### 3. llama.cpp bounded-thinking port
+
+llama.cpp has a sibling structured-CoT compose for users who want the GGUF/MTP path instead of vLLM:
+
+```bash
+cd /path/to/club-3090
+bash scripts/switch.sh llamacpp/bounded-thinking
+# Or directly:
+cd models/qwen3.6-27b/llama-cpp/compose
+docker compose -f single/autoround-int4/bounded-thinking.yml up -d
+```
+
+Endpoint: `http://localhost:8020/v1` (set `PORT=...` to override). The compose is intentionally the same runtime envelope as `llamacpp/mtp`: Q4_K_M MTP GGUF, MTP n=2, q4_0 KV, `-ub 512`, 200K context, no vision. The serving-policy difference is `REASONING=on` by default.
+
+The important API difference from vLLM: llama.cpp takes the grammar as the OpenAI-compatible request body `grammar` field. Do **not** wrap it in `structured_outputs`.
+
+Curl example:
+
+```bash
+MODEL_ID="$(curl -s http://localhost:8020/v1/models | jq -r '.data[0].id')"
+GRAMMAR_JSON="$(jq -Rs . < tools/grammar-eval/deepseek-scratchpad.llamacpp.gbnf)"   # llama.cpp variant (no underscores)
+
+curl -s http://localhost:8020/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d @- <<JSON
+{
+  "model": "${MODEL_ID}",
+  "messages": [
+    {"role": "system", "content": "You are an expert Python programmer. Keep reasoning inside the required thinking block. After reasoning, output runnable Python code directly."},
+    {"role": "user", "content": "Write a function add(a, b) that returns the sum."}
+  ],
+  "temperature": 0,
+  "max_tokens": 512,
+  "grammar": ${GRAMMAR_JSON}
+}
+JSON
+```
+
+Python client:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8020/v1", api_key="dummy")
+grammar = open("tools/grammar-eval/deepseek-scratchpad.llamacpp.gbnf", encoding="utf-8").read()  # llama.cpp variant
+model_id = client.models.list().data[0].id
+
+r = client.chat.completions.create(
+    model=model_id,
+    messages=[
+        {"role": "system", "content": "You are an expert Python programmer. Keep reasoning inside the required thinking block. After reasoning, output runnable Python code directly."},
+        {"role": "user", "content": "Write a function add(a, b) that returns the sum."},
+    ],
+    max_tokens=512,
+    temperature=0.0,
+    extra_body={"grammar": grammar},
+)
+
+m = r.choices[0].message
+extra = getattr(m, "model_extra", {}) or {}
+reasoning = getattr(m, "reasoning_content", None) or extra.get("reasoning_content") or extra.get("reasoning")
+print("think:", reasoning)
+print("code :", m.content)
+```
+
+**Validation status (on-rig, 2026-05-24): PASS — but the grammar needed a llama.cpp variant.** The xgrammar `deepseek-scratchpad.gbnf` does **not** parse under llama.cpp's GBNF — its underscored rule names (`line_char`, `line_chars`) trip `parse: error parsing grammar: expecting newline or end at _char`, and the server silently falls back to *unconstrained* generation (FREE == FSM token counts — the silent no-fire trap). The fix is [`deepseek-scratchpad.llamacpp.gbnf`](../tools/grammar-eval/deepseek-scratchpad.llamacpp.gbnf) — identical language, no underscores (llama.cpp rule names are `[a-zA-Z0-9-]` only). With that variant, all three gates pass: (1) **parses** (no error), (2) **fires** — `reasoning_content` is the `PLAN:/NOTE:/VERDICT:` structure, and (3) **coexists with `--spec-type draft-mtp`** (draft acceptance 0.66–0.88). Measured FREE→FSM: 2113→1009 tok (2.1×, hash-vs-BST prompt) and 934→331 tok (2.8×, bat-and-ball), temp 0.6. Full HE+/LCB bench + a BENCHMARKS row still pending.
+
+### 4. (Optional) Reproduce the bench
 
 ```bash
 git clone https://github.com/andthattoo/structured-cot.git ~/structured-cot
@@ -271,7 +338,7 @@ Grammar mask compute adds ~10% per-token TPS (~61 → 53 TPS in our bench). Per-
 
 ## What's saved on disk
 
-The full bench outputs (results.jsonl, summary.json, per-problem narrative with FREE/FSM/PT think bodies) are at `/home/wasif/structured-cot/runs/full-humaneval-2026-04-30/` and `/home/wasif/structured-cot/runs/full-lcb-v6-gpu1-2026-04-30/`. Internal diagnostics writeup with full setup details, vLLM CLI args, and port surprises is at [`models/qwen3.6-27b/vllm/diagnostics/structured-cot-bench.md`](../models/qwen3.6-27b/vllm/diagnostics/structured-cot-bench.md).
+The full bench outputs (results.jsonl, summary.json, per-problem narrative with FREE/FSM/PT think bodies) are kept in the local `structured-cot/runs/full-humaneval-2026-04-30/` and `full-lcb-v6-gpu1-2026-04-30/` run dirs (host-local, not committed). The diagnostics writeup with full setup details, vLLM CLI args, and port notes is at [`models/qwen3.6-27b/vllm/diagnostics/structured-cot-bench.md`](../models/qwen3.6-27b/vllm/diagnostics/structured-cot-bench.md).
 
 ## Credit
 

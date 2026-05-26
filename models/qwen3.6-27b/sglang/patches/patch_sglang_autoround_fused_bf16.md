@@ -105,7 +105,7 @@ These are independent of the Marlin fix — they apply regardless of this patch 
 
 3. **`--cpu-offload-gb 2` on single 3090 is currently incompatible with Qwen3-Next.** SGLang's OffloaderV1 hits `ValueError: functional_call got multiple values for keys ['linear_attn.attn.dt_bias', 'linear_attn.dt_bias'], which are tied. Consider using tie_weights=False` on first forward. Avoid CPU offload until SGLang's offloader handles tied DeltaNet params.
 
-4. **Dual GPU is the cleaner full-stack path.** Splitting the target across 2× 3090 (TP=2) eliminates the need for CPU offload entirely; drafter resides on rank 0 only, KV splits across cards. See `models/qwen3.6-27b/sglang/compose/dual/eagle3-experimental.yml`.
+4. **Dual GPU is the cleaner full-stack path.** Splitting the target across 2× 3090 (TP=2) eliminates the need for CPU offload entirely; drafter resides on rank 0 only, KV splits across cards. See `models/qwen3.6-27b/sglang/compose/dual/autoround-int4/eagle3-experimental.yml`.
 
 ## Implementation notes
 

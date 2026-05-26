@@ -261,7 +261,7 @@ PY
 run_test "C14 explicit unsupported weight variant rejected" <<'PY'
 from scripts.lib.profiles.compat import load_profiles, fits
 p = load_profiles()
-r = fits([p.hardware["rtx-3090"]], p.models["qwen3.6-27b"], p.workloads["long-ctx-single"], p.engines["llama-cpp-local"], kv_format="q4_0", weights_variant="autoround_int4", tp=1, project_vram=False)
+r = fits([p.hardware["rtx-3090"]], p.models["qwen3.6-27b"], p.workloads["long-ctx-single"], p.engines["llama-cpp-local"], kv_format="q4_0", weights_variant="autoround-int4", tp=1, project_vram=False)
 assert not r.valid
 assert any(reason.startswith("C14:") for reason in r.reasons), r.reasons
 PY
@@ -305,7 +305,7 @@ name = to_compose_name(
     2,
     1,
     workload=p.workloads["long-ctx-single"],
-    weights_variant="autoround_int4",
+    weights_variant="autoround-int4",
     max_ctx=262144,
     max_num_seqs=2,
 )

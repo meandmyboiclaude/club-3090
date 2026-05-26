@@ -1,7 +1,7 @@
 # vLLM PR #40798 overlay — TurboQuant max-workspace pre-allocation
 
 Vendored 2026-05-11 to unblock `turboquant_3bit_nc` KV + MTP on Qwen 3.6 27B
-(`dual/int8-tq3.yml`).
+(`dual/autoround-int4/tq3-mtp.yml`).
 
 ## Source
 
@@ -59,5 +59,5 @@ reports `MERGED`. Then bump the nightly pin past the merge commit.
 ## Verified on
 
 - vLLM nightly: `1acd67a7`
-- Compose: `dual/int8-tq3.yml` (Qwen 3.6 27B AutoRound INT4, TQ3 KV, MTP n=3, 262K, 2 streams)
+- Compose: `dual/autoround-int4/tq3-mtp.yml` (Qwen 3.6 27B AutoRound INT4, TQ3 KV, MTP n=3, 262K, 2 streams)
 - 2026-05-11

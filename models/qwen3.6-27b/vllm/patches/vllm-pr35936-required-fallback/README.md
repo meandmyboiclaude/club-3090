@@ -101,12 +101,12 @@ End-to-end checked 2026-05-12:
   (previously `tool_calls=[]`).
 - Direct curl, `tool_choice="auto"`: still returns the same populated
   `tool_calls` (no regression on XML path).
-- MLS-Bench `ml-ensemble-boosting` against `dual/int8.yml` with the
+- MLS-Bench `ml-ensemble-boosting` against `dual/autoround-int4/int8.yml` with the
   `thinking.enabled: true` workaround removed from `configs/club-3090.yaml`:
   agent completes loop with non-zero steps (was "No action returned after
   3 attempts" pre-overlay).
 
-Sidecar pattern validated 2026-05-13 on `single/long-text.yml` (Genesis-loaded):
+Sidecar pattern validated 2026-05-13 on `single/autoround-int4/long-text.yml` (Genesis-loaded):
 - `install.sh` runs before Genesis: "chat_completion/serving.py installed from /etc/club3090/..."
 - Genesis P64 succeeds: "P64 applied: 2 files modified, 0 idempotent" (was failing with `Read-only file system` pre-v0.5.1)
 - Genesis P68/P69 succeed: "Hook injected into create_chat_completion" (was failing pre-v0.5.1)

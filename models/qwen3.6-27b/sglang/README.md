@@ -1,6 +1,6 @@
 # Qwen3.6-27B on SGLang — PARKED, kept for archival only
 
-> **⚠ PARKED 2026-05-21 — not a recommended path on this stack.** SGLang + EAGLE-3 on Qwen3-Next was investigated as a way to unlock external-drafter spec-decode (which neither vLLM nor mainline llama.cpp provides for this model family). The investigation reached boot + coherent output on dual 3090 with two vendored patches, but **MTP wins on every axis** (TPS, complexity, hardware coverage). The compose files + patches stay in the tree for archival reference; production paths remain `vllm/dual/turbo.yml` (TP=2 + MTP + Genesis TQ3) and `llamacpp/mtp.yml` (single-card + MTP).
+> **⚠ PARKED 2026-05-21 — not a recommended path on this stack.** SGLang + EAGLE-3 on Qwen3-Next was investigated as a way to unlock external-drafter spec-decode (which neither vLLM nor mainline llama.cpp provides for this model family). The investigation reached boot + coherent output on dual 3090 with two vendored patches, but **MTP wins on every axis** (TPS, complexity, hardware coverage). The compose files + patches stay in the tree for archival reference; production paths remain `vllm/dual/autoround-int4/turbo.yml` (TP=2 + MTP + Genesis TQ3) and `llamacpp/mtp.yml` (single-card + MTP).
 
 For engine-level pros/cons, KV cache options, Ampere quirks, see [`../../../docs/engines/SGLANG.md`](../../../docs/engines/SGLANG.md).
 
@@ -10,7 +10,7 @@ Three independent findings, each sufficient on its own:
 
 1. **EAGLE-3 is sub-MTP for Qwen3-Next, even on the architecture where it works.** Ex0bit (the drafter author) publishes their own numbers on the [PRISM-PRO-DQ model card](https://huggingface.co/Ex0bit/Qwen3.6-27B-PRISM-PRO-DQ): native MTP = **121 TPS (1.51×)** vs EAGLE-3 chain = **111 TPS (1.39×)** on Blackwell. Qwen3-Next has a strong built-in MTP head; routing through an external drafter is structurally slower for this model family.
 2. **CUTE_DSL capture-hang on Ampere.** SGLang v0.5.12's CUTE_DSL `get_version()` calls `pkgutil.walk_packages` during cuda-graph capture. The walk hits `cutlass.cute.experimental` (which raises `NotImplementedError` on CUDA toolkit < 13.1) and deadlocks against the locked capture stream. Workaround `--disable-cuda-graph` boots but caps decode at ~15-18 TPS (vs vLLM-MTP-dual ~85 TPS). Three patch iterations (pre-import, `sys.modules` stub at engine init, per-process `sys.modules` stub at `sglang/__init__.py`) all failed — the walk re-fires during capture regardless of cache state.
-3. **vLLM-MTP-dual already beats SGLang+EAGLE3+cuda-graph-off on the same rig.** Even if we ignored point 2 and accepted the cuda-graph penalty, `vllm/dual/turbo.yml` (TP=2 + MTP + Genesis TQ3) gives ~85 TPS on this dual-3090 setup. This SGLang path tops out around 15-18 TPS with the workaround.
+3. **vLLM-MTP-dual already beats SGLang+EAGLE3+cuda-graph-off on the same rig.** Even if we ignored point 2 and accepted the cuda-graph penalty, `vllm/dual/autoround-int4/turbo.yml` (TP=2 + MTP + Genesis TQ3) gives ~85 TPS on this dual-3090 setup. This SGLang path tops out around 15-18 TPS with the workaround.
 
 The artifacts in this tree document the SGLang state for the next person who comes to this question. If/when upstream lands a CUTE_DSL Ampere fallback OR an SGLang-specific MTP path materializes for Qwen3-Next, the [Re-test triggers](#re-test-triggers) section below tells you what to verify.
 
@@ -22,8 +22,8 @@ The artifacts in this tree document the SGLang state for the next person who com
 
 | Variant | Path | Status |
 |---|---|---|
-| Dual 3090 (TP=2) EAGLE-3 + AutoRound INT4 | [`compose/dual/eagle3-experimental.yml`](compose/dual/eagle3-experimental.yml) | ⚠ PARKED — boots + coherent output validated, but ~15-18 TPS with `--disable-cuda-graph` workaround vs ~85 TPS on `vllm/dual/turbo.yml` |
-| Single 3090 EAGLE-3 + AutoRound INT4 | [`compose/single/eagle3-experimental.yml`](compose/single/eagle3-experimental.yml) | ❌ PARKED — blocked on SGLang OffloaderV1 tied-weights bug; never reached first forward pass |
+| Dual 3090 (TP=2) EAGLE-3 + AutoRound INT4 | [`compose/dual/autoround-int4/eagle3-experimental.yml`](compose/dual/autoround-int4/eagle3-experimental.yml) | ⚠ PARKED — boots + coherent output validated, but ~15-18 TPS with `--disable-cuda-graph` workaround vs ~85 TPS on `vllm/dual/autoround-int4/turbo.yml` |
+| Single 3090 EAGLE-3 + AutoRound INT4 | [`compose/single/autoround-int4/eagle3-experimental.yml`](compose/single/autoround-int4/eagle3-experimental.yml) | ❌ PARKED — blocked on SGLang OffloaderV1 tied-weights bug; never reached first forward pass |
 | Other quants (FenomAI AWQ-INT4, INT8 PTH) | TARGET_DIR override in dual YAML | ⚠ PARKED — untested, would inherit the same EAGLE-3 < MTP structural disadvantage |
 
 ---
@@ -61,7 +61,7 @@ curl -s http://localhost:8041/v1/chat/completions \
 
 ## Why dual, not single
 
-We have a single-card compose ([`compose/single/eagle3-experimental.yml`](compose/single/eagle3-experimental.yml)) that progresses through every layer of the boot but **fails at first forward pass** because the only knob that fits everything in 24 GB is `--cpu-offload-gb`, and SGLang's OffloaderV1 hits a tied-weights bug on Qwen3-Next:
+We have a single-card compose ([`compose/single/autoround-int4/eagle3-experimental.yml`](compose/single/autoround-int4/eagle3-experimental.yml)) that progresses through every layer of the boot but **fails at first forward pass** because the only knob that fits everything in 24 GB is `--cpu-offload-gb`, and SGLang's OffloaderV1 hits a tied-weights bug on Qwen3-Next:
 
 ```
 ValueError: functional_call got multiple values for keys

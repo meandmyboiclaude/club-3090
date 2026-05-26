@@ -373,7 +373,7 @@ curated = write_bundle(
     manifest=mk_manifest(model="Lorbus/Qwen3.6-27B-int4-AutoRound",
                          model_id="Lorbus/Qwen3.6-27B-int4-AutoRound",
                          slug="Lorbus/Qwen3.6-27B-int4-AutoRound",
-                         quant_label="autoround_int4",
+                         quant_label="autoround-int4",
                          kv_format="turboquant_3bit_nc",
                          selected_ctx=48000),
     pt1={

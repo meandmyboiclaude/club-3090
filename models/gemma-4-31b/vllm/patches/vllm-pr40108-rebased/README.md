@@ -1,13 +1,13 @@
 # vLLM PR #40108 overlay — TurboQuant + sliding-window/YOCO
 
 Vendored 2026-05-11 to evaluate `turboquant_3bit_nc` KV on Gemma 4 31B
-(`dual/int8-tq3.yml`).
+(`dual/autoround-int4/int8-tq3.yml`).
 
 **OUTCOME 2026-05-11:** Confirmed Gemma 4 + TQ3 is hardware-blocked on
 Ampere SM 8.6 (RTX 3090) — `flash_attn_varlen_func` in TQ backend's
 prefill path rejects head_dim=512 (Gemma 4 global layers). FA2 on Ampere
 caps at head_dim=256; FA3 (which supports 512) requires Hopper. See the
-full walkthrough in `dual/int8-tq3.yml` header.
+full walkthrough in `dual/autoround-int4/int8-tq3.yml` header.
 
 This overlay + the local edits we made (boundary-skip patch, cudagraph
 capture guards on .tolist() sites) WORK correctly — they're not why TQ3
@@ -34,7 +34,7 @@ ValueError: Selected backend AttentionBackendEnum.TURBOQUANT is not valid
             for this configuration. Reason: ['kv_cache_dtype not supported']
 ```
 
-This blocks the TQ3 head-to-head against `qwen3.6-27b/vllm/compose/dual/int8-tq3.yml`.
+This blocks the TQ3 head-to-head against `gemma-4-31b/vllm/compose/dual/autoround-int4/int8-tq3.yml`.
 
 ## Conflict with PR #40391 overlay
 

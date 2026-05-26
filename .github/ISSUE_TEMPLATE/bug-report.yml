@@ -57,7 +57,7 @@ body:
       description: Exact commands. The `compose up` line, the curl/openai-client request, etc.
       placeholder: |
         cd models/qwen3.6-27b/vllm/compose
-        docker compose -f dual/turbo.yml up -d
+        docker compose -f dual/autoround-int4/turbo.yml up -d
         # then this curl request:
         curl -s http://localhost:8020/v1/chat/completions -d '...'
       render: bash

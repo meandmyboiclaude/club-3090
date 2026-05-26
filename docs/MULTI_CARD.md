@@ -173,7 +173,7 @@ For 4× RTX 3090 PCIe, start with the measured fp8/MTP compose:
 bash scripts/switch.sh vllm/dual4
 ```
 
-`multi4/docker-compose.yml` keeps the `dual.yml` fp8/MTP feature set and
+`multi4/autoround-int4/fp8-mtp.yml` keeps the `dual.yml` fp8/MTP feature set and
 changes TP/streams from 2 → 4. Validation on Whamp's 4× 3090 PCIe rig:
 
 - boots at `max_model_len=262144`, `max_num_seqs=4`
@@ -190,7 +190,7 @@ WITH_DFLASH_DRAFT=1 bash scripts/setup.sh qwen3.6-27b
 bash scripts/switch.sh vllm/dual4-dflash
 ```
 
-`multi4/dflash.yml` keeps full 262K context but uses FP16 KV
+`multi4/autoround-int4/dflash.yml` keeps full 262K context but uses FP16 KV
 and admits two full-context streams:
 
 - boots at `max_model_len=262144`, `max_num_seqs=2`

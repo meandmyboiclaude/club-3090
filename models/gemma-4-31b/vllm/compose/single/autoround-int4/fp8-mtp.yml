@@ -1,0 +1,141 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Gemma 4 31B (Intel AutoRound INT4)
+#   Topology:  Single 3090 (TP=1) — ⚠️ BOOT-OOMs on 24 GB Ampere; for 32 GB+ only
+#   Drafter:   MTP n=3 (Google's official `gemma-4-31B-it-assistant`)
+#   KV:        bfloat16 (fp8 dispatch blocked on Ampere — Triton fp8e4nv unsupported on sm_86)
+#   Vision:    yes
+#   Max ctx:   ~16K (theoretical) — boot fails before serving on 24 GB
+#   Genesis:   N/A — Genesis is Qwen3-Next-specific
+#   Status:    ⏸️ Upstream-gated
+#   Caveats:   Boot-OOMs on Ampere 24 GB regardless of KV format (weights+drafter+profiling at 8K ctx leaves no KV pool). Compose preserved for 32 GB+ GPUs (RTX 5090 32 GB validated by @apnar disc #67 — 160/215 TPS at 32K MTP). Re-evaluate when (a) vLLM adds Ampere-aware fp8 dispatch OR (b) PR #41745-style relaxation lands.
+#   Best for:  Single-card 32 GB+ GPUs (RTX 5090 32 GB validated by @apnar disc #67)
+#              For 24 GB Ampere, use dual.yml (dual-card) instead.
+# ---------------------------------------------------------------------------
+# Gemma-4-31B-it (Intel AutoRound INT4) + Google MTP "assistant" drafter
+# Single-card TP=1 + bfloat16 KV — preserved for 32 GB+ GPUs (5090, A6000).
+#
+# Status: COMMUNITY-CONTRIBUTED, EXPERIMENTAL.
+#   First Ampere consumer cross-rig data on Google's Gemma 4 MTP drafters
+#   (released 2026-05-05). Google benched on RTX PRO 6000 Blackwell;
+#   this compose tests the same path on 2× RTX 3090 (Ampere sm_86, PCIe-only).
+#
+# Bench (2× 3090 PCIe, no NVLink, 230W cap, 2026-05-05 evening):
+#   narrative (canonical 800-word essay): 109.16 wall TPS (CV 3.0%)
+#   code (canonical quicksort):           140.59 wall TPS (CV 1.7%)
+#   AL: 3.05 narr / 3.99 code (n=4 max — code essentially saturating)
+#   Per-position accept narr: 79/57/41/29 %
+#   Per-position accept code: 92/77/66/56 %
+#   VRAM: 21.5 GB/card
+#   Speedup vs no-spec-decode baseline (~61 TPS): 1.79× narr / 2.31× code.
+#
+# Models:
+#   target: Intel/gemma-4-31B-it-int4-AutoRound  (21.2 GB, vision preserved)
+#   draft : google/gemma-4-31B-it-assistant       (0.5B / 927 MB BF16)
+#
+# Pre-merge dependencies — both LANDED 2026-05-08:
+#   1. vLLM PR #41745 — Gemma 4 MTP — MERGED 2026-05-06 (commit 27e0057a).
+#      Nightly tag `1acd67a795...` (2026-05-08) is post-merge → overlay dropped.
+#   2. transformers ≥ 5.8.0 — released 2026-05-05. Verified: post-merge nightly
+#      ships transformers 5.8.0 → entrypoint upgrade line dropped.
+# Pin uses the post-Gemma4-merge nightly. Note: Qwen3.6 composes stay on the
+# v7.72.2 PROD pin (01d4d1ad3) since Genesis allowlist anchors there.
+#
+# KV format pinned in a corner on Ampere:
+#   - fp8_e5m2 → assert fail in gemma4_mm.py:1336 (vLLM allowlist excludes it)
+#   - fp8_e4m3 → Triton "fp8e4nv not supported in this architecture" on sm_86
+#     (Ampere supports only fp8e4b15 / fp8e5; not fp8e4nv)
+#   - default (auto = bfloat16) → sidesteps all fp8 kernel paths
+# Smaller KV pool than fp8 but at 32K test ctx that's not the bottleneck.
+# ===========================================================================
+# Hardware metadata (parsed by scripts/preflight.sh):
+# Requires-min-vram-gb: 32
+# Engine-profile: vllm-nightly-clean
+# Requires-min-gpu-count: 1
+# Tensor-parallel: 1
+# Requires-sm: 9.0+
+services:
+  vllm-gemma-4-31b-mtp-tp1:
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}
+    container_name: "${ESTATE_CONTAINER:-vllm-gemma-4-31b-mtp-tp1}"
+    restart: "no"
+    ports:
+      - "${ESTATE_PORT:-${PORT:-8031}}:8000"
+    volumes:
+      - ${MODEL_DIR:-../../../../../../models-cache}:/root/.cache/huggingface
+      # torch.compile + Triton kernel caches — first boot warms (~5-7 min);
+      # subsequent boots reuse cached graphs (~3 min). Pattern from dual-turbo.yml.
+      - ../../../cache/torch_compile:/root/.cache/vllm/torch_compile_cache
+      - ../../../cache/triton:/root/.triton/cache
+      # PR #41745 overlay dropped 2026-05-08: merged upstream + nightly contains it.
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=${ESTATE_GPUS:-${NVIDIA_VISIBLE_DEVICES:-all}}
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - NCCL_CUMEM_ENABLE=0
+      - NCCL_P2P_DISABLE=1
+      - VLLM_NO_USAGE_STATS=1
+      - OMP_NUM_THREADS=1
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:512
+      - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+      - TRITON_CACHE_DIR=/root/.triton/cache
+    shm_size: "16gb"
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # transformers 5.8.0+ ships in the post-Gemma4-merge nightly (verified
+    # 2026-05-08: nightly-1acd67a795... has transformers 5.8.0). Entrypoint
+    # upgrade dropped.
+    command:
+      - --override-generation-config
+      - '{"temperature":${TEMP:-${TEMPERATURE:-1.0}},"top_p":${TOP_P:-0.95},"top_k":${TOP_K:--1},"min_p":${MIN_P:-0.0},"repetition_penalty":${REPEAT_PENALTY:-1.0}}'
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --model
+      - /root/.cache/huggingface/gemma-4-31b-autoround-int4
+      - --served-model-name
+      - gemma-4-31b-autoround
+      - --tensor-parallel-size
+      - "${TP:-1}"
+      - --pipeline-parallel-size
+      - "${PP:-1}"
+      # Single-card: weights ~16 GB + drafter ~1 GB + bf16 KV at 16K + vision +
+      # activations needs to fit in 24 GB. Drop vision via limit-mm-per-prompt
+      # to reclaim ~1.5 GB and skip the mm-token-budget assertion.
+      # Drop max-model-len 32K → 16K for headroom.
+      - --max-model-len
+      - "${MAX_MODEL_LEN:-8192}"
+      - --gpu-memory-utilization
+      - "${GPU_MEMORY_UTILIZATION:-0.95}"
+      - --max-num-seqs
+      - "256"
+      # max_tokens_per_mm_item=2496 must fit in batched tokens — even with
+      # --limit-mm-per-prompt image=0, the encoder-budget computation still
+      # asserts. 4096 (above 2496 floor) leaves more profiling room than 8192.
+      - --max-num-batched-tokens
+      - "4096"
+      - --limit-mm-per-prompt
+      - '{"image":0,"audio":0}'
+      # fp8 KV per vLLM recipe — halves KV pool footprint vs bf16 default.
+      # Risk on Ampere: explicit fp8_e4m3 hits Triton "fp8e4nv not supported"
+      # on sm_86 in earlier tests. Unsuffixed `fp8` may dispatch differently.
+      - --kv-cache-dtype
+      - fp8
+      - --trust-remote-code
+      # Tool-call support per vLLM Gemma 4 recipe — required for any soak /
+      # agent traffic that includes a `tools: [...]` array. Without these,
+      # vLLM rejects tool-bearing requests with HTTP 400.
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - gemma4
+      - --chat-template
+      - /vllm-workspace/examples/tool_chat_template_gemma4.jinja
+      - --speculative-config
+      - '{"model":"/root/.cache/huggingface/gemma-4-31b-it-assistant","num_speculative_tokens":4}'

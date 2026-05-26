@@ -38,12 +38,18 @@ MODES
              ~15-25 min, no Docker required
   --full     8 packs:  + bugfind-15, hermesagent-20, cli-40
              ~25-40 min, requires Docker (auto-starts sandbox containers)
+  --reasoning
+             Reasoning suite: humaneval-plus-30, lcb-v6-30, gpqa-diamond
+             metadata gate, gsm-symbolic-30. Separate from --full; code
+             packs require Docker.
 
   --pack PACK_ID   Run a single pack (overrides mode flag).
                    Available IDs:
                      toolcall-15  instructfollow-15  structoutput-15
                      dataextract-15  reasonmath-15
                      bugfind-15  cli-40  hermesagent-20  (require Docker)
+                     humaneval-plus-30  lcb-v6-30  gsm-symbolic-30
+                     gpqa-diamond  (gated metadata-only until access approved)
 
 OPTIONS
   -h, --help       Show this help and exit
@@ -62,6 +68,27 @@ OPTIONS (extra)
                    Pass through to benchlocal-cli as --timeout-per-case N
                    (seconds). Default: 60. For aider-polyglot-30 on low-power
                    single-card rigs, bump to 3600+ to avoid mid-batch kills.
+  --sandbox-log-dir DIR
+                   Capture each sandboxed pack's container log to
+                   DIR/sandbox-<pack_id>.log before teardown (forwarded to
+                   benchlocal-cli). Without it, sandbox logs are lost on
+                   container cleanup. Also settable via SANDBOX_LOG_DIR env.
+  --sampling-from-server
+                   Inherit sampling from the serving config instead of using
+                   the pack's default temp=0. Omits sampling params from
+                   requests so the server applies its own defaults (llama.cpp
+                   --temp, vLLM --override-generation-config). Reads back via
+                   GET /props and records the values. Tags the run as
+                   non-canonical. Also settable via SAMPLING_FROM_SERVER=1 env.
+  --enable-thinking
+                   Forward to benchlocal-cli --enable-thinking so reasoning
+                   models are evaluated with request-level thinking enabled.
+                   Also settable via ENABLE_THINKING=1 env.
+  --thinking-max-tokens N
+                   Forward to benchlocal-cli --thinking-max-tokens N. The
+                   budget applies only to packs whose thinking gate resolves on
+                   (pack default or --enable-thinking). Also settable via
+                   THINKING_MAX_TOKENS env.
 
 ENV VARS
   URL              Endpoint base URL (default: auto-detected via preflight,
@@ -72,11 +99,17 @@ ENV VARS
                    single-model composes). --model and MODEL are equivalent.
   TIMEOUT_PER_CASE Per-scenario HTTP timeout in seconds (default: 60).
                    --timeout-per-case overrides this when both are set.
+  ENABLE_THINKING Set to 1 to send request-level enable_thinking=true via
+                   benchlocal-cli --enable-thinking. Default: 0.
+  THINKING_MAX_TOKENS
+                   Optional thinking budget passed through to benchlocal-cli.
+                   Applies only to packs whose thinking gate resolves on.
 
 EXAMPLES
   bash scripts/quality-test.sh                          # --medium against running compose
   bash scripts/quality-test.sh --quick                  # quicker, 2 packs only
   bash scripts/quality-test.sh --full                   # everything, needs Docker
+  bash scripts/quality-test.sh --reasoning              # HE+/LCB/GSM/GPQA reasoning suite
   bash scripts/quality-test.sh --pack toolcall-15       # just the tool-call pack
   bash scripts/quality-test.sh --pack aider-polyglot-30 --timeout-per-case 3600
   URL=http://localhost:8030 bash scripts/quality-test.sh # against a different port
@@ -122,10 +155,14 @@ PACK=""
 NO_SANDBOX=0
 SANDBOXED_ONLY=0
 LIST_PACKS=0
+SANDBOX_LOG_DIR="${SANDBOX_LOG_DIR:-}"
+SAMPLING_FROM_SERVER="${SAMPLING_FROM_SERVER:-0}"
+ENABLE_THINKING="${ENABLE_THINKING:-0}"
+THINKING_MAX_TOKENS="${THINKING_MAX_TOKENS:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --quick|--medium|--full)
+    --quick|--medium|--full|--reasoning)
       MODE="$1"
       shift
       ;;
@@ -158,10 +195,34 @@ while [[ $# -gt 0 ]]; do
       LIST_PACKS=1
       shift
       ;;
+    --sandbox-log-dir)
+      SANDBOX_LOG_DIR="${2:-}"
+      if [[ -z "$SANDBOX_LOG_DIR" ]]; then
+        echo "✗ --sandbox-log-dir requires a directory" >&2
+        exit 2
+      fi
+      shift 2
+      ;;
     --timeout-per-case)
       TIMEOUT_PER_CASE="${2:-}"
       if [[ -z "$TIMEOUT_PER_CASE" ]] || ! [[ "$TIMEOUT_PER_CASE" =~ ^[0-9]+$ ]]; then
         echo "✗ --timeout-per-case requires a positive integer (seconds)" >&2
+        exit 2
+      fi
+      shift 2
+      ;;
+    --sampling-from-server)
+      SAMPLING_FROM_SERVER=1
+      shift
+      ;;
+    --enable-thinking)
+      ENABLE_THINKING=1
+      shift
+      ;;
+    --thinking-max-tokens)
+      THINKING_MAX_TOKENS="${2:-}"
+      if [[ -z "$THINKING_MAX_TOKENS" ]] || ! [[ "$THINKING_MAX_TOKENS" =~ ^[0-9]+$ ]]; then
+        echo "✗ --thinking-max-tokens requires a positive integer" >&2
         exit 2
       fi
       shift 2
@@ -241,6 +302,43 @@ if [[ -z "${BENCHLOCAL_HERMES_RESOLVE_LOCALHOST:-}" ]] \
   echo "[quality-test] localhost URL detected — auto-set BENCHLOCAL_HERMES_RESOLVE_LOCALHOST=1 for hermes sandbox endpoint rewrite" >&2
 fi
 
+server_reasoning_on() {
+  if curl -sf -m 3 "${URL}/props" 2>/dev/null | python3 -c '
+import json, sys
+try:
+    obj = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+
+def walk(x):
+    if isinstance(x, dict):
+        for k, v in x.items():
+            lk = str(k).lower()
+            if lk in {"reasoning", "enable_reasoning"}:
+                if v is True or str(v).lower() in {"1", "true", "on", "yes"}:
+                    return True
+            if walk(v):
+                return True
+    elif isinstance(x, list):
+        return any(walk(v) for v in x)
+    return False
+sys.exit(0 if walk(obj) else 1)
+' >/dev/null 2>&1; then
+    return 0
+  fi
+  if [[ -n "${CONTAINER:-}" && "${CONTAINER:-}" != "none" ]] \
+     && command -v docker >/dev/null 2>&1 \
+     && docker inspect "$CONTAINER" >/dev/null 2>&1; then
+    docker inspect "$CONTAINER" 2>/dev/null \
+      | grep -Eq -- '(--reasoning[= ]+on|"--reasoning"[[:space:]]*,[[:space:]]*"on")' && return 0
+  fi
+  return 1
+}
+
+if [[ "$ENABLE_THINKING" != "1" ]] && server_reasoning_on; then
+  echo "[quality-test] WARN: server appears to have reasoning enabled, but --enable-thinking is not forced. Pack defaults still apply; use --enable-thinking or ENABLE_THINKING=1 to force thinking on for every pack." >&2
+fi
+
 # ---- run benchlocal-cli ------------------------------------------------------
 
 RESULTS_DIR="${ROOT_DIR}/results/quality"
@@ -274,6 +372,24 @@ else
 fi
 if [[ "$NO_SANDBOX" == "1" && "$SANDBOXED_ONLY" != "1" ]]; then
   CLI_ARGS+=(--no-sandboxed-packs)
+fi
+# Capture each sandboxed pack's container log before teardown (else it's lost).
+if [[ -n "$SANDBOX_LOG_DIR" ]]; then
+  mkdir -p "$SANDBOX_LOG_DIR"
+  CLI_ARGS+=(--sandbox-log-dir "$SANDBOX_LOG_DIR")
+  echo "[quality-test] sandbox logs → ${SANDBOX_LOG_DIR}/sandbox-<pack>.log"
+fi
+if [[ "$SAMPLING_FROM_SERVER" == "1" ]]; then
+  CLI_ARGS+=(--sampling-from-server)
+  echo "[quality-test] sampling: inherited from server (non-canonical)"
+fi
+if [[ "$ENABLE_THINKING" == "1" ]]; then
+  CLI_ARGS+=(--enable-thinking)
+  echo "[quality-test] thinking: enabled (non-canonical)"
+fi
+if [[ -n "$THINKING_MAX_TOKENS" ]]; then
+  CLI_ARGS+=(--thinking-max-tokens "$THINKING_MAX_TOKENS")
+  echo "[quality-test] thinking max tokens: $THINKING_MAX_TOKENS (applies to thinking-enabled packs)"
 fi
 
 # Run; capture exit code so we can also try to emit the compact one-liner

@@ -37,11 +37,11 @@ schema_version: 1
 # --------------------------------------------------------------------------
 profiles:
   vllm/default:
-    compose_path: models/qwen3.6-27b/vllm/compose/single/docker-compose.yml
+    compose_path: models/qwen3.6-27b/vllm/compose/single/autoround-int4/tq3-mtp.yml
     genesis_equipped: true
     genesis_equipped_evidence: compose contains GENESIS_* / _genesis token
     compose_service_template:
-      source: models/qwen3.6-27b/vllm/compose/single/docker-compose.yml  # whole service definition captured verbatim from this file
+      source: models/qwen3.6-27b/vllm/compose/single/autoround-int4/tq3-mtp.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8020 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 1 }
@@ -63,11 +63,11 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: present  # sidecar invoke anchor
   vllm/long-text:
-    compose_path: models/qwen3.6-27b/vllm/compose/single/long-text.yml
+    compose_path: models/qwen3.6-27b/vllm/compose/single/autoround-int4/long-text.yml
     genesis_equipped: true
     genesis_equipped_evidence: compose contains GENESIS_* / _genesis token
     compose_service_template:
-      source: models/qwen3.6-27b/vllm/compose/single/long-text.yml  # whole service definition captured verbatim from this file
+      source: models/qwen3.6-27b/vllm/compose/single/autoround-int4/long-text.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8020 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 1 }
@@ -89,11 +89,11 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: present  # sidecar invoke anchor
   vllm/long-text-no-mtp:
-    compose_path: models/qwen3.6-27b/vllm/compose/single/long-text-no-mtp.yml
+    compose_path: models/qwen3.6-27b/vllm/compose/single/autoround-int4/long-text-no-mtp.yml
     genesis_equipped: true
     genesis_equipped_evidence: compose contains GENESIS_* / _genesis token
     compose_service_template:
-      source: models/qwen3.6-27b/vllm/compose/single/long-text-no-mtp.yml  # whole service definition captured verbatim from this file
+      source: models/qwen3.6-27b/vllm/compose/single/autoround-int4/long-text-no-mtp.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8021 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 1 }
@@ -115,11 +115,11 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: present  # sidecar invoke anchor
   vllm/long-vision:
-    compose_path: models/qwen3.6-27b/vllm/compose/single/long-vision.yml
+    compose_path: models/qwen3.6-27b/vllm/compose/single/autoround-int4/long-vision.yml
     genesis_equipped: true
     genesis_equipped_evidence: compose contains GENESIS_* / _genesis token
     compose_service_template:
-      source: models/qwen3.6-27b/vllm/compose/single/long-vision.yml  # whole service definition captured verbatim from this file
+      source: models/qwen3.6-27b/vllm/compose/single/autoround-int4/long-vision.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8020 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 1 }
@@ -141,11 +141,11 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: present  # sidecar invoke anchor
   vllm/bounded-thinking:
-    compose_path: models/qwen3.6-27b/vllm/compose/single/bounded-thinking.yml
+    compose_path: models/qwen3.6-27b/vllm/compose/single/autoround-int4/bounded-thinking.yml
     genesis_equipped: true
     genesis_equipped_evidence: compose contains GENESIS_* / _genesis token
     compose_service_template:
-      source: models/qwen3.6-27b/vllm/compose/single/bounded-thinking.yml  # whole service definition captured verbatim from this file
+      source: models/qwen3.6-27b/vllm/compose/single/autoround-int4/bounded-thinking.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8020 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 1 }
@@ -167,11 +167,11 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: present  # sidecar invoke anchor
   vllm/tools-text:
-    compose_path: models/qwen3.6-27b/vllm/compose/single/tools-text.yml
+    compose_path: models/qwen3.6-27b/vllm/compose/single/autoround-int4/tools-text.yml
     genesis_equipped: true
     genesis_equipped_evidence: compose contains GENESIS_* / _genesis token
     compose_service_template:
-      source: models/qwen3.6-27b/vllm/compose/single/tools-text.yml  # whole service definition captured verbatim from this file
+      source: models/qwen3.6-27b/vllm/compose/single/autoround-int4/tools-text.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8020 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 1 }
@@ -193,11 +193,11 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: present  # sidecar invoke anchor
   vllm/minimal:
-    compose_path: models/qwen3.6-27b/vllm/compose/single/minimal.yml
+    compose_path: models/qwen3.6-27b/vllm/compose/single/autoround-int4/minimal.yml
     genesis_equipped: false
     genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
     compose_service_template:
-      source: models/qwen3.6-27b/vllm/compose/single/minimal.yml  # whole service definition captured verbatim from this file
+      source: models/qwen3.6-27b/vllm/compose/single/autoround-int4/minimal.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8020 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 1 }
@@ -219,11 +219,11 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: present  # sidecar invoke anchor
   vllm/dual:
-    compose_path: models/qwen3.6-27b/vllm/compose/dual/docker-compose.yml
+    compose_path: models/qwen3.6-27b/vllm/compose/dual/autoround-int4/fp8-mtp.yml
     genesis_equipped: false
     genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
     compose_service_template:
-      source: models/qwen3.6-27b/vllm/compose/dual/docker-compose.yml  # whole service definition captured verbatim from this file
+      source: models/qwen3.6-27b/vllm/compose/dual/autoround-int4/fp8-mtp.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8010 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
@@ -246,11 +246,11 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: present  # sidecar invoke anchor
   vllm/dual-turbo:
-    compose_path: models/qwen3.6-27b/vllm/compose/dual/turbo.yml
+    compose_path: models/qwen3.6-27b/vllm/compose/dual/autoround-int4/turbo.yml
     genesis_equipped: true
     genesis_equipped_evidence: compose contains GENESIS_* / _genesis token
     compose_service_template:
-      source: models/qwen3.6-27b/vllm/compose/dual/turbo.yml  # whole service definition captured verbatim from this file
+      source: models/qwen3.6-27b/vllm/compose/dual/autoround-int4/turbo.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8011 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
@@ -273,11 +273,11 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: present  # sidecar invoke anchor
   vllm/dual-dflash:
-    compose_path: models/qwen3.6-27b/vllm/compose/dual/dflash.yml
+    compose_path: models/qwen3.6-27b/vllm/compose/dual/autoround-int4/dflash.yml
     genesis_equipped: false
     genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
     compose_service_template:
-      source: models/qwen3.6-27b/vllm/compose/dual/dflash.yml  # whole service definition captured verbatim from this file
+      source: models/qwen3.6-27b/vllm/compose/dual/autoround-int4/dflash.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8012 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
@@ -300,11 +300,11 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: present  # sidecar invoke anchor
   vllm/dual-dflash-noviz:
-    compose_path: models/qwen3.6-27b/vllm/compose/dual/dflash-noviz.yml
+    compose_path: models/qwen3.6-27b/vllm/compose/dual/autoround-int4/dflash-noviz.yml
     genesis_equipped: false
     genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
     compose_service_template:
-      source: models/qwen3.6-27b/vllm/compose/dual/dflash-noviz.yml  # whole service definition captured verbatim from this file
+      source: models/qwen3.6-27b/vllm/compose/dual/autoround-int4/dflash-noviz.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8013 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
@@ -327,11 +327,11 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: present  # sidecar invoke anchor
   vllm/dual-bf16:
-    compose_path: models/qwen3.6-27b/vllm/compose/dual/bf16.yml
+    compose_path: models/qwen3.6-27b/vllm/compose/dual/autoround-int4/bf16.yml
     genesis_equipped: false
     genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
     compose_service_template:
-      source: models/qwen3.6-27b/vllm/compose/dual/bf16.yml  # whole service definition captured verbatim from this file
+      source: models/qwen3.6-27b/vllm/compose/dual/autoround-int4/bf16.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8012 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
@@ -353,11 +353,11 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: present  # sidecar invoke anchor
   vllm/dual-int8:
-    compose_path: models/qwen3.6-27b/vllm/compose/dual/int8.yml
+    compose_path: models/qwen3.6-27b/vllm/compose/dual/autoround-int4/int8.yml
     genesis_equipped: false
     genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
     compose_service_template:
-      source: models/qwen3.6-27b/vllm/compose/dual/int8.yml  # whole service definition captured verbatim from this file
+      source: models/qwen3.6-27b/vllm/compose/dual/autoround-int4/int8.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8011 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
@@ -379,11 +379,11 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: present  # sidecar invoke anchor
   vllm/dual-tq3-mtp:
-    compose_path: models/qwen3.6-27b/vllm/compose/dual/tq3-mtp.yml
+    compose_path: models/qwen3.6-27b/vllm/compose/dual/autoround-int4/tq3-mtp.yml
     genesis_equipped: true
     genesis_equipped_evidence: kv_format 'turboquant_3bit_nc' starts with 'turboquant'
     compose_service_template:
-      source: models/qwen3.6-27b/vllm/compose/dual/tq3-mtp.yml  # whole service definition captured verbatim from this file
+      source: models/qwen3.6-27b/vllm/compose/dual/autoround-int4/tq3-mtp.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8013 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
@@ -405,11 +405,11 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: present  # sidecar invoke anchor
   vllm/dual-tq3-mtp-genesis:
-    compose_path: models/qwen3.6-27b/vllm/compose/dual/tq3-mtp-genesis.yml
+    compose_path: models/qwen3.6-27b/vllm/compose/dual/autoround-int4/tq3-mtp-genesis.yml
     genesis_equipped: true
     genesis_equipped_evidence: compose contains GENESIS_* / _genesis token
     compose_service_template:
-      source: models/qwen3.6-27b/vllm/compose/dual/tq3-mtp-genesis.yml  # whole service definition captured verbatim from this file
+      source: models/qwen3.6-27b/vllm/compose/dual/autoround-int4/tq3-mtp-genesis.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8015 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
@@ -431,11 +431,11 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: present  # sidecar invoke anchor
   vllm/dual-tq3-nomtp:
-    compose_path: models/qwen3.6-27b/vllm/compose/dual/tq3-nomtp.yml
+    compose_path: models/qwen3.6-27b/vllm/compose/dual/autoround-int4/tq3-nomtp.yml
     genesis_equipped: true
     genesis_equipped_evidence: kv_format 'turboquant_3bit_nc' starts with 'turboquant'
     compose_service_template:
-      source: models/qwen3.6-27b/vllm/compose/dual/tq3-nomtp.yml  # whole service definition captured verbatim from this file
+      source: models/qwen3.6-27b/vllm/compose/dual/autoround-int4/tq3-nomtp.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8014 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
@@ -457,11 +457,11 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: present  # sidecar invoke anchor
   vllm/dual-carnice-bf16mtp:
-    compose_path: models/qwen3.6-27b/vllm/compose/dual/carnice-bf16mtp.yml
+    compose_path: models/qwen3.6-27b/vllm/compose/dual/carnice-bf16mtp/bf16-mtp.yml
     genesis_equipped: false
     genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
     compose_service_template:
-      source: models/qwen3.6-27b/vllm/compose/dual/carnice-bf16mtp.yml  # whole service definition captured verbatim from this file
+      source: models/qwen3.6-27b/vllm/compose/dual/carnice-bf16mtp/bf16-mtp.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8070 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
@@ -483,11 +483,11 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: present  # sidecar invoke anchor
   vllm/dual-qwopus-bf16mtp:
-    compose_path: models/qwen3.6-27b/vllm/compose/dual/qwopus-bf16mtp.yml
+    compose_path: models/qwen3.6-27b/vllm/compose/dual/qwopus-bf16mtp/bf16-mtp.yml
     genesis_equipped: false
     genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
     compose_service_template:
-      source: models/qwen3.6-27b/vllm/compose/dual/qwopus-bf16mtp.yml  # whole service definition captured verbatim from this file
+      source: models/qwen3.6-27b/vllm/compose/dual/qwopus-bf16mtp/bf16-mtp.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8071 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
@@ -509,13 +509,13 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: present  # sidecar invoke anchor
   vllm/dual-nvlink:
-    compose_path: models/qwen3.6-27b/vllm/compose/dual/nvlink.yml
+    compose_path: models/qwen3.6-27b/vllm/compose/dual/autoround-int4/nvlink-fp8-mtp.yml
     genesis_equipped: false
     genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
-    extends_base: models/qwen3.6-27b/vllm/compose/dual/docker-compose.yml
+    extends_base: models/qwen3.6-27b/vllm/compose/dual/autoround-int4/fp8-mtp.yml
     compose_service_template:
-      source: models/qwen3.6-27b/vllm/compose/dual/nvlink.yml  # whole service definition captured verbatim from this file
-      extends_base: models/qwen3.6-27b/vllm/compose/dual/docker-compose.yml  # merged base supplies volumes/entrypoint/command
+      source: models/qwen3.6-27b/vllm/compose/dual/autoround-int4/nvlink-fp8-mtp.yml  # whole service definition captured verbatim from this file
+      extends_base: models/qwen3.6-27b/vllm/compose/dual/autoround-int4/fp8-mtp.yml  # merged base supplies volumes/entrypoint/command
       param_slots:
         ports: { source: E.default_port, value: 8014 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
@@ -538,13 +538,13 @@ profiles:
         volumes: inherited-from-extends-base    # overlay/sidecar mount anchor
         entrypoint: inherited-from-extends-base  # sidecar invoke anchor
   vllm/dual-nvlink-turbo:
-    compose_path: models/qwen3.6-27b/vllm/compose/dual/nvlink-turbo.yml
+    compose_path: models/qwen3.6-27b/vllm/compose/dual/autoround-int4/nvlink-turbo.yml
     genesis_equipped: true
     genesis_equipped_evidence: kv_format 'turboquant_3bit_nc' starts with 'turboquant'
-    extends_base: models/qwen3.6-27b/vllm/compose/dual/turbo.yml
+    extends_base: models/qwen3.6-27b/vllm/compose/dual/autoround-int4/turbo.yml
     compose_service_template:
-      source: models/qwen3.6-27b/vllm/compose/dual/nvlink-turbo.yml  # whole service definition captured verbatim from this file
-      extends_base: models/qwen3.6-27b/vllm/compose/dual/turbo.yml  # merged base supplies volumes/entrypoint/command
+      source: models/qwen3.6-27b/vllm/compose/dual/autoround-int4/nvlink-turbo.yml  # whole service definition captured verbatim from this file
+      extends_base: models/qwen3.6-27b/vllm/compose/dual/autoround-int4/turbo.yml  # merged base supplies volumes/entrypoint/command
       param_slots:
         ports: { source: E.default_port, value: 8017 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
@@ -567,13 +567,13 @@ profiles:
         volumes: inherited-from-extends-base    # overlay/sidecar mount anchor
         entrypoint: inherited-from-extends-base  # sidecar invoke anchor
   vllm/dual-nvlink-dflash:
-    compose_path: models/qwen3.6-27b/vllm/compose/dual/nvlink-dflash.yml
+    compose_path: models/qwen3.6-27b/vllm/compose/dual/autoround-int4/nvlink-dflash.yml
     genesis_equipped: false
     genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
-    extends_base: models/qwen3.6-27b/vllm/compose/dual/dflash.yml
+    extends_base: models/qwen3.6-27b/vllm/compose/dual/autoround-int4/dflash.yml
     compose_service_template:
-      source: models/qwen3.6-27b/vllm/compose/dual/nvlink-dflash.yml  # whole service definition captured verbatim from this file
-      extends_base: models/qwen3.6-27b/vllm/compose/dual/dflash.yml  # merged base supplies volumes/entrypoint/command
+      source: models/qwen3.6-27b/vllm/compose/dual/autoround-int4/nvlink-dflash.yml  # whole service definition captured verbatim from this file
+      extends_base: models/qwen3.6-27b/vllm/compose/dual/autoround-int4/dflash.yml  # merged base supplies volumes/entrypoint/command
       param_slots:
         ports: { source: E.default_port, value: 8018 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
@@ -596,13 +596,13 @@ profiles:
         volumes: inherited-from-extends-base    # overlay/sidecar mount anchor
         entrypoint: inherited-from-extends-base  # sidecar invoke anchor
   vllm/dual-nvlink-dflash-noviz:
-    compose_path: models/qwen3.6-27b/vllm/compose/dual/nvlink-dflash-noviz.yml
+    compose_path: models/qwen3.6-27b/vllm/compose/dual/autoround-int4/nvlink-dflash-noviz.yml
     genesis_equipped: false
     genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
-    extends_base: models/qwen3.6-27b/vllm/compose/dual/dflash-noviz.yml
+    extends_base: models/qwen3.6-27b/vllm/compose/dual/autoround-int4/dflash-noviz.yml
     compose_service_template:
-      source: models/qwen3.6-27b/vllm/compose/dual/nvlink-dflash-noviz.yml  # whole service definition captured verbatim from this file
-      extends_base: models/qwen3.6-27b/vllm/compose/dual/dflash-noviz.yml  # merged base supplies volumes/entrypoint/command
+      source: models/qwen3.6-27b/vllm/compose/dual/autoround-int4/nvlink-dflash-noviz.yml  # whole service definition captured verbatim from this file
+      extends_base: models/qwen3.6-27b/vllm/compose/dual/autoround-int4/dflash-noviz.yml  # merged base supplies volumes/entrypoint/command
       param_slots:
         ports: { source: E.default_port, value: 8019 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
@@ -625,11 +625,11 @@ profiles:
         volumes: inherited-from-extends-base    # overlay/sidecar mount anchor
         entrypoint: inherited-from-extends-base  # sidecar invoke anchor
   vllm/dual4:
-    compose_path: models/qwen3.6-27b/vllm/compose/multi4/docker-compose.yml
+    compose_path: models/qwen3.6-27b/vllm/compose/multi4/autoround-int4/fp8-mtp.yml
     genesis_equipped: false
     genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
     compose_service_template:
-      source: models/qwen3.6-27b/vllm/compose/multi4/docker-compose.yml  # whole service definition captured verbatim from this file
+      source: models/qwen3.6-27b/vllm/compose/multi4/autoround-int4/fp8-mtp.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8015 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 4 }
@@ -651,11 +651,11 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: present  # sidecar invoke anchor
   vllm/dual4-dflash:
-    compose_path: models/qwen3.6-27b/vllm/compose/multi4/dflash.yml
+    compose_path: models/qwen3.6-27b/vllm/compose/multi4/autoround-int4/dflash.yml
     genesis_equipped: false
     genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
     compose_service_template:
-      source: models/qwen3.6-27b/vllm/compose/multi4/dflash.yml  # whole service definition captured verbatim from this file
+      source: models/qwen3.6-27b/vllm/compose/multi4/autoround-int4/dflash.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8016 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 4 }
@@ -677,11 +677,11 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: present  # sidecar invoke anchor
   vllm/gemma-mtp-tp1:
-    compose_path: models/gemma-4-31b/vllm/compose/single/docker-compose.yml
+    compose_path: models/gemma-4-31b/vllm/compose/single/autoround-int4/fp8-mtp.yml
     genesis_equipped: false
     genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
     compose_service_template:
-      source: models/gemma-4-31b/vllm/compose/single/docker-compose.yml  # whole service definition captured verbatim from this file
+      source: models/gemma-4-31b/vllm/compose/single/autoround-int4/fp8-mtp.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8031 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 1 }
@@ -703,11 +703,11 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: absent  # sidecar invoke anchor
   vllm/gemma-mtp:
-    compose_path: models/gemma-4-31b/vllm/compose/dual/docker-compose.yml
+    compose_path: models/gemma-4-31b/vllm/compose/dual/autoround-int4/bf16-mtp.yml
     genesis_equipped: false
     genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
     compose_service_template:
-      source: models/gemma-4-31b/vllm/compose/dual/docker-compose.yml  # whole service definition captured verbatim from this file
+      source: models/gemma-4-31b/vllm/compose/dual/autoround-int4/bf16-mtp.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8030 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
@@ -730,11 +730,11 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: present  # sidecar invoke anchor
   vllm/gemma-int8:
-    compose_path: models/gemma-4-31b/vllm/compose/dual/int8.yml
+    compose_path: models/gemma-4-31b/vllm/compose/dual/autoround-int4/int8.yml
     genesis_equipped: false
     genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
     compose_service_template:
-      source: models/gemma-4-31b/vllm/compose/dual/int8.yml  # whole service definition captured verbatim from this file
+      source: models/gemma-4-31b/vllm/compose/dual/autoround-int4/int8.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8032 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
@@ -757,11 +757,11 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: present  # sidecar invoke anchor
   vllm/gemma-int8-262k:
-    compose_path: models/gemma-4-31b/vllm/compose/dual/int8.yml
+    compose_path: models/gemma-4-31b/vllm/compose/dual/autoround-int4/int8.yml
     genesis_equipped: false
     genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
     compose_service_template:
-      source: models/gemma-4-31b/vllm/compose/dual/int8.yml  # whole service definition captured verbatim from this file
+      source: models/gemma-4-31b/vllm/compose/dual/autoround-int4/int8.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8032 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
@@ -784,11 +784,11 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: present  # sidecar invoke anchor
   vllm/gemma-dflash:
-    compose_path: models/gemma-4-31b/vllm/compose/dual/dflash.yml
+    compose_path: models/gemma-4-31b/vllm/compose/dual/autoround-int4/dflash.yml
     genesis_equipped: false
     genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
     compose_service_template:
-      source: models/gemma-4-31b/vllm/compose/dual/dflash.yml  # whole service definition captured verbatim from this file
+      source: models/gemma-4-31b/vllm/compose/dual/autoround-int4/dflash.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8032 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
@@ -811,11 +811,11 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: present  # sidecar invoke anchor
   vllm/gemma-dflash-int8:
-    compose_path: models/gemma-4-31b/vllm/compose/dual/dflash-int8.yml
+    compose_path: models/gemma-4-31b/vllm/compose/dual/autoround-int4/dflash-int8.yml
     genesis_equipped: false
     genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
     compose_service_template:
-      source: models/gemma-4-31b/vllm/compose/dual/dflash-int8.yml  # whole service definition captured verbatim from this file
+      source: models/gemma-4-31b/vllm/compose/dual/autoround-int4/dflash-int8.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8032 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
@@ -838,11 +838,11 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: present  # sidecar invoke anchor
   vllm/gemma-int8-tq3:
-    compose_path: models/gemma-4-31b/vllm/compose/dual/int8-tq3.yml
+    compose_path: models/gemma-4-31b/vllm/compose/dual/autoround-int4/int8-tq3.yml
     genesis_equipped: true
     genesis_equipped_evidence: kv_format 'turboquant_3bit_nc' starts with 'turboquant'
     compose_service_template:
-      source: models/gemma-4-31b/vllm/compose/dual/int8-tq3.yml  # whole service definition captured verbatim from this file
+      source: models/gemma-4-31b/vllm/compose/dual/autoround-int4/int8-tq3.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8034 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
@@ -865,11 +865,11 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: present  # sidecar invoke anchor
   vllm/gemma-bf16:
-    compose_path: models/gemma-4-31b/vllm/compose/dual/bf16.yml
+    compose_path: models/gemma-4-31b/vllm/compose/dual/autoround-int4/bf16.yml
     genesis_equipped: false
     genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
     compose_service_template:
-      source: models/gemma-4-31b/vllm/compose/dual/bf16.yml  # whole service definition captured verbatim from this file
+      source: models/gemma-4-31b/vllm/compose/dual/autoround-int4/bf16.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8033 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
@@ -892,11 +892,11 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: present  # sidecar invoke anchor
   vllm/gemma-awq:
-    compose_path: models/gemma-4-31b/vllm/compose/dual/awq.yml
+    compose_path: models/gemma-4-31b/vllm/compose/dual/awq/bf16-mtp.yml
     genesis_equipped: false
     genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
     compose_service_template:
-      source: models/gemma-4-31b/vllm/compose/dual/awq.yml  # whole service definition captured verbatim from this file
+      source: models/gemma-4-31b/vllm/compose/dual/awq/bf16-mtp.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8033 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
@@ -919,11 +919,11 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: present  # sidecar invoke anchor
   vllm/gemma-a4b-single:
-    compose_path: models/gemma-4-26b-a4b/vllm/compose/single/docker-compose.yml
+    compose_path: models/gemma-4-26b-a4b/vllm/compose/single/autoround-int4-mixed/bf16.yml
     genesis_equipped: false
     genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
     compose_service_template:
-      source: models/gemma-4-26b-a4b/vllm/compose/single/docker-compose.yml  # whole service definition captured verbatim from this file
+      source: models/gemma-4-26b-a4b/vllm/compose/single/autoround-int4-mixed/bf16.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8040 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 1 }
@@ -945,11 +945,11 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: absent  # sidecar invoke anchor
   vllm/gemma-a4b:
-    compose_path: models/gemma-4-26b-a4b/vllm/compose/dual/docker-compose.yml
+    compose_path: models/gemma-4-26b-a4b/vllm/compose/dual/autoround-int4-mixed/bf16.yml
     genesis_equipped: false
     genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
     compose_service_template:
-      source: models/gemma-4-26b-a4b/vllm/compose/dual/docker-compose.yml  # whole service definition captured verbatim from this file
+      source: models/gemma-4-26b-a4b/vllm/compose/dual/autoround-int4-mixed/bf16.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8041 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
@@ -971,11 +971,11 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: absent  # sidecar invoke anchor
   vllm/gemma-a4b-awq:
-    compose_path: models/gemma-4-26b-a4b/vllm/compose/dual/awq.yml
+    compose_path: models/gemma-4-26b-a4b/vllm/compose/dual/awq/bf16.yml
     genesis_equipped: false
     genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
     compose_service_template:
-      source: models/gemma-4-26b-a4b/vllm/compose/dual/awq.yml  # whole service definition captured verbatim from this file
+      source: models/gemma-4-26b-a4b/vllm/compose/dual/awq/bf16.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8042 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
@@ -997,11 +997,11 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: present  # sidecar invoke anchor
   vllm/gemma-a4b-awq-mtp:
-    compose_path: models/gemma-4-26b-a4b/vllm/compose/dual/awq-mtp.yml
+    compose_path: models/gemma-4-26b-a4b/vllm/compose/dual/awq/mtp.yml
     genesis_equipped: false
     genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
     compose_service_template:
-      source: models/gemma-4-26b-a4b/vllm/compose/dual/awq-mtp.yml  # whole service definition captured verbatim from this file
+      source: models/gemma-4-26b-a4b/vllm/compose/dual/awq/mtp.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8043 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
@@ -1023,11 +1023,11 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: present  # sidecar invoke anchor
   vllm/qwen-a3b-preview-single:
-    compose_path: models/qwen3.6-35b-a3b/vllm/compose/single/preview.yml
+    compose_path: models/qwen3.6-35b-a3b/vllm/compose/single/autoround-int4/preview.yml
     genesis_equipped: false
     genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
     compose_service_template:
-      source: models/qwen3.6-35b-a3b/vllm/compose/single/preview.yml  # whole service definition captured verbatim from this file
+      source: models/qwen3.6-35b-a3b/vllm/compose/single/autoround-int4/preview.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8050 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 1 }
@@ -1049,11 +1049,11 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: absent  # sidecar invoke anchor
   vllm/qwen-a3b-preview:
-    compose_path: models/qwen3.6-35b-a3b/vllm/compose/dual/preview.yml
+    compose_path: models/qwen3.6-35b-a3b/vllm/compose/dual/autoround-int4/preview.yml
     genesis_equipped: false
     genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
     compose_service_template:
-      source: models/qwen3.6-35b-a3b/vllm/compose/dual/preview.yml  # whole service definition captured verbatim from this file
+      source: models/qwen3.6-35b-a3b/vllm/compose/dual/autoround-int4/preview.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8051 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }
@@ -1075,11 +1075,11 @@ profiles:
         volumes: present    # overlay/sidecar mount anchor
         entrypoint: absent  # sidecar invoke anchor
   vllm/qwen-a3b-preview-mtp:
-    compose_path: models/qwen3.6-35b-a3b/vllm/compose/dual/preview-mtp.yml
+    compose_path: models/qwen3.6-35b-a3b/vllm/compose/dual/autoround-int4/preview-mtp.yml
     genesis_equipped: false
     genesis_equipped_evidence: no GENESIS_* token in compose and kv_format is not turboquant*
     compose_service_template:
-      source: models/qwen3.6-35b-a3b/vllm/compose/dual/preview-mtp.yml  # whole service definition captured verbatim from this file
+      source: models/qwen3.6-35b-a3b/vllm/compose/dual/autoround-int4/preview-mtp.yml  # whole service definition captured verbatim from this file
       param_slots:
         ports: { source: E.default_port, value: 8052 }
         tensor_parallel_size: { token: '${TP}', source: E.tp, value: 2 }

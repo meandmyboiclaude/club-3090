@@ -80,7 +80,7 @@ rebased before merge so it doesn't revert #41434).
 ## Verified on
 
 - vLLM nightly: `1acd67a7` (includes merged #41434)
-- Compose: `dual/int8-tq3.yml`
+- Compose: `dual/autoround-int4/tq3-mtp.yml`
 - Qwen 3.6 27B AutoRound INT4, TQ3 KV, MTP n=3, 262K × 2 streams
 - 2026-05-11
 

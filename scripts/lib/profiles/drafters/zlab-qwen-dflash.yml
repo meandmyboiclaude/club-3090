@@ -13,7 +13,7 @@ download:
 vram_footprint_gb: 1.75
 status: experimental
 # Phase A-prime fold-in (v0.8.0 #359). Grounded verbatim from the shipped
-# `--speculative-config` JSON in models/qwen3.6-27b/vllm/compose/dual/dflash.yml
+# `--speculative-config` JSON in models/qwen3.6-27b/vllm/compose/dual/autoround-int4/dflash.yml
 # ('{"method":"dflash","model":"/root/.cache/huggingface/qwen3.6-27b-dflash","num_speculative_tokens":5}').
 # Dir verified at /mnt/models/huggingface/qwen3.6-27b-dflash. Compose ships
 # n=5; n_default above is the drafter's own default — {N} is the substitution

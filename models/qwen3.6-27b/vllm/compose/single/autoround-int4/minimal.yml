@@ -1,0 +1,141 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Qwen3.6-27B (Lorbus AutoRound INT4 + BF16 mtp.fc preserved)
+#   Topology:  Single 3090 (TP=1)
+#   Drafter:   none (no spec-decode — simplest path)
+#   KV:        fp8_e5m2 (no TQ3 to avoid cudagraph cascade bugs)
+#   Vision:    no
+#   Max ctx:   65K (mem-util 0.95)
+#   Genesis:   none — bare vLLM, isolation control
+#   Status:    ✅ Production
+#   Best for:  Debugging baseline / 20 GB Ampere fallback when TQ3 paths
+#              don't fit / first-time setup verification
+# ---------------------------------------------------------------------------
+# Minimal — no spec-decode, no Genesis patches, no .tolist() patcher.
+#
+# When to pick this variant:
+#   - You want the simplest possible stack (fewer moving parts to debug)
+#   - You don't need MTP / spec-decode speedup
+#   - You're OK with ~32 TPS instead of the ~50-70 TPS of the spec-decode variants
+#   - You want vision + tool calls to "just work" without any patches
+#
+# Trade-off vs the default `docker-compose.yml`:
+#   - This: no MTP, no Genesis → 32/33 TPS narr/code, 32K ctx, vision ✓, tools ✓
+#   - Default: MTP + Genesis P65 + TQ3 KV → 51/68 TPS, 48K ctx, vision ✓, tools ✓
+#
+# This file exists because community feedback (predecessor repo issue #1)
+# showed users sometimes hit the spec-decode tool-call cascade by booting
+# the wrong compose. This minimal path removes that whole class of failure
+# modes by never enabling spec-decode in the first place.
+#
+# Run:
+#   cd compose && docker compose -f single/minimal.yml up -d
+# ===========================================================================
+# Hardware metadata (parsed by scripts/preflight.sh):
+# Requires-min-vram-gb: 20
+# Engine-profile: vllm-nightly-clean
+# Requires-min-gpu-count: 1
+# Tensor-parallel: 1
+services:
+  vllm-qwen36-27b-minimal:
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}
+    container_name: "${ESTATE_CONTAINER:-vllm-qwen36-27b-minimal}"
+    restart: "no"
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8020}}:8000"
+    volumes:
+      - ${MODEL_DIR:-../../../../../../models-cache}:/root/.cache/huggingface
+      # torch.compile + Triton kernel caches — first boot warms (~60-90 sec);
+      # subsequent boots reuse cached graphs. Pattern from Sander's PROD launch.
+      # Closes club-3090 #22.
+      - ../../../cache/torch_compile:/root/.cache/vllm/torch_compile_cache
+      - ../../../cache/triton:/root/.triton/cache
+      # vLLM PR #35936 required-tool fallback (drop when upstream lands).
+      # vLLM PR #35936 required-tool fallback — sidecar pattern (drop when upstream lands).
+      # Bind-mounted at side paths so install.sh can copy into vLLM's site-packages
+      # BEFORE Genesis runs — avoids the RO-mount conflict with Genesis P64/P68/P69
+      # which write to chat_completion/serving.py at vllm-import time. See
+      # patches/vllm-pr35936-required-fallback/install.sh + README.md.
+      - ../../../patches/vllm-pr35936-required-fallback/vllm/entrypoints/openai/chat_completion/serving.py:/etc/club3090/pr35936-chat-completion-serving.py:ro
+      - ../../../patches/vllm-pr35936-required-fallback/vllm/entrypoints/openai/engine/serving.py:/etc/club3090/pr35936-engine-serving.py:ro
+      - ../../../patches/vllm-pr35936-required-fallback/install.sh:/etc/club3090/install-pr35936.sh:ro
+      # froggeric/Qwen-Fixed-Chat-Templates qwen3.6 — fixes 7 default-template
+      # bugs (empty <think></think> spam, </thinking> hallucination, unclosed
+      # think before tool call, no-user-query crash, developer role, etc.).
+      # See docs/UPSTREAM.md "Community templates / model assets" + the row at
+      # https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates
+      - ../../../patches/froggeric-chat-template/chat_template.jinja:/etc/qwen-froggeric-chat-template.jinja:ro
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=${ESTATE_GPUS:-${NVIDIA_VISIBLE_DEVICES:-all}}
+      # Uncomment the next line to pin to a specific GPU (e.g. GPU 0):
+      # - CUDA_VISIBLE_DEVICES=0
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - NCCL_CUMEM_ENABLE=0
+      - NCCL_P2P_DISABLE=1
+      - VLLM_NO_USAGE_STATS=1
+      # expandable_segments:True crashes boot on some setups (likely cuMemMap path).
+      # Known: JusefPol on NVLink (PR #31), WSL2 single-card 3090 Ti.
+      # Override via .env: PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
+      - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+      - OMP_NUM_THREADS=1
+    shm_size: "16gb"
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        # VLLM_ENFORCE_EAGER=1 in .env disables CUDA graphs — use on
+        # hardware where graph capture causes OOM or instability (e.g. WSL2).
+        # Install PR #35936 overlay before vllm imports (drop when upstream lands).
+        bash /etc/club3090/install-pr35936.sh
+        exec vllm serve ${VLLM_ENFORCE_EAGER:+--enforce-eager} "$@"
+      - --
+    command:
+      - --model
+      - /root/.cache/huggingface/qwen3.6-27b-autoround-int4
+      - --served-model-name
+      - qwen3.6-27b-autoround
+      - --quantization
+      - auto_round
+      - --dtype
+      - float16
+      - --tensor-parallel-size
+      - "${TP:-1}"
+      - --pipeline-parallel-size
+      - "${PP:-1}"
+      - --max-model-len
+      - "${MAX_MODEL_LEN:-32768}"
+      - --gpu-memory-utilization
+      - "${GPU_MEMORY_UTILIZATION:-0.92}"
+      - --max-num-seqs
+      - "1"
+      - --kv-cache-dtype
+      - "${KV_CACHE_DTYPE:-fp8_e5m2}"
+      - --trust-remote-code
+      # froggeric chat-template override (see volumes block + docs/UPSTREAM.md)
+      - --chat-template
+      - /etc/qwen-froggeric-chat-template.jinja
+      - --reasoning-parser
+      - qwen3
+      - --default-chat-template-kwargs
+      - '{"enable_thinking": false}'
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - qwen3_coder
+      - --enable-prefix-caching
+      - --enable-chunked-prefill
+      # No --speculative-config (this is the minimal variant — no spec-decode)
+      - --override-generation-config
+      - '{"temperature":${TEMP:-${TEMPERATURE:-0.6}},"top_p":${TOP_P:-0.95},"top_k":${TOP_K:-20},"min_p":${MIN_P:-0.0},"repetition_penalty":${REPEAT_PENALTY:-1.0}}'
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"

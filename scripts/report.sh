@@ -15,6 +15,7 @@
 #   bash scripts/report.sh --full            # ALL four: verify + stress + soak + bench (~35 min, the canonical "everything" pass for cross-rig contributions)
 #   bash scripts/report.sh --no-redact       # disable path/host/user redaction
 #   bash scripts/report.sh --container NAME  # override container auto-detection
+#   bash scripts/report.sh --full-calibration  # kv-calc matrix for ALL models (default: only the running model; skipped on llama.cpp/ik_llama)
 #   bash scripts/report.sh > my-rig.md       # capture for paste
 #
 # Why --soak is its own flag:
@@ -34,6 +35,9 @@ DO_SOAK=0
 DO_BENCH=0
 REDACT=1
 CONTAINER=""
+# KV-calc calibration is scoped to the running model by default (#168). Set to 1
+# (flag or REPORT_FULL_CALIBRATION=1) to emit the full catalog-wide matrix.
+FULL_CALIBRATION="${REPORT_FULL_CALIBRATION:-0}"
 
 print_help() {
   sed -n '2,/^set/p' "$0" | sed 's/^# \?//' | head -n -1
@@ -48,6 +52,7 @@ while [[ $# -gt 0 ]]; do
     --full) DO_VERIFY=1; DO_STRESS=1; DO_SOAK=1; DO_BENCH=1; shift ;;
     --no-redact) REDACT=0; shift ;;
     --container) CONTAINER="${2:-}"; shift 2 ;;
+    --full-calibration) FULL_CALIBRATION=1; shift ;;
     -h|--help) print_help; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; echo "Try: bash scripts/report.sh --help" >&2; exit 1 ;;
   esac
@@ -60,12 +65,26 @@ done
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# KV-calc calibration helpers (engine/model detection + per-model filter, #168).
+source "$REPO_ROOT/scripts/lib/report_calib.sh"
+
+# Pick up a saved MODEL_DIR (and other config) from the repo .env — same as
+# launch.sh / switch.sh, and what setup.sh writes there. An explicit exported
+# MODEL_DIR still wins. This makes the Disk section report the user's real
+# models path instead of falling back to the hardcoded mount below.
+if [[ -z "${MODEL_DIR:-}" && -f "${REPO_ROOT}/.env" ]]; then
+  # shellcheck disable=SC1091
+  source "${REPO_ROOT}/.env"
+fi
+
 HOST_SHORT="$(hostname -s 2>/dev/null || echo unknown)"
 USER_NAME="${USER:-$(whoami 2>/dev/null || echo unknown)}"
 
 redact() {
   if [[ $REDACT -eq 1 ]]; then
-    sed \
+    # Mask the literal MODEL_DIR value first (if exported) so an arbitrary models
+    # path — /data/..., /srv/... — is caught before the prefix rules below.
+    { if [[ -n "${MODEL_DIR:-}" ]]; then sed -e "s|${MODEL_DIR}|<MODEL_DIR>|g"; else cat; fi; } | sed \
       -e "s|/home/${USER_NAME}|~|g" \
       -e "s|/root|~|g" \
       -e "s|${HOST_SHORT}|<HOST>|g" \
@@ -73,7 +92,10 @@ redact() {
       -e 's|HF_TOKEN=[^ "]*|HF_TOKEN=<REDACTED>|g' \
       -e 's|HUGGING_FACE_HUB_TOKEN=[^ "]*|HUGGING_FACE_HUB_TOKEN=<REDACTED>|g' \
       -e 's|api_key=[^ "]*|api_key=<REDACTED>|gi' \
-      -e 's|hf_[A-Za-z0-9]\{30,\}|hf_<REDACTED>|g'
+      -e 's|hf_[A-Za-z0-9]\{30,\}|hf_<REDACTED>|g' \
+      -e 's|/opt/ai|<STACK_ROOT>|g' \
+      -e 's|/mnt/[a-z]/Users/[^ /]*|/mnt/<DRIVE>/Users/<REDACTED>|g' \
+      -e 's|/mnt/models|<MODELS>|g'
   else
     cat
   fi
@@ -264,7 +286,14 @@ else
   # actually decide whether GPU↔GPU P2P engages (see issues #137, #351).
   subsection "PCIe / P2P detail (lspci)"
   if ! have lspci; then
-    echo "_lspci not available (pciutils not installed) — skipping PCIe/P2P detail._"
+    # Fallback: nvidia-smi topo -p2p doesn't need pciutils and shows P2P capability
+    if have nvidia-smi && nvidia-smi topo -p2p rw >/dev/null 2>&1; then
+      echo "_lspci not available (pciutils not installed) — showing P2P capability matrix instead._"
+      echo
+      nvidia-smi topo -p2p rw | redact
+    else
+      echo "_lspci not available (pciutils not installed) — skipping PCIe/P2P detail._"
+    fi
   else
     # sudo lspci -vvv is needed for full capability blocks (ACS lives in the
     # extended config space, root-only). Degrade gracefully if sudo is
@@ -352,11 +381,21 @@ section "Display / desktop state"
   fi
 
   if have nvidia-smi; then
+    # Check if a club-3090 container is running (lightweight — full detection is later)
+    # NB: top-level (not in a function) — plain assignment, not `local`.
+    our_container=""
+    if have docker && docker info >/dev/null 2>&1; then
+      our_container=$(docker ps --format '{{.Names}}' --filter 'name=vllm-' --filter 'name=llama-cpp-' --filter 'name=club3090-' --filter 'name=ik-llama-' 2>/dev/null | head -1)
+    fi
     nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits 2>/dev/null \
       | while IFS=, read -r idx used; do
           idx="${idx# }"; used="${used# }"
           if [[ "$used" =~ ^[0-9]+$ ]] && [[ "$used" -gt 100 ]]; then
-            echo "- **GPU $idx idle VRAM:** ${used} MiB ⚠ something is using this GPU (display, browser, container)"
+            if [[ -n "$our_container" ]]; then
+              echo "- **GPU $idx idle VRAM:** ${used} MiB (held by running \`${our_container}\`)"
+            else
+              echo "- **GPU $idx idle VRAM:** ${used} MiB ⚠ something is using this GPU (display, browser, container)"
+            fi
           else
             echo "- **GPU $idx idle VRAM:** ${used} MiB ✓"
           fi
@@ -458,28 +497,54 @@ fi
 # verdict line + any FAIL rows here so a triage reply can immediately see
 # whether to trust kv-calc projections for this user's config.
 
+# Engine + model detection for kv-calc scoping (#168). Resolve the active
+# container (explicit --container wins; else first running club-3090 container),
+# then map it to a kv-calc engine family + model id via scripts/lib/report_calib.sh.
+_calib_container="${CONTAINER:-}"
+if [[ -z "$_calib_container" ]] && have docker && docker info >/dev/null 2>&1; then
+  _calib_container=$(docker ps --format '{{.Names}}' --filter 'name=vllm-' --filter 'name=llama-cpp-' --filter 'name=club3090-' --filter 'name=ik-llama-' 2>/dev/null | head -1)
+fi
+CALIB_ENGINE_KIND="${ENGINE_KIND:-$(calib_engine_for_container "$_calib_container")}"
+CALIB_MODEL_ID="$(calib_model_for_container "$_calib_container")"
+
 if have python3 && [[ -f tools/kv-calc.py ]]; then
   section "KV math calibration"
-  calib_output=$(python3 tools/kv-calc.py --calibration 2>&1 || true)
-  overall=$(echo "$calib_output" | grep -E '^Overall:' | head -1)
-  fail_rows=$(echo "$calib_output" | grep -E '\bFAIL\b' || true)
-  {
-    if [[ -n "$overall" ]]; then
-      echo "- ${overall}"
-    else
-      echo "- _kv-calc --calibration produced no Overall line; see output below._"
+  # kv-calc is vLLM-memory-model-coupled; skip on the ggml engines (llama.cpp + ik_llama).
+  if [[ "$CALIB_ENGINE_KIND" == "llamacpp" ]]; then
+    echo "- _kv-calc calibration is vLLM-specific — skipped on the llama.cpp / ik_llama engine (ggml uses a different allocator)._"
+  elif ! python3 -c 'import yaml' 2>/dev/null; then
+    # Item 1: graceful-degrade when PyYAML is missing
+    echo "- _kv-calc calibration skipped — PyYAML not installed (\`pip install pyyaml\`)._"
+  else
+    # #168: scope to the running model by default; --full-calibration (or
+    # REPORT_FULL_CALIBRATION=1) restores the catalog-wide matrix. Falls back to
+    # the full matrix when the model can't be resolved.
+    calib_scope=""
+    if [[ "$FULL_CALIBRATION" != "1" && -n "$CALIB_MODEL_ID" ]]; then
+      calib_scope="$CALIB_MODEL_ID"
+      echo "- _Scoped to the running model \`${CALIB_MODEL_ID}\` — pass \`--full-calibration\` for all calibrated models._"
     fi
-    if [[ -n "$fail_rows" ]]; then
-      echo "- ⚠ Failing rows:"
-      echo '```'
-      echo "$fail_rows"
-      echo '```'
-      echo "- Math model is mis-calibrated against measured reality for the rows above. Any kv-calc projection on this checkout should be treated as suspect until the calibration anchors / formulas are reconciled."
-    else
-      echo "- No FAIL rows. kv-calc projections should agree with measured VRAM within the ±1.5 GB error band."
-    fi
-  } | redact
-  echo "$calib_output" | redact | details "Full kv-calc --calibration output"
+    calib_output=$(python3 tools/kv-calc.py --calibration 2>&1 | calib_filter_model_section "$calib_scope" || true)
+    overall=$(echo "$calib_output" | grep -E '^Overall:' | head -1)
+    fail_rows=$(echo "$calib_output" | grep -E '\bFAIL\b' || true)
+    {
+      if [[ -n "$overall" ]]; then
+        echo "- ${overall}"
+      else
+        echo "- _kv-calc --calibration produced no Overall line; see output below._"
+      fi
+      if [[ -n "$fail_rows" ]]; then
+        echo "- ⚠ Failing rows:"
+        echo '```'
+        echo "$fail_rows"
+        echo '```'
+        echo "- Math model is mis-calibrated against measured reality for the rows above. Any kv-calc projection on this checkout should be treated as suspect until the calibration anchors / formulas are reconciled."
+      else
+        echo "- No FAIL rows. kv-calc projections should agree with measured VRAM within the ±1.5 GB error band."
+      fi
+    } | redact
+    echo "$calib_output" | redact | details "Full kv-calc --calibration output"
+  fi
 fi
 
 # ---------------------------------------------------------------------------

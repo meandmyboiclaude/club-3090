@@ -141,7 +141,7 @@ def ff_derived(slug, cfg, weight_gb=8.0):
 
 CURATED_SLUG = "Lorbus/Qwen3.6-27B-int4-AutoRound"
 CURATED_MODEL_ID = "qwen3.6-27b"           # Tier-1 curated model CURATED_SLUG resolves to
-CURATED_VARIANT = "autoround_int4"          # variant CURATED_SLUG resolves to
+CURATED_VARIANT = "autoround-int4"          # variant CURATED_SLUG resolves to
 
 # ---------------------------------------------------------------------------
 # NON-MOCKED kv-calc parameterization.

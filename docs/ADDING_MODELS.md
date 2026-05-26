@@ -118,7 +118,7 @@ active_params_b: <float>                # for documentation; not in fits()
 
 # Weight variants (drives fits() C14)
 weights:
-  - id: autoround_int4
+  - id: autoround-int4
     format: hf_safetensors
     path: /mnt/models/huggingface/<id>-autoround-int4
     size_gb: <float>
@@ -129,7 +129,7 @@ weights:
     files: ["..."]
     size_gb: <float>
     status: production
-default_weight_variant: autoround_int4
+default_weight_variant: autoround-int4
 
 # Drafter compatibility (drives fits() C7-C9)
 compatible_drafters:
@@ -153,11 +153,12 @@ Fix by either adding the drafter YAML or removing the reference.
 
 ## Step 3 — Build the first compose
 
-Place at `models/<model-id>/<engine>/compose/<topology>/<variant>.yml`:
+Place at `models/<model-id>/<engine>/compose/<topology>/<quant-slug>/<serving>.yml`:
 
 - Engines: `vllm`, `llama-cpp` today (others when we add them)
 - Topologies: `single`, `dual`, `multi4`
-- Variant: `docker-compose.yml` for the default, named variants for alternatives
+- Quant slug: exactly matches the `weights_variant` key (`autoround-int4`, `awq`, `unsloth-q4km`, etc.)
+- Serving filename: the feature stack only (`fp8-mtp.yml`, `turbo.yml`, `dflash.yml`, etc.). Do not create `docker-compose.yml` or `default.yml`; defaults are registry pointers.
 
 ### Required env-var hooks (post-v0.7.0)
 
@@ -175,14 +176,14 @@ Fallback defaults preserve single-mode boot. The estate orchestrator overrides p
 
 ### vLLM-specific compose conventions
 
-- Match other model composes for the same engine (look at `models/qwen3.6-27b/vllm/compose/dual/` or `models/gemma-4-31b/vllm/compose/dual/` as templates)
+- Match other model composes for the same engine (look at `models/qwen3.6-27b/vllm/compose/dual/autoround-int4/` or `models/gemma-4-31b/vllm/compose/dual/autoround-int4/` as templates)
 - Genesis pin must match the rest of the stack (currently v7.72.2)
 - Set `--max-model-len`, `--max-num-seqs`, `--gpu-memory-utilization`, `--kv-cache-dtype` based on KV math projections
 - Note any required vendored overlays (Marlin pad, DFlash + KV-quant, qwen3coder tool parser, etc.)
 
 ### llama.cpp-specific compose conventions
 
-- Look at `models/qwen3.6-27b/llama-cpp/compose/single/` for the template
+- Look at `models/qwen3.6-27b/llama-cpp/compose/single/unsloth-q4km/` for the template
 - GGUF path under `/mnt/models/huggingface/<id>-gguf/`
 - `--ctx-size`, `--n-gpu-layers`, `--parallel`
 
@@ -195,7 +196,7 @@ COMPOSE_REGISTRY = {
     # ... existing entries ...
     "vllm/<model-slug>": _entry(
         model="<model-id>",                          # matches models/<id>.yml
-        weights_variant="autoround_int4",            # matches the weights[].id
+        weights_variant="autoround-int4",            # matches the weights[].id
         workload="long-ctx-single",                  # one of the 5 workload IDs
         engine="vllm-nightly-mtp",                   # matches engines/<id>.yml
         drafter="qwen-mtp-builtin",                  # or None
@@ -204,7 +205,7 @@ COMPOSE_REGISTRY = {
         max_ctx=180000,
         max_num_seqs=1,
         mem_util=0.92,
-        compose_path="models/<model-id>/vllm/compose/dual/<variant>.yml",
+        compose_path="models/<model-id>/vllm/compose/dual/autoround-int4/<serving>.yml",
         default_port=8040,                           # next-free 20-slot block
         required_engine_features=["turboquant_3bit_nc"],
     ),
@@ -398,20 +399,20 @@ num_experts: 128
 num_experts_per_tok: 8
 active_params_b: 3
 weights:
-  - id: autoround_int4
+  - id: autoround-int4
     format: hf_safetensors
     path: /mnt/models/huggingface/qwen3.6-35b-a3b-autoround-int4
     size_gb: 23                  # estimate; update after download
     status: production
-default_weight_variant: autoround_int4
+default_weight_variant: autoround-int4
 compatible_drafters:
   - qwen-mtp-builtin             # check if MoE has matching drafter
 vision_capable: false
 ```
 
-**First compose** (`models/qwen3.6-35b-a3b/vllm/compose/dual/docker-compose.yml`):
+**First compose** (`models/qwen3.6-35b-a3b/vllm/compose/dual/autoround-int4/preview.yml`):
 
-Mirror `models/qwen3.6-27b/vllm/compose/dual/docker-compose.yml` shape, swap model path + adjust `--max-model-len` based on KV_MATH projections.
+Mirror `models/qwen3.6-27b/vllm/compose/dual/autoround-int4/fp8-mtp.yml` shape, swap model path + adjust `--max-model-len` based on KV_MATH projections.
 
 **Per-card budget projection from KV_MATH**:
 
@@ -426,7 +427,7 @@ Mirror `models/qwen3.6-27b/vllm/compose/dual/docker-compose.yml` shape, swap mod
 ```python
 "vllm/qwen36-35b-a3b": _entry(
     model="qwen3.6-35b-a3b",
-    weights_variant="autoround_int4",
+    weights_variant="autoround-int4",
     workload="long-ctx-single",
     engine="vllm-nightly-mtp",
     drafter="qwen-mtp-builtin",
@@ -435,7 +436,7 @@ Mirror `models/qwen3.6-27b/vllm/compose/dual/docker-compose.yml` shape, swap mod
     max_ctx=200000,
     max_num_seqs=1,
     mem_util=0.92,
-    compose_path="models/qwen3.6-35b-a3b/vllm/compose/dual/docker-compose.yml",
+    compose_path="models/qwen3.6-35b-a3b/vllm/compose/dual/autoround-int4/preview.yml",
     default_port=8050,
     required_engine_features=[],
 ),

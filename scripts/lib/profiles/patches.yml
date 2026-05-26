@@ -342,7 +342,7 @@ patches:
       - composes:
           - vllm/dual-carnice-bf16mtp
         reason: "The Carnice v2 INT4 Recipe-D BF16-MTP weights ship a default chat template that mis-emits tool calls; the vendored carnice .jinja makes Carnice output JSON tool calls matched to `--tool-call-parser hermes`. It is behavior-critical (the #145 silent-break class) and was previously invisible to patch-attribution (no patches.yml id / delivery_mechanism / drift_guard). Unlike froggeric it is NOT wired via `--chat-template`: it is bind-mounted OVER the model dir's chat_template.jinja and vLLM auto-loads it (wired_at: volumes only). Qwopus is NOT covered here — it ships its chat_template embedded in tokenizer_config.json, not a separate .jinja."
-        evidence: "models/qwen3.6-27b/vllm/compose/dual/carnice-bf16mtp.yml volumes block + header; docs/UPSTREAM.md (carnice recipe-D)"
+        evidence: "models/qwen3.6-27b/vllm/compose/dual/carnice-bf16mtp/bf16-mtp.yml volumes block + header; docs/UPSTREAM.md (carnice recipe-D)"
     delivery:               # DEPRECATED/READ-ONLY (test-only) — see header
       dockerfile_bake: false
       entrypoint_invoke: false

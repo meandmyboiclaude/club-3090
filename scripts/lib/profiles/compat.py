@@ -730,7 +730,7 @@ def _kv_calc_weights_variant(model: ModelProfile, variant: str) -> str:
             return "bf16"
         return "int4"
     if model.family == "gemma4-swa-moe":
-        if variant == "awq_compressed_tensors":
+        if variant == "awq":
             return "awq"
         return "int4"
     if model.family == "qwen3-next-moe":

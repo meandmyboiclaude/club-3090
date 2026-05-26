@@ -102,7 +102,7 @@ KV cache is a separate concern from weights — vLLM ships several KV-quant sche
 | KV format | Implementation | Native HW? | Works on Ampere? | Notes |
 |---|---|:--:|:--:|---|
 | FP16 / BF16 | Standard cast | ✓ (FP16/BF16 TC) | ✓ | Baseline. Largest KV pool footprint. |
-| FP8 (E4M3 / E5M2) | Software cast on Ampere; HW TC on Ada+ | partial | ✓ (SW) | Half the bytes/token vs FP16. The default in `dual/docker-compose.yml`. |
+| FP8 (E4M3 / E5M2) | Software cast on Ampere; HW TC on Ada+ | partial | ✓ (SW) | Half the bytes/token vs FP16. The default in `dual/autoround-int4/fp8-mtp.yml`. |
 | INT8 PTH (per-token-head) | Custom kernel with per-(token, head) scales | ✓ (INT8 TC) | ✓ | High single-stream TPS; **doesn't scale at concurrency** (see [FAQ](FAQ.md#int8-pth-gives-me-150-tps-single-stream-but-doesnt-scale-with-concurrency--is-that-a-bug)). |
 | TurboQuant 3-bit (TQ3) | Custom Triton kernels | ✗ (Triton soft) | ✓ | ~5× the KV pool of FP16. Hybrid-attention models (Qwen3-Next) need a multi-query verify kernel for spec-decode (only Genesis P67 today). |
 | TurboQuant 4-bit (TQ4) | Custom Triton kernels | ✗ | ✓ | ~4× the KV pool of FP16. Slightly higher quality than TQ3. |
@@ -298,7 +298,7 @@ What to ship as the default for each GPU class, given the matrix above:
 | **Pascal (10x0)** | FP16 only — no INT8 TC | FP16 | none (vLLM unsupported, CC<7.5) | llama.cpp only |
 | **Volta (V100)** | FP16 — no BF16 TC, weak INT8 | FP16 | none | llama.cpp — see [@efschu's V100 bench](../BENCHMARKS.md#qwen36-27b) |
 | **Turing (T4, 20-series)** | INT8 native; GPTQ INT4 via Marlin works | FP16 / INT8 | n-gram only | not a primary target |
-| **Ampere consumer (3090/3080/3060)** ⭐ | **AutoRound INT4** | **TQ3 (Genesis) / INT8 PTH / fp8** | **MTP n=3** + Genesis P67 | `dual/turbo.yml`, `dual/tq3-mtp-genesis.yml`, `single/long-text.yml` — primary target of this stack |
+| **Ampere consumer (3090/3080/3060)** ⭐ | **AutoRound INT4** | **TQ3 (Genesis) / INT8 PTH / fp8** | **MTP n=3** + Genesis P67 | `dual/autoround-int4/turbo.yml`, `dual/autoround-int4/tq3-mtp-genesis.yml`, `single/autoround-int4/long-text.yml` — primary target of this stack |
 | **Ampere DC (A100)** | AutoRound INT4 or FP16 | TQ3 / fp8 | MTP n=3 | Same composes as 3090, more VRAM headroom |
 | **Ada (4090 / L40)** | AutoRound INT4 (preserve INT4 path) **OR** FP8 weights for full TC use | **fp8 (HW)** / TQ3 / INT8 PTH | MTP n=3 / DFlash | Same composes work; FP8 KV is now a real perf win |
 | **Hopper (H100/H200)** | FP8 weights (FBGEMM/INC) | **fp8 (HW transformer engine)** | MTP / DFlash | Not a primary target — these cards are usually already running their own optimised stacks |

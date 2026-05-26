@@ -66,19 +66,19 @@ def mk_result(slug, *, tier1=None, profile=None):
     return r
 
 
-# Curated tier-1 hit for the canonical Qwen 3.6-27B autoround_int4 variant.
+# Curated tier-1 hit for the canonical Qwen 3.6-27B autoround-int4 variant.
 # `profile` mirrors the shape P2's deriver populates for a tier-1 hit
 # (weights_variant_size_gb = the curated variant size_gb, 17.5).
 CURATED = mk_result(
     "Lorbus/Qwen3.6-27B-int4-AutoRound",
     tier1=D.Tier1Match(
         model_id="qwen3.6-27b",
-        weights_variant="autoround_int4",
+        weights_variant="autoround-int4",
         slug="Lorbus/Qwen3.6-27B-int4-AutoRound",
     ),
     profile={
         "model_id": "qwen3.6-27b",
-        "weights_variant": "autoround_int4",
+        "weights_variant": "autoround-int4",
         "weight_format": "autoround",
         "weights_variant_size_gb": 17.5,
     },
@@ -162,7 +162,7 @@ s2_a_ok = G.stratum2_profile_like(
 )
 check(
     s2_a_ok.ok and s2_a_ok.refusal is None,
-    f"stratum-2: vllm/minimal Path A (qwen3.6-27b/autoround_int4 match) ok "
+    f"stratum-2: vllm/minimal Path A (qwen3.6-27b/autoround-int4 match) ok "
     f"(got {s2_a_ok.refusal})",
 )
 
@@ -263,7 +263,7 @@ GEMMA_CURATED = mk_result(
     "fixtures/gemma-4-31b",
     tier1=D.Tier1Match(
         model_id="gemma-4-31b",
-        weights_variant="autoround_int4",
+        weights_variant="autoround-int4",
         slug="fixtures/gemma-4-31b",
     ),
 )

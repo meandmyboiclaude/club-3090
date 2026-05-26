@@ -11,7 +11,7 @@ download: false
 vram_footprint_gb: 0
 status: production
 # Phase A-prime fold-in (v0.8.0 #359). Grounded verbatim from the shipped
-# `--speculative-config` JSON in models/qwen3.6-27b/vllm/compose/dual/docker-compose.yml
+# `--speculative-config` JSON in models/qwen3.6-27b/vllm/compose/dual/autoround-int4/fp8-mtp.yml
 # ('{"method":"mtp","num_speculative_tokens":3}'). Built-in MTP head — no
 # separate drafter weights, so local_model_path is null. {N} is substituted
 # from n_default (or a compose's ${SPEC_N_MAX:-N} override).

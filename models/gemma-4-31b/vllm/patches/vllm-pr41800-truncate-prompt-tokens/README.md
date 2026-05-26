@@ -44,11 +44,11 @@ Keep `install.sh` identical to the qwen3.6-27b copy; track upstream/drop state i
 
 ## Composes that wire this overlay in (Gemma 4 31b tree)
 
-* `models/gemma-4-31b/vllm/compose/dual/int8.yml`
-* `models/gemma-4-31b/vllm/compose/dual/awq.yml`
-* `models/gemma-4-31b/vllm/compose/dual/int8-tq3.yml`
-* `models/gemma-4-31b/vllm/compose/dual/dflash.yml`
-* `models/gemma-4-31b/vllm/compose/dual/dflash-int8.yml`
+* `models/gemma-4-31b/vllm/compose/dual/autoround-int4/int8.yml`
+* `models/gemma-4-31b/vllm/compose/dual/awq/bf16-mtp.yml`
+* `models/gemma-4-31b/vllm/compose/dual/autoround-int4/int8-tq3.yml`
+* `models/gemma-4-31b/vllm/compose/dual/autoround-int4/dflash.yml`
+* `models/gemma-4-31b/vllm/compose/dual/autoround-int4/dflash-int8.yml`
 
 ## How to add this overlay to another affected compose
 

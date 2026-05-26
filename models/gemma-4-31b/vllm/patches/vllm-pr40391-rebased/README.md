@@ -87,9 +87,9 @@ Both target `gemma4_tool_parser.py` at non-overlapping regions.
 
 ## Composes that mount this
 
-Currently: `dual/int8.yml` (per-token-head INT8 KV by default
+Currently: `dual/autoround-int4/int8.yml` (per-token-head INT8 KV by default
 on Ampere; users on Ada/Blackwell can override `KV_DTYPE=fp8_per_token_head`).
 
-The bf16-KV variants (`dual/docker-compose.yml`, `single/docker-compose.yml`)
+The bf16-KV variants (`dual/autoround-int4/bf16-mtp.yml`, `single/autoround-int4/fp8-mtp.yml`)
 do NOT mount this overlay — they don't need the per-token-head KV path. Keep them
 overlay-free as the safe fallback.

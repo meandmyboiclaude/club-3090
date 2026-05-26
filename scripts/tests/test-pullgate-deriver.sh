@@ -176,8 +176,8 @@ check(res2.confidence == D.Confidence.EXACT, f"tier1: confidence exact (got {res
 check(
     res2.tier1 is not None
     and res2.tier1.model_id == "qwen3.6-27b"
-    and res2.tier1.weights_variant == "autoround_int4",
-    f"tier1: resolves to (qwen3.6-27b, autoround_int4) (got {res2.tier1})",
+    and res2.tier1.weights_variant == "autoround-int4",
+    f"tier1: resolves to (qwen3.6-27b, autoround-int4) (got {res2.tier1})",
 )
 check(len(f2.calls) == 0, "tier1: zero network calls for a curated hit")
 # Case-insensitive match.
@@ -393,8 +393,8 @@ check(
 # hf_repos_for / all_hf_repos accessors work and a known curated slug is present.
 qm = profiles.models["qwen3.6-27b"]
 check(
-    "Lorbus/Qwen3.6-27B-int4-AutoRound" in qm.hf_repos_for("autoround_int4"),
-    "schema: ModelProfile.hf_repos_for('autoround_int4') exposes Lorbus slug",
+    "Lorbus/Qwen3.6-27B-int4-AutoRound" in qm.hf_repos_for("autoround-int4"),
+    "schema: ModelProfile.hf_repos_for('autoround-int4') exposes Lorbus slug",
 )
 check(
     qm.hf_repos_for("gguf") == (),
@@ -402,7 +402,7 @@ check(
 )
 check(
     isinstance(qm.all_hf_repos(), dict)
-    and qm.all_hf_repos()["autoround_int4"],
+    and qm.all_hf_repos()["autoround-int4"],
     "schema: ModelProfile.all_hf_repos() returns per-variant map",
 )
 

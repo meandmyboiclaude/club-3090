@@ -6,11 +6,11 @@ SGLang is a strong alternative to vLLM for high-throughput multi-tenant serving 
 
 1. **EAGLE-3 is sub-MTP for Qwen3-Next, even on Blackwell where it works.** Ex0bit's own published numbers on the [PRISM-PRO-DQ model card](https://huggingface.co/Ex0bit/Qwen3.6-27B-PRISM-PRO-DQ) report native MTP = **121 TPS (1.51×)** vs EAGLE-3 chain = **111 TPS (1.39×)**. The model family has a strong built-in MTP head; routing through an external drafter is structurally slower.
 2. **CUTE_DSL capture-hang on Ampere.** SGLang v0.5.12's CUTE_DSL `get_version()` does `pkgutil.walk_packages` during cuda-graph capture, hits `cutlass.cute.experimental` which raises `NotImplementedError` on CUDA toolkit < 13.1, and deadlocks against the locked capture stream. Workaround `--disable-cuda-graph` caps decode at ~15-18 TPS. Three patch iterations (pre-import; sys.modules stub at engine init; per-process sys.modules stub at `sglang/__init__.py`) all failed — the walk re-fires during capture regardless of cache state.
-3. **vLLM-MTP-dual already beats this path on the same rig.** `vllm/dual/turbo.yml` (TP=2 + MTP + Genesis TQ3) delivers ~85 TPS on this dual-3090 setup vs ~15-18 TPS for SGLang+EAGLE3 with the cuda-graph workaround.
+3. **vLLM-MTP-dual already beats this path on the same rig.** `vllm/dual/autoround-int4/turbo.yml` (TP=2 + MTP + Genesis TQ3) delivers ~85 TPS on this dual-3090 setup vs ~15-18 TPS for SGLang+EAGLE3 with the cuda-graph workaround.
 
 The artifacts under [`models/qwen3.6-27b/sglang/`](../../models/qwen3.6-27b/sglang/) stay in the tree for archival reference; the README in that subtree has the full re-test triggers.
 
-**Verdict:** for Qwen3-Next on consumer Ampere, use vLLM MTP (`vllm/dual/turbo.yml`) or llama.cpp MTP (`llamacpp/mtp.yml`). SGLang may still be worth revisiting for OTHER model families where its RadixAttention or structured-output features are the headline — that's a per-model decision.
+**Verdict:** for Qwen3-Next on consumer Ampere, use vLLM MTP (`vllm/dual/autoround-int4/turbo.yml`) or llama.cpp MTP (`llamacpp/mtp.yml`). SGLang may still be worth revisiting for OTHER model families where its RadixAttention or structured-output features are the headline — that's a per-model decision.
 
 ---
 
@@ -76,8 +76,8 @@ Two experimental composes under `models/qwen3.6-27b/sglang/compose/`:
 
 | Compose | Topology | Status |
 |---|---|---|
-| `single/eagle3-experimental.yml` | 1× 3090 | ⚠️ Blocked on SGLang OffloaderV1 tied-weights bug. Kept as reference for re-test when SGLang's offloader handles tied DeltaNet params. |
-| `dual/eagle3-experimental.yml` | 2× 3090 (TP=2) | ✅ Boots, serves coherent output. TPS/accept-rate pending bench. |
+| `single/autoround-int4/eagle3-experimental.yml` | 1× 3090 | ⚠️ Blocked on SGLang OffloaderV1 tied-weights bug. Kept as reference for re-test when SGLang's offloader handles tied DeltaNet params. |
+| `dual/autoround-int4/eagle3-experimental.yml` | 2× 3090 (TP=2) | ✅ Boots, serves coherent output. TPS/accept-rate pending bench. |
 
 Both composes apply two patches at startup:
 
@@ -170,7 +170,7 @@ For hybrid Mamba models like Qwen3-Next, SGLang reserves a Mamba state pool size
 | SGLang upstream merges the AutoRound name-mapper fix (track [`sgl-project/sglang#19406`](https://github.com/sgl-project/sglang/issues/19406) + [`#20370`](https://github.com/sgl-project/sglang/pulls/20370)) | We can drop our `patch_sglang_autoround_fused_bf16.py` vendor. |
 | SGLang upstream merges the EAGLE-3 capture hook for `Qwen3_5ForConditionalGeneration` | We can drop the Ex0bit `patch_sglang_eagle3.py` vendor (or it ships baked into the drafter). |
 | SGLang's OffloaderV1 handles tied weights (Qwen3-Next `linear_attn.attn.dt_bias` / `linear_attn.dt_bias`) | Single-3090 EAGLE-3 becomes viable via CPU offload. |
-| SGLang adds asymmetric K/V or sub-FP8 INT KV path | Closes the KV-density gap vs vLLM TurboQuant. Would unlock context lengths comparable to our `dual/turbo.yml` (262K). |
+| SGLang adds asymmetric K/V or sub-FP8 INT KV path | Closes the KV-density gap vs vLLM TurboQuant. Would unlock context lengths comparable to our `dual/autoround-int4/turbo.yml` (262K). |
 | CUTLASS CUTE adds Ampere kernels OR SGLang routes around it on sm_86 | We can re-enable cuda-graph and recover decode TPS. |
 
 ---
