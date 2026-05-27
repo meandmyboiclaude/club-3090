@@ -1,0 +1,183 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Qwen3.6-27B (Lorbus AutoRound INT4 + BF16 mtp.fc preserved)
+#   Topology:  Single 4090 (TP=1)
+#   Drafter:   MTP n=3 (built-in)
+#   KV:        turboquant_3bit_nc
+#   Vision:    no (--language-model-only)
+#   Max ctx:   120K (mamba_block_size=16K — GDN state capped for memory-backend load)
+#   Genesis:   v7.72.2
+#   Status:    ✅ Production
+#   Best for:  IDE-agent workloads (Cline / OpenCode / Roo / Claude Code /
+#              Cursor) — TQ3 KV for max context on single 24GB card
+# ---------------------------------------------------------------------------
+# Tools-text variant — long single prompts (RAG, summarization, large doc Q&A)
+# without vision. Best for workloads that don't need image input but DO need
+# more context than the 48K default's prefill envelope.
+#
+# Drops the MoonViT vision encoder (saves ~0.86 GB VRAM) and spends that
+# budget on KV cache.
+#
+# Run with:
+#   cd <repo>/models/qwen3.6-27b/vllm/compose
+#   docker compose -f single/tools-text.yml up -d
+# ===========================================================================
+services:
+  vllm-qwen36-27b:
+    image: docker.io/vllm/vllm-openai:nightly
+    container_name: vllm-qwen36-27b-tools-text
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8020/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+    volumes:
+      - ${MODEL_DIR:-../../../../../models-cache}:/root/.cache/huggingface
+      # torch.compile + Triton kernel caches — first boot warms (~60-90 sec);
+      # subsequent boots reuse cached graphs. Pattern from Sander's PROD launch.
+      # Closes club-3090 #22.
+      - ../../cache/torch_compile:/root/.cache/vllm/torch_compile_cache
+      - ../../cache/triton:/root/.triton/cache
+      # Genesis v7.14+ modular package (replaces patch_genesis_unified.py).
+      - ../../patches/genesis/vllm/_genesis:/usr/local/lib/python3.12/dist-packages/vllm/_genesis:ro
+      - ../../patches/local/qwen3coder_tool_parser_deferred_commit.py:/patches/qwen3coder_tool_parser_deferred_commit.py:ro
+      - ../../patches/froggeric-chat-template/chat_template.jinja:/chat_template.jinja:ro
+      - ../../../../../fixes:/fixes:ro
+      - ./cache-override.yaml:/config/cache-override.yaml:ro
+    environment:
+      # - CUDA_VISIBLE_DEVICES=0
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - NCCL_CUMEM_ENABLE=0
+      - NCCL_P2P_DISABLE=1
+      - VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0
+      - VLLM_ENFORCE_EAGER=1
+      - VLLM_NO_USAGE_STATS=1
+      - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+      - VLLM_FLOAT32_MATMUL_PRECISION=high
+      - VLLM_USE_FLASHINFER_SAMPLER=1
+      - OMP_NUM_THREADS=1
+      - CUDA_DEVICE_MAX_CONNECTIONS=8
+      - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+      - VLLM_MARLIN_USE_ATOMIC_ADD=1
+      - TRITON_CACHE_DIR=/root/.triton/cache
+      # Genesis opt-ins
+      - GENESIS_ENABLE_P58_ASYNC_PLACEHOLDER_FIX=1
+      - GENESIS_ENABLE_P64_QWEN3CODER_MTP_STREAMING=1
+      - GENESIS_ENABLE_P68_AUTO_FORCE_TOOL=1
+      - GENESIS_ENABLE_P69_LONG_CTX_TOOL_REMINDER=1
+      - GENESIS_P68_P69_LONG_CTX_THRESHOLD_CHARS=50000
+      - GENESIS_ENABLE_P72_PROFILE_RUN_CAP=1
+      - GENESIS_PROFILE_RUN_CAP_M=2048
+      - GENESIS_ENABLE_P74_CHUNK_CLAMP=1
+      - GENESIS_ENABLE_P94=1
+      - GENESIS_ENABLE_PN8_MTP_DRAFT_ONLINE_QUANT=1
+      - GENESIS_ENABLE_PN17_FA2_LSE_CLAMP=1
+      - GENESIS_ENABLE_PN19_SCOPED_MAX_SPLIT=1
+      - GENESIS_ENABLE_PN59_STREAMING_GDN=1
+      - GENESIS_ENABLE_P67_TQ_MULTI_QUERY_KERNEL=1
+      - GENESIS_ENABLE_PN14_TQ_DECODE_OOB_CLAMP=1
+      - GENESIS_ENABLE_PN70_TOOL_SCHEMA_FILTER=1
+      # Performance
+      - GENESIS_ENABLE_P40=1
+      - GENESIS_ENABLE_P82=1
+      - GENESIS_ENABLE_PN50_GDN_FUSED_PROJ=0
+      # Correctness
+      - GENESIS_ENABLE_P91=1
+      - GENESIS_ENABLE_P107_MTP_TRUNCATION_DETECTOR=1
+      - GENESIS_ENABLE_P59_QWEN3_TOOL_RECOVERY=1
+      - GENESIS_ENABLE_P62_STRUCT_OUT_SPEC_TIMING=1
+      # OOM Protection
+      - GENESIS_ENABLE_PN32_GDN_CHUNKED_PREFILL=1
+      - GENESIS_ENABLE_PN12_FFN_INTERMEDIATE_POOL=1
+      - GENESIS_ENABLE_P15B_FA_VARLEN_CLAMP=1
+      - GENESIS_ENABLE_PN66=1
+      - GENESIS_ENABLE_PN67=1
+      - GENESIS_ENABLE_PN61=1
+      - GENESIS_ENABLE_PN62=1
+      - GENESIS_ENABLE_P83=1
+      - GENESIS_ENABLE_PN54_GDN_CONTIGUOUS_DEDUP=1
+      # VRAM Guardian thresholds
+      - VRAM_GUARDIAN_SOFT_PCT=87
+      - VRAM_GUARDIAN_HARD_PCT=92
+      - VRAM_GUARDIAN_POLL_MS=200
+    network_mode: host
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        set -e
+        if [ ! -f /usr/local/lib/python3.12/dist-packages/vllm/_genesis/patches/apply_all.py ]; then
+          echo "ERROR: Genesis patches missing — host volume models/qwen3.6-27b/vllm/patches/genesis/ is empty." >&2
+          echo "       Run from repo root before 'docker compose up':" >&2
+          echo "         bash scripts/setup.sh qwen3.6-27b" >&2
+          exit 1
+        fi
+        pip install -q pytest 2>/dev/null || true
+        python3 -m vllm._genesis.patches.apply_all
+        python3 /patches/qwen3coder_tool_parser_deferred_commit.py
+        python3 /fixes/patch_drafter_skip.py
+        python3 /fixes/patch_tq_buffer_pool.py
+        python3 /fixes/patch_vram_guardian.py
+        python3 /fixes/patch_gdn_oom_retry.py
+        python3 /fixes/patch_oom_resilience.py
+        exec vllm serve "$@"
+      - --
+    command:
+      - --enforce-eager
+      - --model
+      - /root/.cache/huggingface/qwen3.6-27b-autoround-int4
+      - --served-model-name
+      - qwen3.6
+      - qwen3.6-autoround
+      - qwen3.6-27b-autoround
+      - qwen3.6-hindsight
+      - qwen3.5-9b-hindsight
+      - --quantization
+      - auto_round
+      - --dtype
+      - float16
+      - --tensor-parallel-size
+      - "1"
+      - --max-model-len
+      - "${MAX_MODEL_LEN:-120000}"
+      - --gpu-memory-utilization
+      - "${GPU_MEMORY_UTILIZATION:-0.85}"
+      - --max-num-seqs
+      - "3"
+      - --max-num-batched-tokens
+      - "4128"
+      - --long-prefill-token-threshold
+      - "4128"
+      - --kv-cache-metrics
+      - --kv-cache-dtype
+      - "${KV_CACHE_DTYPE:-turboquant_3bit_nc}"
+      - --language-model-only
+      - --trust-remote-code
+      - --chat-template
+      - /chat_template.jinja
+      - --reasoning-parser
+      - qwen3
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - qwen3_coder
+      - --enable-chunked-prefill
+      - --enable-prefix-caching
+      - --speculative-config
+      - '{"method":"mtp","num_speculative_tokens":3}'
+      - --config
+      - /config/cache-override.yaml
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8020"
