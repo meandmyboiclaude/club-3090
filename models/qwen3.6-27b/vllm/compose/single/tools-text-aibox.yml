@@ -99,6 +99,8 @@ services:
       - GENESIS_ENABLE_PN62=1
       - GENESIS_ENABLE_P83=1
       - GENESIS_ENABLE_PN54_GDN_CONTIGUOUS_DEDUP=1
+      # OTEL tracing -> Phoenix (host net, gRPC OTLP :4317). Lands in "vllm" project.
+      - OTEL_RESOURCE_ATTRIBUTES=openinference.project.name=vllm,service.name=vllm-qwen36
       # VRAM Guardian thresholds
       - VRAM_GUARDIAN_SOFT_PCT=87
       - VRAM_GUARDIAN_HARD_PCT=92
@@ -160,6 +162,12 @@ services:
       - --long-prefill-token-threshold
       - "4128"
       - --kv-cache-metrics
+      # Per-request inference traces -> Phoenix (request-level spans; detailed
+      # phase breakdown left off to avoid per-request latency overhead).
+      - --otlp-traces-endpoint
+      - http://localhost:4317
+      - --collect-detailed-traces
+      - all
       - --kv-cache-dtype
       - "${KV_CACHE_DTYPE:-turboquant_3bit_nc}"
       - --language-model-only
