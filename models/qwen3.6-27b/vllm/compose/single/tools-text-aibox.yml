@@ -101,9 +101,11 @@ services:
       - GENESIS_ENABLE_PN54_GDN_CONTIGUOUS_DEDUP=1
       # OTEL tracing -> Phoenix (host net, gRPC OTLP :4317). Lands in "vllm" project.
       - OTEL_RESOURCE_ATTRIBUTES=openinference.project.name=vllm,service.name=vllm-qwen36
-      # VRAM Guardian thresholds
-      - VRAM_GUARDIAN_SOFT_PCT=93
-      - VRAM_GUARDIAN_HARD_PCT=96
+      # VRAM Guardian thresholds. At util 0.90 steady is ~90% of torch-total; SOFT 97
+      # sits well above it (no gc-thrash) and catches real prefill spikes; HARD 98
+      # leaves ~500MB board headroom. (SOFT must stay above steady — 93 thrashed at 0.90.)
+      - VRAM_GUARDIAN_SOFT_PCT=97
+      - VRAM_GUARDIAN_HARD_PCT=98
       - VRAM_GUARDIAN_POLL_MS=200
     network_mode: host
     ipc: host
@@ -152,11 +154,16 @@ services:
       - --tensor-parallel-size
       - "1"
       - --max-model-len
-      - "${MAX_MODEL_LEN:-120000}"
+      - "${MAX_MODEL_LEN:-90000}"
       - --gpu-memory-utilization
       - "${GPU_MEMORY_UTILIZATION:-0.90}"
       - --max-num-seqs
-      - "4"
+      - "5"
+      # No num-gpu-blocks-override: profiler auto-sizes KV to ~180K at util 0.90 / 5-seq.
+      # 5-seq chosen over 6 deliberately: 6 needs util 0.93 (214K KV), which leaves too
+      # little prefill headroom — 12x concurrent 10K-prompt OOM'd 9/12 at 0.93 vs 12/12
+      # clean at 0.90. At 0.90: 5 concurrent stable + 80K single prefill fits. oom_resilience
+      # makes any over-budget prefill a graceful 500, never a crash.
       - --max-num-batched-tokens
       - "4128"
       - --long-prefill-token-threshold

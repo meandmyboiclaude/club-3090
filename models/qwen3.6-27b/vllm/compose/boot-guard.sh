@@ -4,17 +4,20 @@
 # someone left a repo on the wrong branch. Safe: only auto-restores a CLEAN tree;
 # never bricks boot (always exits 0). Logs every decision to the journal.
 #
-# Validated anchors (2026-06-07, 7h soak, AL 3.68, 215 clean requests):
-#   club-3090 tree:  branch master / tag validated-nightly-9c7f7741
-#   genesis tree:    tag validated-nightly-9c7f7741 (commit fa39486)
-#   image:           vllm/vllm-openai:nightly-9c7f7741d45154ca11455caa9875beb94e2e66b7
+# Validated anchors (2026-06-13 rebase, dev491 — P62/P58/P107 re-anchored + GDN
+# cluster active + v20 chat template; util 0.90 / 5-seq / 180K KV / 90K model-len.
+# Validation: 12x concurrent 10K-prompt = 12/12, 80K single prefill OK, 20/20 tools,
+# verify-full+stress green, 38 Genesis applied / 0 failed):
+#   club-3090 tree:  branch rebase-vllm-1033ffac / tag validated-nightly-1033ffac
+#   genesis tree:    tag validated-nightly-1033ffac
+#   image:           vllm/vllm-openai:nightly-1033ffac2eccf986fdd880f4dee64ca3b22c63c9
 set -u
 CLUB=/home/user/club-3090
 G="$CLUB/models/qwen3.6-27b/vllm/patches/genesis"
 COMPOSE="$CLUB/models/qwen3.6-27b/vllm/compose/single/tools-text-aibox.yml"
-TAG=validated-nightly-9c7f7741
-PIN_IMG=nightly-9c7f7741d45154ca11455caa9875beb94e2e66b7
-PIN_VER=0.22.1rc1.dev245+g9c7f7741d
+TAG=validated-nightly-1033ffac
+PIN_IMG=nightly-1033ffac2eccf986fdd880f4dee64ca3b22c63c9
+PIN_VER=0.22.1rc1.dev491+g1033ffac2
 
 log() { echo "[vllm-boot-guard] $*"; }
 
