@@ -101,11 +101,12 @@ services:
       - GENESIS_ENABLE_PN54_GDN_CONTIGUOUS_DEDUP=1
       # OTEL tracing -> Phoenix (host net, gRPC OTLP :4317). Lands in "vllm" project.
       - OTEL_RESOURCE_ATTRIBUTES=openinference.project.name=vllm,service.name=vllm-qwen36
-      # VRAM Guardian thresholds. At util 0.90 steady is ~90% of torch-total; SOFT 97
-      # sits well above it (no gc-thrash) and catches real prefill spikes; HARD 98
-      # leaves ~500MB board headroom. (SOFT must stay above steady — 93 thrashed at 0.90.)
-      - VRAM_GUARDIAN_SOFT_PCT=97
-      - VRAM_GUARDIAN_HARD_PCT=98
+      # VRAM Guardian thresholds, fitted to util. SOFT must sit ABOVE the under-load
+      # steady (% of torch-total 24109MB) or it gc-thrashes every poll. Measured:
+      # 0.90 steady ~96.7% (SOFT 97 ok), 0.92 steady ~98.9% (SOFT 97 thrashed).
+      # At 0.91 steady ~97.8% -> SOFT 98 / HARD 99 (HARD leaves ~700MB board headroom).
+      - VRAM_GUARDIAN_SOFT_PCT=98
+      - VRAM_GUARDIAN_HARD_PCT=99
       - VRAM_GUARDIAN_POLL_MS=200
     network_mode: host
     ipc: host
@@ -166,16 +167,16 @@ services:
       - --tensor-parallel-size
       - "1"
       - --max-model-len
-      - "${MAX_MODEL_LEN:-90000}"
+      - "${MAX_MODEL_LEN:-75000}"
       - --gpu-memory-utilization
-      - "${GPU_MEMORY_UTILIZATION:-0.90}"
+      - "${GPU_MEMORY_UTILIZATION:-0.91}"
       - --max-num-seqs
       - "5"
-      # No num-gpu-blocks-override: profiler auto-sizes KV to ~180K at util 0.90 / 5-seq.
-      # 5-seq chosen over 6 deliberately: 6 needs util 0.93 (214K KV), which leaves too
-      # little prefill headroom — 12x concurrent 10K-prompt OOM'd 9/12 at 0.93 vs 12/12
-      # clean at 0.90. At 0.90: 5 concurrent stable + 80K single prefill fits. oom_resilience
-      # makes any over-budget prefill a graceful 500, never a crash.
+      # No num-gpu-blocks-override: profiler auto-sizes KV (~174K at util 0.91 / 75K model-len).
+      # 75K model-len (not 90K) shrinks each seq's KV reservation so 5x15K peaks ~87% KV (no
+      # 100% pin -> no capacity-queue throttle) AND drops the prefill VRAM spike under guardian
+      # SOFT 98 (0 gc-fires). 5-seq is the KV-limited max (6 needs util 0.93 -> thrash/OOM).
+      # oom_resilience makes any over-budget prefill a graceful 500, never a crash.
       - --max-num-batched-tokens
       - "4128"
       - --long-prefill-token-threshold
