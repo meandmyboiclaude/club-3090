@@ -24,7 +24,7 @@
 # ===========================================================================
 services:
   vllm-qwen36-27b:
-    image: docker.io/vllm/vllm-openai:nightly-9c7f7741d45154ca11455caa9875beb94e2e66b7
+    image: docker.io/vllm/vllm-openai:nightly-1033ffac2eccf986fdd880f4dee64ca3b22c63c9
     container_name: vllm-qwen36-27b-tools-text
     restart: unless-stopped
     healthcheck:
@@ -102,8 +102,8 @@ services:
       # OTEL tracing -> Phoenix (host net, gRPC OTLP :4317). Lands in "vllm" project.
       - OTEL_RESOURCE_ATTRIBUTES=openinference.project.name=vllm,service.name=vllm-qwen36
       # VRAM Guardian thresholds
-      - VRAM_GUARDIAN_SOFT_PCT=87
-      - VRAM_GUARDIAN_HARD_PCT=92
+      - VRAM_GUARDIAN_SOFT_PCT=93
+      - VRAM_GUARDIAN_HARD_PCT=96
       - VRAM_GUARDIAN_POLL_MS=200
     network_mode: host
     ipc: host
@@ -154,9 +154,9 @@ services:
       - --max-model-len
       - "${MAX_MODEL_LEN:-120000}"
       - --gpu-memory-utilization
-      - "${GPU_MEMORY_UTILIZATION:-0.85}"
+      - "${GPU_MEMORY_UTILIZATION:-0.90}"
       - --max-num-seqs
-      - "3"
+      - "4"
       - --max-num-batched-tokens
       - "4128"
       - --long-prefill-token-threshold
