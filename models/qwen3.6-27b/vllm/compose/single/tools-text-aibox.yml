@@ -109,6 +109,13 @@ services:
       - VRAM_GUARDIAN_POLL_MS=200
     network_mode: host
     ipc: host
+    # Explicit CDI device = reliable podman GPU injection. Do NOT rely solely on
+    # podman-compose translating the docker-style `deploy` block below — that
+    # translation is version-dependent and can silently boot the container
+    # GPU-blind (then capability-gated patches mis-apply and vLLM serves on CPU).
+    # CDI spec lives at /etc/cdi/nvidia.yaml (regen: nvidia-ctk cdi generate).
+    devices:
+      - nvidia.com/gpu=all
     deploy:
       resources:
         reservations:
@@ -121,6 +128,11 @@ services:
       - -c
       - |
         set -e
+        # [gpu-guard] Fail LOUD if the GPU isn't visible BEFORE applying any patches.
+        # Capability-gated Genesis patches (GDN backend select, TQ kernels) must see the
+        # real device — a GPU-blind boot would mis-gate them and serve on CPU. Never silent.
+        python3 -c "import torch; assert torch.cuda.is_available(), 'no CUDA device visible'; print('[gpu-guard] OK', torch.cuda.get_device_name(0), 'cap', torch.cuda.get_device_capability(0), 'count', torch.cuda.device_count())" \
+          || { echo '[gpu-guard] FATAL: GPU not visible in container — refusing to apply patches or serve (would run blind/CPU). Ensure CDI device nvidia.com/gpu=all is injected (/etc/cdi/nvidia.yaml).' >&2; exit 1; }
         if [ ! -f /usr/local/lib/python3.12/dist-packages/vllm/_genesis/patches/apply_all.py ]; then
           echo "ERROR: Genesis patches missing — host volume models/qwen3.6-27b/vllm/patches/genesis/ is empty." >&2
           echo "       Run from repo root before 'docker compose up':" >&2
