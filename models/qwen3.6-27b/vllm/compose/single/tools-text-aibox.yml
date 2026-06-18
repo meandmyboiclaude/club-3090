@@ -24,7 +24,7 @@
 # ===========================================================================
 services:
   vllm-qwen36-27b:
-    image: docker.io/vllm/vllm-openai:nightly-1033ffac2eccf986fdd880f4dee64ca3b22c63c9
+    image: docker.io/vllm/vllm-openai:nightly-b4c80ec0fd19c13a53d89623bb5957cd5cd631bb
     container_name: vllm-qwen36-27b-tools-text
     restart: unless-stopped
     healthcheck:
@@ -148,6 +148,11 @@ services:
         python3 /fixes/patch_vram_guardian.py
         python3 /fixes/patch_gdn_oom_retry.py
         python3 /fixes/patch_oom_resilience.py
+        python3 /fixes/patch_pn71_reasoning_alias.py
+        python3 /fixes/patch_pn72_streaming_toolcall_content_recover.py
+        python3 /fixes/patch_pn73_vendor_legacy_reasoning_parser.py
+        python3 /fixes/patch_pn73t_vendor_legacy_tool_parser.py
+        python3 /fixes/patch_pn74_fix_p107_serving_attr.py
         exec vllm serve "$@"
       - --
     command:
