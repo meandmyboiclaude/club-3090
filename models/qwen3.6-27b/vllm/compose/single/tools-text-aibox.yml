@@ -1,30 +1,32 @@
 # ===========================================================================
 # Profile (at-a-glance):
-#   Model:     Qwen3.6-27B (Lorbus AutoRound INT4 + BF16 mtp.fc preserved)
+#   Model:     Qwopus3.6-27B-v2-GPTQ-Pro-MTP-BF16 (XReyRobert, GPTQ-4bit Marlin
+#              + dedicated BF16 MTP head — concise-reasoning fine-tune of Qwen3.6)
 #   Topology:  Single 4090 (TP=1)
-#   Drafter:   MTP n=3 (built-in)
+#   Drafter:   MTP n=3 (model-mtp-bf16.safetensors)
 #   KV:        turboquant_3bit_nc
 #   Vision:    no (--language-model-only)
-#   Max ctx:   120K (mamba_block_size=16K — GDN state capped for memory-backend load)
+#   Max ctx:   75K model-len (TQ3 KV)
+#   Image:     vllm nightly-b53b1c7 (0.23.1rc1.dev178)
 #   Genesis:   v7.72.2
-#   Status:    ✅ Production
-#   Best for:  IDE-agent workloads (Cline / OpenCode / Roo / Claude Code /
-#              Cursor) — TQ3 KV for max context on single 24GB card
+#   Status:    adoption candidate (validate before promoting to aibox.yml)
+#   Best for:  IDE-agent workloads — leaner thinking than Lorbus base
 # ---------------------------------------------------------------------------
-# Tools-text variant — long single prompts (RAG, summarization, large doc Q&A)
-# without vision. Best for workloads that don't need image input but DO need
-# more context than the 48K default's prefill envelope.
-#
-# Drops the MoonViT vision encoder (saves ~0.86 GB VRAM) and spends that
-# budget on KV cache.
+# Qwopus variant of tools-text. Deltas vs tools-text-aibox.yml (Lorbus):
+#   image  nightly-b4c80ec0 -> nightly-b53b1c7
+#   model  /root/.cache/huggingface/qwen3.6-27b-autoround-int4 -> XReyRobert repo-id
+#   quant  auto_round -> gptq_marlin (+ --dtype float16 --disable-custom-all-reduce)
+#   mount  models-cache -> /home/user/.cache/huggingface (where the Qwopus snapshot lives)
+# Everything else (TQ3 KV, MTP n=3, froggeric template, util 0.91, 5 seqs,
+# Genesis + /fixes PN71-74 wiring, served-model aliases) is unchanged.
 #
 # Run with:
 #   cd <repo>/models/qwen3.6-27b/vllm/compose
-#   docker compose -f single/tools-text.yml up -d
+#   podman-compose -f single/tools-text-qwopus.yml up -d
 # ===========================================================================
 services:
   vllm-qwen36-27b:
-    image: docker.io/vllm/vllm-openai:nightly-b4c80ec0fd19c13a53d89623bb5957cd5cd631bb
+    image: docker.io/vllm/vllm-openai:nightly-b53b1c7ffe7aebdafd0876350f30e51d1226c92a
     container_name: vllm-qwen36-27b-tools-text
     restart: unless-stopped
     healthcheck:
@@ -34,7 +36,8 @@ services:
       retries: 3
       start_period: 120s
     volumes:
-      - ${MODEL_DIR:-../../../../../models-cache}:/root/.cache/huggingface
+      # Qwopus snapshot lives in the user HF hub cache (not models-cache).
+      - /home/user/.cache/huggingface:/root/.cache/huggingface
       # torch.compile + Triton kernel caches — first boot warms (~60-90 sec);
       # subsequent boots reuse cached graphs. Pattern from Sander's PROD launch.
       # Closes club-3090 #22.
@@ -158,7 +161,7 @@ services:
     command:
       - --enforce-eager
       - --model
-      - /root/.cache/huggingface/qwen3.6-27b-autoround-int4
+      - XReyRobert/Qwopus3.6-27B-v2-GPTQ-Pro-MTP-BF16
       - --served-model-name
       - qwen3.6
       - qwen3.6-autoround
@@ -166,9 +169,10 @@ services:
       - qwen3.6-hindsight
       - qwen3.5-9b-hindsight
       - --quantization
-      - auto_round
+      - gptq_marlin
       - --dtype
       - float16
+      - --disable-custom-all-reduce
       - --tensor-parallel-size
       - "1"
       - --max-model-len

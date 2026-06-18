@@ -1,23 +1,25 @@
 #!/bin/bash
 # boot-guard.sh — wired as ExecStartPre on vllm-qwen36.service.
-# Guarantees the DEFAULT boot is the validated nightly-9c7f7741 rebase, even if
+# Guarantees the DEFAULT boot is the validated Qwopus / nightly-b53b1c7 build, even if
 # someone left a repo on the wrong branch. Safe: only auto-restores a CLEAN tree;
 # never bricks boot (always exits 0). Logs every decision to the journal.
 #
-# Validated anchors (2026-06-13 rebase, dev491 — P62/P58/P107 re-anchored + GDN
-# cluster active + v20 chat template; util 0.90 / 5-seq / 180K KV / 90K model-len.
-# Validation: 12x concurrent 10K-prompt = 12/12, 80K single prefill OK, 20/20 tools,
-# verify-full+stress green, 38 Genesis applied / 0 failed):
-#   club-3090 tree:  branch rebase-vllm-1033ffac / tag validated-nightly-1033ffac
-#   genesis tree:    tag validated-nightly-1033ffac
-#   image:           vllm/vllm-openai:nightly-1033ffac2eccf986fdd880f4dee64ca3b22c63c9
+# Validated anchors (2026-06-18 — Qwopus3.6-27B-v2-GPTQ-Pro-MTP-BF16 adoption on
+# vLLM nightly-b53b1c7 / 0.23.1rc1.dev178; gptq_marlin + TQ3 KV + MTP n=3 +
+# froggeric template; util 0.91 / 5-seq / 75K model-len; all PN71-74 fixes wired.
+# Validation: Genesis 36 applied / 0 failed / 13 partial-warn (benign — Rust-migrated
+# parser files + GDN/TQ path moves); health 200, reasoning correct, streaming
+# <tool_call> preserved, MTP accepts):
+#   club-3090 tree:  branch rebase-vllm-1033ffac / tag validated-qwopus-b53b1c7
+#   genesis tree:    tag validated-qwopus-b53b1c7
+#   image:           vllm/vllm-openai:nightly-b53b1c7ffe7aebdafd0876350f30e51d1226c92a
 set -u
 CLUB=/home/user/club-3090
 G="$CLUB/models/qwen3.6-27b/vllm/patches/genesis"
 COMPOSE="$CLUB/models/qwen3.6-27b/vllm/compose/single/tools-text-aibox.yml"
-TAG=validated-nightly-1033ffac
-PIN_IMG=nightly-1033ffac2eccf986fdd880f4dee64ca3b22c63c9
-PIN_VER=0.22.1rc1.dev491+g1033ffac2
+TAG=validated-qwopus-b53b1c7
+PIN_IMG=nightly-b53b1c7ffe7aebdafd0876350f30e51d1226c92a
+PIN_VER=0.23.1rc1.dev178+gb53b1c7ff
 
 log() { echo "[vllm-boot-guard] $*"; }
 
