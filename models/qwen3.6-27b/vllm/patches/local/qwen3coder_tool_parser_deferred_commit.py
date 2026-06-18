@@ -110,8 +110,13 @@ NEW = f"""            # {SENTINEL_V2}: defer commit until <function= header foll
 
 def main() -> int:
     if not TARGET.exists():
-        print(f"{LOG_PREFIX} ERROR: {TARGET} not found", file=sys.stderr)
-        return 1
+        print(
+            f"{LOG_PREFIX} SKIP: {TARGET} not present — qwen3coder tool parser moved "
+            f"to the Rust engine on this vLLM build; deferred-commit guard is obsolete "
+            f"here (the Rust parser handles the SSE-silence case). No-op.",
+            file=sys.stderr,
+        )
+        return 0
     src = TARGET.read_text()
     if SENTINEL_V2 in src:
         print(f"{LOG_PREFIX} already applied (V2 sentinel present), skipping")
