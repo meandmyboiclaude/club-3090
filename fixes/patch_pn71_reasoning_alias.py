@@ -98,9 +98,15 @@ B_NEW = (
     "        _pn71_ttb = self.thinking_token_budget\n"
     "        if isinstance(_pn71_ttb, int) and _pn71_ttb > 0:\n"
     "            import os as _pn71_os\n"
-    "            _pn71_cap = _pn71_ttb + int(_pn71_os.environ.get(\"PN71_ANSWER_GRACE\", \"1024\"))\n"
+    "            _pn71_grace = int(_pn71_os.environ.get(\"PN71_ANSWER_GRACE\", \"1024\"))\n"
+    "            _pn71_cap = _pn71_ttb + _pn71_grace\n"
     "            if max_tokens is None or max_tokens > _pn71_cap:\n"
     "                max_tokens = _pn71_cap\n"
+    "            # Qwopus continues in *content* after the forced </think>; the pre-</think>\n"
+    "            # thinking is stripped. If the budget >= max_tokens the request is cut\n"
+    "            # mid-think and content is EMPTY, so clamp the budget to leave answer room.\n"
+    "            if max_tokens is not None and _pn71_ttb >= max_tokens:\n"
+    "                self.thinking_token_budget = max(1, max_tokens - _pn71_grace)\n"
     "        # Default parameters\n"
 )
 
