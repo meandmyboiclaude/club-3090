@@ -1,25 +1,28 @@
 """PN71 reasoning-alias — accept `reasoning: off|low|medium|high|xhigh|max` (and a raw int,
-and the OpenAI Responses-API `{"effort": ...}` object) on every /v1/chat/completions request,
-mapping it onto vLLM's thinking_token_budget (length cap) + reasoning_effort->enable_thinking (off).
+and the OpenAI Responses-API `{"effort": ...}` object) on every /v1/chat/completions request.
 
-Why: on this stack the engine already ENFORCES thinking_token_budget with MTP on, but there is no
-ergonomic per-request `reasoning:` knob. This adds one, server-side, for ALL callers (Go/curl/MCP/…).
+Behaviour (v2 — leak-proof):
+- OFF (off/none/0)  -> thinking disabled (reasoning_effort -> "none" -> enable_thinking false).
+- a tier/int N      -> bound TOTAL generation to N + PN71_ANSWER_GRACE (default 512).
+- max / -1          -> uncapped.
+
+WHY NOT thinking_token_budget: Qwopus does NOT stop on </think> (proven by instrumenting
+vllm/v1/sample/thinking_budget_state.py — the budget force-injects </think> at N, the model
+ignores it and keeps generating reasoning, which — being AFTER the forced </think> — gets
+routed to `content` = a thinking LEAK into the chat). So we deliberately DON'T force </think>.
+The model self-delimits one clean <think>...</think> (extracted to the `reasoning` field;
+content stays the answer only) and we cap the TOTAL via max_tokens so reasoning can never
+leak into content. Thinking still happens at full quality; it's just on its own path and
+bounded. (vLLM 0.23 renamed the response field reasoning_content -> `reasoning`.)
 
 Two surgical edits to ChatCompletionRequest in
   vllm/entrypoints/openai/chat_completion/protocol.py
-- (A) build_chat_params: normalize our custom `reasoning` field's OFF intent (off/none/0) onto the
-      native reasoning_effort -> enable_thinking path. `reasoning_effort:"none"` already works natively
-      on this base; this just lets the `reasoning` alias reach it too.
-- (B) to_sampling_params: map `reasoning`/`reasoning_effort` budget tiers (or a raw int) onto the
-      existing thinking_token_budget the method already passes to SamplingParams. Explicit
-      thinking_token_budget always wins; OFF/none/0 are handled in (A), not here; unknown = no-op.
+- (A) build_chat_params: normalize the OFF intent (off/none/0) onto reasoning_effort="none".
+- (B) to_sampling_params: map reasoning/reasoning_effort tiers (or a raw int) onto a
+      max_tokens (total) bound — NO thinking_token_budget forcing.
 
-Tiers: off/none/0 -> thinking OFF (enable_thinking:false) · low=512 · medium=2048 · high=4096 ·
-       xhigh=8192 · max=-1 (uncapped). Empirically: budgets <~256 are a guillotine danger zone; medium
-       (2048) is the reliable bounded tier; off is best for trivial/picker calls.
-
-Style: a standalone commit-patch like the other /fixes (run from the compose entrypoint after apply_all).
-Idempotent (bails if MARKER present); fail-loud if an anchor is missing (re-anchor needed after a vLLM bump).
+Style: a standalone commit-patch like the other /fixes (run from the compose entrypoint after
+apply_all). Idempotent (bails if MARKER present); fail-loud if an anchor is missing.
 """
 import logging
 from pathlib import Path
@@ -29,12 +32,12 @@ log.setLevel(logging.INFO)
 if not log.handlers:
     log.addHandler(logging.StreamHandler())
 
-MARKER = "# PATCH: pn71_reasoning_alias_v1"
+MARKER = "# PATCH: pn71_reasoning_alias_v2"
 TARGET = Path(
     "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/openai/chat_completion/protocol.py"
 )
 
-# (A) OFF normalize — verbatim anchor at the top of build_chat_params (vllm b4c80ec0).
+# (A) OFF normalize — verbatim anchor at the top of build_chat_params.
 A_OLD = (
     "    ) -> ChatParams:\n"
     "        extra_kwargs: dict[str, Any] = dict(\n"
@@ -54,59 +57,46 @@ A_NEW = (
     "        extra_kwargs: dict[str, Any] = dict(\n"
 )
 
-# (B) BUDGET map — verbatim anchor at the top of to_sampling_params (vllm b4c80ec0).
+# (B) TOTAL-bound map — verbatim anchor at the top of to_sampling_params.
 B_OLD = (
     "    ) -> SamplingParams:\n"
     "        # Default parameters\n"
 )
 B_NEW = (
     "    ) -> SamplingParams:\n"
-    "        " + MARKER + " (B) — map reasoning budget tiers/int -> thinking_token_budget.\n"
-    "        # OFF/none/0 handled in build_chat_params; explicit thinking_token_budget wins.\n"
-    "        if self.thinking_token_budget is None:\n"
-    "            _pn71_tiers = {\"low\": 1536, \"medium\": 2048, \"high\": 4096, \"xhigh\": 8192, \"max\": -1}\n"
-    "\n"
-    "            def _pn71_budget(v):\n"
-    "                if isinstance(v, bool):\n"
-    "                    return None\n"
-    "                if isinstance(v, int):\n"
-    "                    return v if v != 0 else None\n"
-    "                if isinstance(v, str):\n"
-    "                    s = v.strip().lower()\n"
-    "                    if s in _pn71_tiers:\n"
-    "                        return _pn71_tiers[s]\n"
-    "                    if s.lstrip(\"-\").isdigit():\n"
-    "                        n = int(s)\n"
-    "                        return n if n != 0 else None\n"
-    "                    return None\n"
-    "                if isinstance(v, dict):\n"
-    "                    return _pn71_budget(v.get(\"effort\"))\n"
-    "                return None\n"
-    "\n"
-    "            _pn71_b = _pn71_budget(getattr(self, \"reasoning\", None))\n"
-    "            if _pn71_b is None:\n"
-    "                _pn71_b = _pn71_budget(self.reasoning_effort)\n"
-    "            if _pn71_b is not None:\n"
-    "                self.thinking_token_budget = _pn71_b\n"
-    "        " + MARKER + " (C) — Qwopus emits but does NOT stop on </think>\n"
-    "        # (proven via thinking_budget_state instrumentation: the budget force-injects\n"
-    "        # </think> at N, the model ignores it and keeps generating reasoning as content\n"
-    "        # to max_tokens). A </think>-based budget therefore can't bound this model, so\n"
-    "        # bound total generation to budget + answer-grace -> reasoning:N reliably limits\n"
-    "        # output. off and -1(max) set no positive budget here; explicit smaller\n"
+    "        " + MARKER + " (B) — reasoning/reasoning_effort -> TOTAL output bound.\n"
+    "        # NO </think> forcing (Qwopus ignores </think> and would leak continued\n"
+    "        # reasoning into content). Cap max_tokens so thinking (in its own <think>\n"
+    "        # ...</think> -> `reasoning` field) can never spill into the chat. OFF is\n"
+    "        # handled in build_chat_params; max/-1 -> uncapped; explicit smaller\n"
     "        # max_tokens is left alone.\n"
-    "        _pn71_ttb = self.thinking_token_budget\n"
-    "        if isinstance(_pn71_ttb, int) and _pn71_ttb > 0:\n"
+    "        _pn71_tiers = {\"low\": 1536, \"medium\": 2048, \"high\": 4096, \"xhigh\": 8192, \"max\": -1}\n"
+    "\n"
+    "        def _pn71_budget(v):\n"
+    "            if isinstance(v, bool):\n"
+    "                return None\n"
+    "            if isinstance(v, int):\n"
+    "                return v if v != 0 else None\n"
+    "            if isinstance(v, str):\n"
+    "                s = v.strip().lower()\n"
+    "                if s in _pn71_tiers:\n"
+    "                    return _pn71_tiers[s]\n"
+    "                if s.lstrip(\"-\").isdigit():\n"
+    "                    n = int(s)\n"
+    "                    return n if n != 0 else None\n"
+    "                return None\n"
+    "            if isinstance(v, dict):\n"
+    "                return _pn71_budget(v.get(\"effort\"))\n"
+    "            return None\n"
+    "\n"
+    "        _pn71_b = _pn71_budget(getattr(self, \"reasoning\", None))\n"
+    "        if _pn71_b is None:\n"
+    "            _pn71_b = _pn71_budget(self.reasoning_effort)\n"
+    "        if isinstance(_pn71_b, int) and _pn71_b > 0:\n"
     "            import os as _pn71_os\n"
-    "            _pn71_grace = int(_pn71_os.environ.get(\"PN71_ANSWER_GRACE\", \"1024\"))\n"
-    "            _pn71_cap = _pn71_ttb + _pn71_grace\n"
+    "            _pn71_cap = _pn71_b + int(_pn71_os.environ.get(\"PN71_ANSWER_GRACE\", \"512\"))\n"
     "            if max_tokens is None or max_tokens > _pn71_cap:\n"
     "                max_tokens = _pn71_cap\n"
-    "            # Qwopus continues in *content* after the forced </think>; the pre-</think>\n"
-    "            # thinking is stripped. If the budget >= max_tokens the request is cut\n"
-    "            # mid-think and content is EMPTY, so clamp the budget to leave answer room.\n"
-    "            if max_tokens is not None and _pn71_ttb >= max_tokens:\n"
-    "                self.thinking_token_budget = max(1, max_tokens - _pn71_grace)\n"
     "        # Default parameters\n"
 )
 
@@ -117,7 +107,7 @@ def apply():
         return
     text = TARGET.read_text()
     if MARKER in text:
-        log.info("[pn71] already applied (v1)")
+        log.info("[pn71] already applied (v2)")
         return
 
     ok = True
@@ -129,7 +119,7 @@ def apply():
         log.warning("[pn71] (A) anchor NOT found in build_chat_params — re-anchor needed")
     if B_OLD in text:
         text = text.replace(B_OLD, B_NEW, 1)
-        log.info("[pn71] (B) to_sampling_params budget-map wired")
+        log.info("[pn71] (B) to_sampling_params total-bound wired (no </think> forcing)")
     else:
         ok = False
         log.warning("[pn71] (B) anchor NOT found in to_sampling_params — re-anchor needed")
@@ -138,7 +128,7 @@ def apply():
         log.warning("[pn71] aborting write — at least one anchor missed (no partial patch)")
         return
     TARGET.write_text(text)
-    log.info("[pn71] v1 applied")
+    log.info("[pn71] v2 applied (leak-proof total-bound)")
 
 
 apply()
