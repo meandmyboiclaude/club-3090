@@ -26,7 +26,7 @@
 # ===========================================================================
 services:
   vllm-qwen36-27b:
-    image: docker.io/vllm/vllm-openai:nightly-b53b1c7ffe7aebdafd0876350f30e51d1226c92a
+    image: docker.io/vllm/vllm-openai:nightly-3f5a1e1733200760169ff31ebe60a271072b199e
     container_name: vllm-qwen36-27b-tools-text
     restart: unless-stopped
     healthcheck:

@@ -4,22 +4,25 @@
 # someone left a repo on the wrong branch. Safe: only auto-restores a CLEAN tree;
 # never bricks boot (always exits 0). Logs every decision to the journal.
 #
-# Validated anchors (2026-06-18 — Qwopus3.6-27B-v2-GPTQ-Pro-MTP-BF16 adoption on
-# vLLM nightly-b53b1c7 / 0.23.1rc1.dev178; gptq_marlin + TQ3 KV + MTP n=3 +
-# froggeric template; util 0.91 / 5-seq / 75K model-len; all PN71-74 fixes wired.
-# Validation: Genesis 36 applied / 0 failed / 13 partial-warn (benign — Rust-migrated
-# parser files + GDN/TQ path moves); health 200, reasoning correct, streaming
-# <tool_call> preserved, MTP accepts):
-#   club-3090 tree:  branch rebase-vllm-1033ffac / tag validated-qwopus-b53b1c7
-#   genesis tree:    tag validated-qwopus-b53b1c7
-#   image:           vllm/vllm-openai:nightly-b53b1c7ffe7aebdafd0876350f30e51d1226c92a
+# Validated anchors (2026-06-25 — Qwopus3.6-27B-v2-GPTQ-Pro-MTP-BF16 on
+# vLLM nightly-3f5a1e17 / 0.23.1rc1.dev424 (pin bump from b53b1c7, +246 commits);
+# gptq_marlin + TQ3 KV + MTP n=3 + froggeric template; util 0.91 / 5-seq / 75K.
+# Validation: Genesis 35 applied / 0 failed / 14 partial-warn (ALL benign — identical
+# drift profile to b53b1c7, proven 0 status-flips old↔new; Rust-migrated parser files
+# + GDN/TQ path moves); all 10 /fixes + PN71-74 apply (P62 + P107+PN74 active);
+# 6/6 functional PASS (tool-call, streaming <tool_call> preserved, reasoning populated,
+# multi-turn+tools x8 = 0x HTTP-500, reasoning=off disables thinking); TPS parity
+# ~59-65 (high +5%); KV 152K tok / 2.03x conc; health 200.
+#   club-3090 tree:  branch rebase-vllm-1033ffac / tag validated-qwopus-3f5a1e17
+#   genesis tree:    tag validated-qwopus-3f5a1e17
+#   image:           vllm/vllm-openai:nightly-3f5a1e1733200760169ff31ebe60a271072b199e
 set -u
 CLUB=/home/user/club-3090
 G="$CLUB/models/qwen3.6-27b/vllm/patches/genesis"
 COMPOSE="$CLUB/models/qwen3.6-27b/vllm/compose/single/tools-text-aibox.yml"
-TAG=validated-qwopus-b53b1c7
-PIN_IMG=nightly-b53b1c7ffe7aebdafd0876350f30e51d1226c92a
-PIN_VER=0.23.1rc1.dev178+gb53b1c7ff
+TAG=validated-qwopus-3f5a1e17
+PIN_IMG=nightly-3f5a1e1733200760169ff31ebe60a271072b199e
+PIN_VER=0.23.1rc1.dev424+g3f5a1e173
 
 log() { echo "[vllm-boot-guard] $*"; }
 
