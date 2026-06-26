@@ -17,9 +17,11 @@ set -u
 CLUB=/home/user/club-3090
 G="$CLUB/models/qwen3.6-27b/vllm/patches/genesis"
 COMPOSE="$CLUB/models/qwen3.6-27b/vllm/compose/single/tools-text-aibox.yml"
-TAG=validated-qwopus-b53b1c7
-PIN_IMG=nightly-b53b1c7ffe7aebdafd0876350f30e51d1226c92a
-PIN_VER=0.23.1rc1.dev178+gb53b1c7ff
+# [2026-06-26 dev424 promote] crash fix = tq_buffer_pool DISABLED + PN75; util 0.91.
+# Rollback: tag validated-qwopus-b53b1c7 (commit 2dc5938) + image vllm-rollback:b53b1c7-20260625.
+TAG=validated-qwopus-3f5a1e17
+PIN_IMG=nightly-3f5a1e1733200760169ff31ebe60a271072b199e
+PIN_VER=0.23.1rc1.dev424+g3f5a1e173
 
 log() { echo "[vllm-boot-guard] $*"; }
 
