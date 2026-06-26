@@ -157,12 +157,17 @@ services:
         python3 /fixes/patch_oom_resilience.py
         python3 /fixes/patch_pn71_reasoning_alias.py
         python3 /fixes/patch_pn72_streaming_toolcall_content_recover.py
-        # [dev424 Rust-parser adoption TRIAL — 2026-06-26: FAILED, REVERTED] Dropping these to use
-        # upstream's Rust/native parser STILL regresses streaming <tool_call> content (test D: 10 chars,
-        # truncated) on dev424 despite #46091/#46159/#46314/#46351. The vendored legacy Python parsers
-        # remain REQUIRED. Do NOT disable without re-passing functional test D.
-        python3 /fixes/patch_pn73_vendor_legacy_reasoning_parser.py
-        python3 /fixes/patch_pn73t_vendor_legacy_tool_parser.py
+        # [PN76 — 2026-06-26] Engine-level deferred tool-call commit: holds the <tool_call>
+        # open until <function= confirms it is real (the legacy P61c deferred-commit, ported
+        # INTO upstream's streaming parser engine). With PN72 this fixes the streaming
+        # <tool_call> content-drop AT THE ENGINE, so the vendored legacy parsers below are no
+        # longer needed -> we run upstream's parser code. The earlier Rust-adoption trial
+        # FAILED test D only because it lacked this deferral. Unit-validated byte-identical on
+        # real tool calls; gated live on functional test D + a streaming real tool-call.
+        python3 /fixes/patch_pn76_engine_deferred_toolcall_commit.py
+        # [SUPERSEDED by PN76 — kept commented for instant rollback if test D regresses]
+        # python3 /fixes/patch_pn73_vendor_legacy_reasoning_parser.py
+        # python3 /fixes/patch_pn73t_vendor_legacy_tool_parser.py
         python3 /fixes/patch_pn74_fix_p107_serving_attr.py
         python3 /fixes/patch_pn75_embedding_neg_index_guard.py
         exec vllm serve "$@"
