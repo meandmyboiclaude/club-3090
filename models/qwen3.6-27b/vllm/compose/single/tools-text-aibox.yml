@@ -26,7 +26,7 @@
 # ===========================================================================
 services:
   vllm-qwen36-27b:
-    image: docker.io/vllm/vllm-openai:nightly-3f5a1e1733200760169ff31ebe60a271072b199e
+    image: docker.io/vllm/vllm-openai:nightly-b53b1c7ffe7aebdafd0876350f30e51d1226c92a
     container_name: vllm-qwen36-27b-tools-text
     restart: unless-stopped
     healthcheck:
@@ -147,7 +147,11 @@ services:
         python3 -m vllm._genesis.patches.apply_all
         python3 /patches/qwen3coder_tool_parser_deferred_commit.py
         python3 /fixes/patch_drafter_skip.py
-        python3 /fixes/patch_tq_buffer_pool.py
+        # [BUG-028] DISABLED: tq_buffer_pool reuses module-level GPU scratch buffers across
+        # async decode steps -> race under MTP spec-decode + big prefill -> device-side assert
+        # in _flash_attn_varlen. Redundant with PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+        # (the actual VRAM-frag fix). Re-enable only with a stream-aware/synced pool.
+        # python3 /fixes/patch_tq_buffer_pool.py
         python3 /fixes/patch_vram_guardian.py
         python3 /fixes/patch_gdn_oom_retry.py
         python3 /fixes/patch_oom_resilience.py
@@ -156,6 +160,7 @@ services:
         python3 /fixes/patch_pn73_vendor_legacy_reasoning_parser.py
         python3 /fixes/patch_pn73t_vendor_legacy_tool_parser.py
         python3 /fixes/patch_pn74_fix_p107_serving_attr.py
+        python3 /fixes/patch_pn75_embedding_neg_index_guard.py
         exec vllm serve "$@"
       - --
     command:
