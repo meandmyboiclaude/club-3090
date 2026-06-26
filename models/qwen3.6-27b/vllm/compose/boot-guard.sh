@@ -18,6 +18,15 @@ CLUB=/home/user/club-3090
 G="$CLUB/models/qwen3.6-27b/vllm/patches/genesis"
 COMPOSE="$CLUB/models/qwen3.6-27b/vllm/compose/single/tools-text-aibox.yml"
 # [2026-06-26 dev424 promote] crash fix = tq_buffer_pool DISABLED + PN75; util 0.91.
+# [2026-06-26 CUDAGRAPHS] PIECEWISE cudagraphs ON (dropped --enforce-eager) -> ~+50% decode
+#   TPS. Made stable on TQ3+MTP+GDN-hybrid by PN79 (fixed-size TQ decode scratch, backport of
+#   vllm#46067 — the prior config crashed with a device-side assert at ~round 13 of the killer
+#   stress because the growable WorkspaceManager scratch baked into captured decode graphs was
+#   freed+realloc'd under load) + P66 (capture-size ÷ filter) + P78 (.tolist() guard). util
+#   0.91->0.90 for cudagraph capture headroom (KV 152K->134K; pool only 0.09 GiB). Validated:
+#   PN79 20/20 killer-stress rounds clean (RestartCount 0), functional 6/6, +50% decode.
+#   Rollback (cudagraph only): re-add --enforce-eager + util 0.91 + drop the cudagraph env/args
+#   in the compose (PN79 is harmless under eager), restart.
 # [2026-06-26 PN76] retired PN73/PN73T (vendored legacy parsers) — now run upstream's
 #   streaming parser engine + PN76 engine-level deferred tool-call commit + PN72.
 #   Validated live: validate_bump.py 6/6 (test D 537 chars) + streaming tool-call gate 5/5.

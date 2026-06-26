@@ -55,8 +55,8 @@ services:
       - VLLM_WORKER_MULTIPROC_METHOD=spawn
       - NCCL_CUMEM_ENABLE=0
       - NCCL_P2P_DISABLE=1
-      - VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0
-      - VLLM_ENFORCE_EAGER=1
+      - VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1
+      - VLLM_ENFORCE_EAGER=0
       - VLLM_NO_USAGE_STATS=1
       - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
       - VLLM_FLOAT32_MATMUL_PRECISION=high
@@ -81,6 +81,9 @@ services:
       - GENESIS_ENABLE_PN19_SCOPED_MAX_SPLIT=1
       - GENESIS_ENABLE_PN59_STREAMING_GDN=1
       - GENESIS_ENABLE_P67_TQ_MULTI_QUERY_KERNEL=1
+      # [cudagraph 2026-06-26] capture-safety for cudagraphs + MTP + TQ3 (+ PN79 fix in entrypoint):
+      - GENESIS_ENABLE_P66_CUDAGRAPH_SIZE_FILTER=1
+      - GENESIS_ENABLE_P78_TOLIST_CAPTURE_GUARD=1
       - GENESIS_ENABLE_PN14_TQ_DECODE_OOB_CLAMP=1
       - GENESIS_ENABLE_PN70_TOOL_SCHEMA_FILTER=1
       # Performance
@@ -170,10 +173,18 @@ services:
         # python3 /fixes/patch_pn73t_vendor_legacy_tool_parser.py
         python3 /fixes/patch_pn74_fix_p107_serving_attr.py
         python3 /fixes/patch_pn75_embedding_neg_index_guard.py
+        # [cudagraph fix 2026-06-26] PN79: cudagraph-safe fixed-size TQ decode scratch
+        # (backport vllm#46067) — fixes the device-side-assert under load when uniform-decode
+        # cudagraphs bake in a WorkspaceManager scratch addr that later moves. Required for
+        # cudagraphs to be stable on TQ3+MTP. Retire when #46067 merges upstream.
+        python3 /fixes/patch_pn79_tq_decode_scratch_cudagraph_safe.py
         exec vllm serve "$@"
       - --
     command:
-      - --enforce-eager
+      # [cudagraph 2026-06-26] PIECEWISE cudagraphs ON (~+50% decode) — eager dropped.
+      # Stable on TQ3+MTP+GDN-hybrid via PN79 (fixed TQ decode scratch, #46067) + P66/P78.
+      - --compilation-config
+      - '{"cudagraph_mode": "PIECEWISE"}'
       - --model
       - XReyRobert/Qwopus3.6-27B-v2-GPTQ-Pro-MTP-BF16
       - --served-model-name
@@ -192,7 +203,7 @@ services:
       - --max-model-len
       - "${MAX_MODEL_LEN:-75000}"
       - --gpu-memory-utilization
-      - "${GPU_MEMORY_UTILIZATION:-0.91}"
+      - "${GPU_MEMORY_UTILIZATION:-0.90}"
       - --max-num-seqs
       - "5"
       # No num-gpu-blocks-override: profiler auto-sizes KV (~174K at util 0.91 / 75K model-len).
