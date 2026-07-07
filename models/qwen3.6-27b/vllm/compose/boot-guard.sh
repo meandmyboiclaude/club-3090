@@ -32,10 +32,15 @@ COMPOSE="$CLUB/models/qwen3.6-27b/vllm/compose/single/tools-text-aibox.yml"
 #   Validated live: validate_bump.py 6/6 (test D 537 chars) + streaming tool-call gate 5/5.
 #   Rollback (parser only): uncomment PN73/PN73T in the compose entrypoint, or checkout
 #   tag pre-pn76-3f5a1e17 (commit 3133409).
-# Rollback (full build): tag validated-qwopus-b53b1c7 (commit 2dc5938) + image vllm-rollback:b53b1c7-20260625.
-TAG=validated-qwopus-3f5a1e17
-PIN_IMG=nightly-3f5a1e1733200760169ff31ebe60a271072b199e
-PIN_VER=0.23.1rc1.dev424+g3f5a1e173
+# [2026-07-07 PROMOTE] dev799 (nightly-69715823) promoted to validated after
+#   full gate: 6/6 functional, PN76 streaming 5/5, bench +6..47% vs dev424,
+#   15-round BUG-028 soak clean, /rerank live (PN81). Carries PN80/82 (upstream
+#   crash fixes) + PN81/83. Genesis at 8e15d1f (dev799 KNOWN_GOOD + PN8 re-anchor).
+# Rollback (full build): tag validated-qwopus-3f5a1e17 (dev424) + image
+#   vllm-rollback:3f5a1e17-20260707; older tag validated-qwopus-b53b1c7 (2dc5938) + vllm-rollback:b53b1c7-20260625.
+TAG=validated-qwopus-69715823
+PIN_IMG=nightly-69715823df89b11ee684b84066390cbb9092d5c1
+PIN_VER=0.23.1rc1.dev799+g69715823d
 
 log() { echo "[vllm-boot-guard] $*"; }
 
