@@ -64,6 +64,22 @@ PREFIX_TMPL = (
 )
 SUFFIX = "<|im_end|>\\n<|im_start|>assistant\\n<think>\\n\\n</think>\\n\\n"
 
+# Packed mode (PN81 v2): score PACK docs per sequence via prompt logprobs —
+# each doc is followed by a literal "Relevant: yes" answer slot; P(yes) vs
+# P(no) is read from the prompt-logprob distribution AT the yes token. One
+# prefill scores a whole chunk (fits the workload to the 5 seats instead of
+# 1-doc-per-seat), prefill goes token-budget-bound. Trade-off: doc j is
+# conditioned on docs<j in its chunk (mild cross-doc bias; ranking-grade).
+PACKED_SYSTEM = (
+    "You judge documents against a query. For EACH document, decide whether "
+    'it satisfies the query; after each document the verdict line "Relevant:" '
+    'is completed with "yes" or "no".'
+)
+PACKED_PREFIX_TMPL = (
+    "<|im_start|>system\\n{system}<|im_end|>\\n"
+    "<|im_start|>user\\n<Instruct>: {instruction}\\n<Query>: {query}\\n"
+)
+
 _label_ids_cache: dict[int, list[int]] = {}
 
 
@@ -87,6 +103,84 @@ def _error(status: int, message: str) -> JSONResponse:
         content={"error": {"message": message, "type": "PN81RerankError"}},
         status_code=status,
     )
+
+
+async def _packed_scores(handler, tokenizer, query, docs, instruction, pack, raw_request):
+    """Score docs in packed chunks via prompt logprobs. Returns list[float]."""
+    import math
+
+    from vllm.inputs import tokens_input
+    from vllm.sampling_params import SamplingParams
+    from vllm.utils.async_utils import merge_async_iterators
+
+    # Packed readout uses SPACE-prefixed labels: after "Relevant:" the model's
+    # mass sits on " yes"/" no", not the bare tokens. The slot itself is filled
+    # with a NEUTRAL " unknown" — position p's distribution depends only on
+    # tokens < p, so the filler never affects its own reading AND avoids the
+    # yes-anchor bias that literal "yes" fillers imprint on later docs.
+    yes_ids = tokenizer.encode(" yes", add_special_tokens=False)
+    no_ids = tokenizer.encode(" no", add_special_tokens=False)
+    if len(yes_ids) != 1 or len(no_ids) != 1:
+        raise ValueError(f"' yes'/' no' not single tokens: {yes_ids}/{no_ids}")
+    yes_id, no_id = yes_ids[0], no_ids[0]
+    filler_ids = tokenizer.encode(" unknown", add_special_tokens=False)
+    max_len = handler.model_config.max_model_len - 2
+
+    prefix_ids = tokenizer.encode(
+        PACKED_PREFIX_TMPL.format(
+            system=PACKED_SYSTEM, instruction=instruction, query=query
+        ),
+        add_special_tokens=False,
+    )
+
+    # Build chunks: [prefix][doc seg + "Relevant:"][yes_id] x pack
+    chunks: list[tuple[list[int], list[tuple[int, int]]]] = []  # (ids, [(doc_idx, pos)])
+    ids: list[int] = list(prefix_ids)
+    positions: list[tuple[int, int]] = []
+    for di, doc in enumerate(docs):
+        seg = tokenizer.encode(
+            f"\\nDocument {len(positions) + 1}:\\n{doc}\\nRelevant:",
+            add_special_tokens=False,
+        )
+        if positions and (
+            len(positions) >= pack or len(ids) + len(seg) + 1 > max_len
+        ):
+            chunks.append((ids, positions))
+            ids, positions = list(prefix_ids), []
+        if len(prefix_ids) + len(seg) + len(filler_ids) > max_len:
+            raise ValueError(f"document {di} alone exceeds max_model_len")
+        ids.extend(seg)
+        positions.append((di, len(ids)))  # index of the filler's first token
+        ids.extend(filler_ids)
+    if positions:
+        chunks.append((ids, positions))
+
+    sampling = SamplingParams(max_tokens=1, prompt_logprobs=20, logprobs=1)
+    base = f"pn81-packed-{id(raw_request):x}"
+    gens = [
+        handler.engine_client.generate(
+            tokens_input(cids), sampling, f"generative-scoring-{base}-{ci}"
+        )
+        for ci, (cids, _) in enumerate(chunks)
+    ]
+    finals: list = [None] * len(chunks)
+    async for ci, out in merge_async_iterators(*gens):
+        finals[ci] = out
+
+    scores = [0.0] * len(docs)
+    floor = -20.0
+    for (cids, poss), out in zip(chunks, finals):
+        plps = getattr(out, "prompt_logprobs", None)
+        if not plps:
+            raise ValueError("engine returned no prompt_logprobs")
+        for di, pos in poss:
+            entry = plps[pos] or {}
+            lp_yes = entry[yes_id].logprob if yes_id in entry else floor
+            lp_no = entry[no_id].logprob if no_id in entry else floor
+            m = max(lp_yes, lp_no)
+            ey, en = math.exp(lp_yes - m), math.exp(lp_no - m)
+            scores[di] = ey / (ey + en)
+    return scores
 
 
 @router.post("/rerank")
@@ -121,6 +215,44 @@ async def genesis_rerank(raw_request: Request):
         label_ids = _resolve_label_ids(tokenizer)
     except ValueError as e:
         return _error(500, str(e))
+
+    # Packed mode (v2): {"pack": M} scores M docs per SEQUENCE via prompt
+    # logprobs — fits the workload to the seats instead of 1 doc per seat.
+    pack = body.get("pack")
+    if pack and os.environ.get("GENESIS_PN81_PACKED", "0") != "1":
+        # BUG-042: prompt_logprobs x async-scheduling x chunked-prefill kills the
+        # EngineCore ("sample_tokens() must be called after execute_model()
+        # returns None", live 2026-07-07 03:38). Until that upstream state
+        # machine is fixed/guarded, packed mode is opt-in via env only.
+        return _error(400, "packed mode disabled (GENESIS_PN81_PACKED != 1; see BUG-042)")
+    if pack:
+        try:
+            pack = max(1, int(pack))
+            scores = await _packed_scores(
+                handler, tokenizer, query, docs, instruction, pack, raw_request
+            )
+        except ValueError as e:
+            return _error(400, str(e))
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[PN81] packed scoring failed")
+            return _error(500, f"packed scoring failed: {e}")
+        order = sorted(range(len(docs)), key=lambda i: -scores[i])
+        if top_n and top_n > 0:
+            order = order[:top_n]
+        if tei_dialect:
+            return JSONResponse(
+                content=[{"index": i, "score": scores[i]} for i in order]
+            )
+        return JSONResponse(
+            content={
+                "id": f"genesis-rerank-{id(raw_request):x}",
+                "model": body.get("model") or handler.models.model_name(),
+                "results": [
+                    {"index": i, "relevance_score": scores[i]} for i in order
+                ],
+                "usage": {"total_tokens": 0},
+            }
+        )
 
     prefix = PREFIX_TMPL.format(system=SYSTEM_PROMPT, instruction=instruction, query=query)
     items = [d + SUFFIX for d in docs]
