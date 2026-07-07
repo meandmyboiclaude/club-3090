@@ -267,9 +267,9 @@ async def genesis_rerank(raw_request: Request):
     # lanes pass {"batch": 999} for one full wave (5 slots stay saturated,
     # no straggler dead-time between waves).
     try:
-        batch_size = int(body.get("batch") or os.environ.get("GENESIS_PN81_BATCH", "32"))
+        batch_size = int(body.get("batch") or os.environ.get("GENESIS_PN81_BATCH", "16"))
     except (TypeError, ValueError):
-        batch_size = 32
+        batch_size = 16
     batch_size = max(1, batch_size)
     model_name = body.get("model") or handler.models.model_name()
     scores: list[float] = [0.0] * len(docs)
