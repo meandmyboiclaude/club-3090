@@ -26,7 +26,10 @@
 # ===========================================================================
 services:
   vllm-qwen36-27b:
-    image: docker.io/vllm/vllm-openai:nightly-3f5a1e1733200760169ff31ebe60a271072b199e
+    # [2026-07-07 bump candidate] nightly-69715823 (0.23.1rc1.dev799) — UNPROVEN until
+    # functional 6/6 + bench ±5% + soak. Rollback: image nightly-3f5a1e17... (also kept
+    # as localhost/vllm-rollback:3f5a1e17-20260707) via git tag validated-qwopus-3f5a1e17.
+    image: docker.io/vllm/vllm-openai:nightly-69715823df89b11ee684b84066390cbb9092d5c1
     container_name: vllm-qwen36-27b-tools-text
     restart: unless-stopped
     healthcheck:
@@ -111,6 +114,8 @@ services:
       # steady (% of torch-total 24109MB) or it gc-thrashes every poll. Measured:
       # 0.90 steady ~96.7% (SOFT 97 ok), 0.92 steady ~98.9% (SOFT 97 thrashed).
       # At 0.91 steady ~97.8% -> SOFT 98 / HARD 99 (HARD leaves ~700MB board headroom).
+      # PN83 chat-class seat cap — 0 = INERT (see PN83 note at --max-num-seqs)
+      - GENESIS_PN83_CHAT_SEQS=0
       - VRAM_GUARDIAN_SOFT_PCT=98
       - VRAM_GUARDIAN_HARD_PCT=99
       - VRAM_GUARDIAN_POLL_MS=200
@@ -178,6 +183,26 @@ services:
         # cudagraphs bake in a WorkspaceManager scratch addr that later moves. Required for
         # cudagraphs to be stable on TQ3+MTP. Retire when #46067 merges upstream.
         python3 /fixes/patch_pn79_tq_decode_scratch_cudagraph_safe.py
+        # [PN80 — 2026-07-07 dev799 bump] vllm#47609 backport to the V1 runner:
+        # skip-layers feature passes cache_dtype_str='auto' for TQ specs (kv_quant_mode
+        # stays NONE on TQFullAttentionSpec) -> TurboQuantConfig.from_cache_dtype('auto')
+        # ValueError at boot. Upstream fixed only the MRV2 worker path. FAIL-LOUD: without
+        # this, TQ3 boot crashes in _init_minimal_kv_cache_for_profiling.
+        python3 /fixes/patch_pn80_tq_v1_runner_cache_dtype_preserve.py
+        # [PN82 — 2026-07-07] upstream generative_scoring × spec-decode crash fix:
+        # logprob_token_ids must not override the rejection sampler's -1 full-vocab
+        # sentinel (shape-mismatch EngineCore fatal, live-reproduced on dev799).
+        # Prerequisite for PN81 (/rerank on :8020). Upstream-contributable.
+        python3 /fixes/patch_pn82_bonus_logprobs_full_vocab_guard.py
+        # [PN81 — 2026-07-07] /rerank on :8020 (USER: reranker lives IN vLLM).
+        # Adapts TEI + Cohere wire formats onto upstream /generative_scoring
+        # (yes/no-logit scoring on the generate engine). Requires PN82.
+        # Kill-switch: GENESIS_PN81_RERANK=0.
+        python3 /fixes/patch_pn81_rerank_endpoint.py
+        # [PN83 — 2026-07-07] rerank micro-slots: chat-class admission cap in the
+        # v1 scheduler (GENESIS_PN83_CHAT_SEQS); rerank fills the raised seat count.
+        # FAIL-LOUD: never boot 29 seats without the chat cap.
+        python3 /fixes/patch_pn83_rerank_micro_slots.py
         exec vllm serve "$@"
       - --
     command:
@@ -204,8 +229,15 @@ services:
       - "${MAX_MODEL_LEN:-75000}"
       - --gpu-memory-utilization
       - "${GPU_MEMORY_UTILIZATION:-0.90}"
+      # [PN83 — 2026-07-07] rerank micro-slots: PARKED after 2 OOM arms.
+      # 29 seats = OOM at KV alloc (~700MB GDN/mamba state over budget);
+      # 12 seats = aten::empty alloc failure during warmup (P66 capture list
+      # grew [4..96] — the extra cudagraph pools eat the profiler margin).
+      # PN83 scheduler patch stays wired but INERT (GENESIS_PN83_CHAT_SEQS=0).
+      # Next arm (own window): 8-10 seats + max_cudagraph_capture_size=40
+      # (+ maybe util 0.89). Enable = seqs up + env to 5.
       - --max-num-seqs
-      - "5"
+      - "${MAX_NUM_SEQS:-5}"
       # No num-gpu-blocks-override: profiler auto-sizes KV (~174K at util 0.91 / 75K model-len).
       # 75K model-len (not 90K) shrinks each seq's KV reservation so 5x15K peaks ~87% KV (no
       # 100% pin -> no capacity-queue throttle) AND drops the prefill VRAM spike under guardian
