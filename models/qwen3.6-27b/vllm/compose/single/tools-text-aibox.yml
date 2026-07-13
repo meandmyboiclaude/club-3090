@@ -244,6 +244,11 @@ services:
       # Stable on TQ3+MTP+GDN-hybrid via PN79 (fixed TQ decode scratch, #46067) + P66/P78.
       - --compilation-config
       - '{"cudagraph_mode": "PIECEWISE"}'
+      # [Wave-3b 2026-07-13] torch profiler via engine arg (dev1060 retired the env-var
+      # gate; routes attach only when profiler-config is set). Inert until /start_profile.
+      # REMOVE after the kernel-engineering campaign (dev-only surface).
+      - --profiler-config
+      - '{"profiler": "torch", "torch_profiler_dir": "/profiles"}'
       - --model
       - XReyRobert/Qwopus3.6-27B-v2-GPTQ-Pro-MTP-BF16
       - --served-model-name
