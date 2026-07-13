@@ -128,7 +128,9 @@ services:
       # Performance
       - GENESIS_ENABLE_P40=1
       - GENESIS_ENABLE_P82=1
-      - GENESIS_ENABLE_PN50_GDN_FUSED_PROJ=1  # 2026-07-13 re-anchored both lanes; dynamo-risk watch
+      # BISECT-9: PN50 back to prod-validated 0 (kernel arange fixed b23b704, but boot-8
+      # stable-ABI replay crash unresolved — PN50 is the =0-in-prod suspect)
+      - GENESIS_ENABLE_PN50_GDN_FUSED_PROJ=0
       # Correctness
       - GENESIS_ENABLE_P91=1
       - GENESIS_ENABLE_P107_MTP_TRUNCATION_DETECTOR=1
@@ -169,8 +171,8 @@ services:
       - GENESIS_ENABLE_PN354_GDN_USE_EXP2=1
       # ----- WAVE-2 (2026-07-13: remaining triage candidates; PN77 held for quality-A/B,
       #       PN520 verified-unnecessary — Qwopus split-BF16 in_proj loads fine, parity 31/31) -----
-      - GENESIS_ENABLE_P101=1
-      - GENESIS_ENABLE_P38B_COMPILE_SAFE=1
+      # BISECT-9 [2026-07-14 stable-ABI aten::empty replay crash]: # - GENESIS_ENABLE_P101=1
+      # BISECT-9 [2026-07-14 stable-ABI aten::empty replay crash]: # - GENESIS_ENABLE_P38B_COMPILE_SAFE=1
       # DROPPED per registry conflicts_with (conflicts_with PN390; ngram-oriented, we run MTP):
       # - GENESIS_ENABLE_P71_BLOCK_VERIFY=1
       - GENESIS_ENABLE_P88_PREFIX_CACHE_STATS_DEDUP=1
@@ -178,17 +180,17 @@ services:
       - GENESIS_ENABLE_P91B=1
       - GENESIS_ENABLE_P98=1
       - GENESIS_ENABLE_P99=1
-      - GENESIS_ENABLE_PN106_GDN_H_POOL=1
-      - GENESIS_ENABLE_PN118=1
-      - GENESIS_ENABLE_PN118_V2_MD5_TURBOQUANT_ATTN=1
-      - GENESIS_ENABLE_PN118_V2_MD5_WORKSPACE=1
-      - GENESIS_ENABLE_PN119=1
-      - GENESIS_ENABLE_PN11_GDN_AB_CONTIGUOUS=1
+      # BISECT-9 [2026-07-14 stable-ABI aten::empty replay crash]: # - GENESIS_ENABLE_PN106_GDN_H_POOL=1
+      # BISECT-9 [2026-07-14 stable-ABI aten::empty replay crash]: # - GENESIS_ENABLE_PN118=1
+      # BISECT-9 [2026-07-14 stable-ABI aten::empty replay crash]: # - GENESIS_ENABLE_PN118_V2_MD5_TURBOQUANT_ATTN=1
+      # BISECT-9 [2026-07-14 stable-ABI aten::empty replay crash]: # - GENESIS_ENABLE_PN118_V2_MD5_WORKSPACE=1
+      # BISECT-9 [2026-07-14 stable-ABI aten::empty replay crash]: # - GENESIS_ENABLE_PN119=1
+      # BISECT-9 [2026-07-14 stable-ABI aten::empty replay crash]: # - GENESIS_ENABLE_PN11_GDN_AB_CONTIGUOUS=1
       - GENESIS_ENABLE_PN16_LAZY_REASONER=1
       - GENESIS_ENABLE_PN16_V6_STREAMING_TRUNCATOR=1
       # DROPPED per registry conflicts_with (conflicts_with P7/P7b (same forward_cuda site)):
       # - GENESIS_ENABLE_PN204_DUAL_STREAM_INPROJ=1
-      - GENESIS_ENABLE_PN25_SILU_INDUCTOR_SAFE=1
+      # BISECT-9 [2026-07-14 stable-ABI aten::empty replay crash]: # - GENESIS_ENABLE_PN25_SILU_INDUCTOR_SAFE=1
       # DROPPED per registry conflicts_with (conflicts_with PN57):
       # - GENESIS_ENABLE_PN26_TQ_UNIFIED=1
       - GENESIS_ENABLE_PN289_PROCESS_INFO=1
@@ -198,13 +200,13 @@ services:
       # on first request (live-hit boot 7). Premise is A5000/Ampere launch overhead;
       # we're Ada. Re-vendoring the deleted function = reverting an upstream perf win.
       # - GENESIS_ENABLE_PN292_REVERT_FUSED_MAMBA_POSTPROCESS=1
-      - GENESIS_ENABLE_PN293_MAMBA_ATTN_PREFILL_FASTPATH=1
-      - GENESIS_ENABLE_PN294_UNSPLIT_MTP_ATTN_GROUPS=1
-      - GENESIS_ENABLE_PN31_FA_VARLEN_PERSISTENT_OUT=1
-      - GENESIS_ENABLE_PN340=1
-      - GENESIS_ENABLE_PN341=1
-      - GENESIS_ENABLE_PN350=1
-      - GENESIS_ENABLE_PN351=1
+      # BISECT-9 [2026-07-14 stable-ABI aten::empty replay crash]: # - GENESIS_ENABLE_PN293_MAMBA_ATTN_PREFILL_FASTPATH=1
+      # BISECT-9 [2026-07-14 stable-ABI aten::empty replay crash]: # - GENESIS_ENABLE_PN294_UNSPLIT_MTP_ATTN_GROUPS=1
+      # BISECT-9 [2026-07-14 stable-ABI aten::empty replay crash]: # - GENESIS_ENABLE_PN31_FA_VARLEN_PERSISTENT_OUT=1
+      # BISECT-9 [2026-07-14 stable-ABI aten::empty replay crash]: # - GENESIS_ENABLE_PN340=1
+      # BISECT-9 [2026-07-14 stable-ABI aten::empty replay crash]: # - GENESIS_ENABLE_PN341=1
+      # BISECT-9 [2026-07-14 stable-ABI aten::empty replay crash]: # - GENESIS_ENABLE_PN350=1
+      # BISECT-9 [2026-07-14 stable-ABI aten::empty replay crash]: # - GENESIS_ENABLE_PN351=1
       # [2026-07-14] DROPPED — SUPERSEDED MITIGATION: PN353B downgrades TQ _cudagraph_support
       # UNIFORM_BATCH -> UNIFORM_SINGLE_TOKEN_DECODE (kills the FULL leg of FULL_AND_PIECEWISE,
       # our doubly-validated #1 decode win, -5-8% TPS) to dodge the _prefill_attention .tolist()
@@ -219,8 +221,8 @@ services:
       - GENESIS_ENABLE_PN381_ALLOWED_TOKEN_IDS_METADATA=1
       - GENESIS_ENABLE_PN384_EAGLE_PREFIX_CACHE_PREFILL=1
       - GENESIS_ENABLE_PN390_STREAMING_LSE_SAMPLER=1
-      - GENESIS_ENABLE_PN519_SWA_TILE_BASE=1
-      - GENESIS_ENABLE_PN57_TQ_CENTROIDS_DISK_CACHE=1
+      # BISECT-9 [2026-07-14 stable-ABI aten::empty replay crash]: # - GENESIS_ENABLE_PN519_SWA_TILE_BASE=1
+      # BISECT-9 [2026-07-14 stable-ABI aten::empty replay crash]: # - GENESIS_ENABLE_PN57_TQ_CENTROIDS_DISK_CACHE=1
       - GENESIS_ENABLE_PN65=1
       # [2026-07-14] hand PN65 to lane-2: v3 logging-filter supersedes lane-1's v2
       # middleware (retired — its api_server import at apply time blacked out the
