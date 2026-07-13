@@ -48,9 +48,23 @@ COMPOSE="$CLUB/models/qwen3.6-27b/vllm/compose/single/tools-text-aibox.yml"
 # Rollback (full build): tag validated-qwopus-69715823 (dev799) + image
 #   vllm-rollback:69715823-20260713; older: validated-qwopus-3f5a1e17 (dev424) +
 #   vllm-rollback:3f5a1e17-20260707.
-TAG=validated-qwopus-9e57de71
-PIN_IMG=nightly-9e57de7197f234f9d9187715d96e07e007048c0f
-PIN_VER=0.23.1rc1.dev1060+g9e57de719
+# [2026-07-13 ENDGAME PROMOTE] dev1060+7-cherry-picks custom wheel (club-dev1060-cherry
+#   @ 3da1671f: #48361 tool-leak, #45660 marlin zero-init, #48475 GDN clamp, #46461 TQ
+#   continuation, #47574 zero-KV-blocks, #48483 cudagraph mem, #48363 mamba warmup) on
+#   image localhost/vllm-qwen36-endgame:dev1060cherry-2204-20260713 (stock nightly-9e57de71
+#   base + wheel built on ubuntu-22.04 runner, max GLIBC_2.34). Genesis sndr-v12-import
+#   (v12 two-lane, 209 net-new dark) + top-level sndr mount. FULL_AND_PIECEWISE cudagraphs
+#   (PN125 cluster + PN358 enforce) + disable_any_whitespace + PN56.
+#   Gate 2026-07-13: grammar canary 12/12 (BUG-070 FIXED, correct-thinking), tool canary
+#   1-2/15 residual (BUG-069 improved from 6/15), verify-full 8/8, verify-stress 7/7,
+#   bench narrative 77.4 t/s (+56% vs dev1060 baseline 49.7), code 100.4 (+10%, CV 3%),
+#   TTFT 155->72ms, 4-slot burst 242 t/s @ KV 91% peak, 22K long-ctx clean.
+# Rollback (full build): tag validated-qwopus-9e57de71 (dev1060 stock) + compose image
+#   nightly-9e57de7197f234f9d9187715d96e07e007048c0f; older: validated-qwopus-69715823
+#   (dev799) + vllm-rollback:69715823-20260713.
+TAG=validated-qwopus-3da1671f
+PIN_IMG=localhost/vllm-qwen36-endgame:dev1060cherry-2204-20260713
+PIN_VER=0.1.dev1+g3da1671fc.d20260713
 
 log() { echo "[vllm-boot-guard] $*"; }
 
