@@ -192,7 +192,12 @@ services:
       # DROPPED per registry conflicts_with (conflicts_with PN57):
       # - GENESIS_ENABLE_PN26_TQ_UNIFIED=1
       - GENESIS_ENABLE_PN289_PROCESS_INFO=1
-      - GENESIS_ENABLE_PN292_REVERT_FUSED_MAMBA_POSTPROCESS=1
+      # [2026-07-14] DROPPED — RIG/PIN MISMATCH: PN292 reverts PR40172's fused Triton
+      # postprocess back to the dev371 Python postprocess_mamba, which dev1060 DELETED
+      # (only postprocess_mamba_fused_kernel exists) -> AttributeError EngineCore fatal
+      # on first request (live-hit boot 7). Premise is A5000/Ampere launch overhead;
+      # we're Ada. Re-vendoring the deleted function = reverting an upstream perf win.
+      # - GENESIS_ENABLE_PN292_REVERT_FUSED_MAMBA_POSTPROCESS=1
       - GENESIS_ENABLE_PN293_MAMBA_ATTN_PREFILL_FASTPATH=1
       - GENESIS_ENABLE_PN294_UNSPLIT_MTP_ATTN_GROUPS=1
       - GENESIS_ENABLE_PN31_FA_VARLEN_PERSISTENT_OUT=1
