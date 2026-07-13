@@ -47,6 +47,10 @@ services:
       # Closes club-3090 #22.
       - ../../cache/torch_compile:/root/.cache/vllm/torch_compile_cache
       - ../../cache/triton:/root/.triton/cache
+      # [2026-07-13 #47388] startup-plan persistence (else lost on container recreate)
+      - ../../cache/startup_plan:/root/.cache/vllm/startup_plan
+      # [2026-07-13 Wave-3b] torch-profiler trace output (enables /start_profile + /stop_profile)
+      - ../../diagnostics/torch_profiles:/profiles
       # Genesis v7.14+ modular package (replaces patch_genesis_unified.py).
       - ../../patches/genesis/vllm/_genesis:/usr/local/lib/python3.12/dist-packages/vllm/_genesis:ro
       - ../../patches/local/qwen3coder_tool_parser_deferred_commit.py:/patches/qwen3coder_tool_parser_deferred_commit.py:ro
@@ -60,8 +64,16 @@ services:
       - NCCL_CUMEM_ENABLE=0
       - NCCL_P2P_DISABLE=1
       - VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1
-      - VLLM_ENFORCE_EAGER=0
+      # [2026-07-13] VLLM_ENFORCE_EAGER removed — never a real vLLM env (dev1060 warns
+      # "Unknown vLLM environment variable"); eager is controlled by --enforce-eager.
       - VLLM_NO_USAGE_STATS=1
+      # [2026-07-13 #47388] persist memory-profiling + suggested kv-cache-memory under
+      # VLLM_CACHE_ROOT/startup_plan; matching-fingerprint reboots skip the profiling
+      # and cudagraph-estimation passes -> faster time-to-serve. Auto-falls-back on
+      # mismatch/OOM; never overrides an explicit --kv-cache-memory.
+      - VLLM_ENABLE_STARTUP_PLAN=1
+      # [2026-07-13 Wave-3b] arms the torch profiler endpoints (inert until /start_profile)
+      - VLLM_TORCH_PROFILER_DIR=/profiles
       - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
       - VLLM_FLOAT32_MATMUL_PRECISION=high
       - VLLM_USE_FLASHINFER_SAMPLER=1
@@ -195,6 +207,25 @@ services:
         # sentinel (shape-mismatch EngineCore fatal, live-reproduced on dev799).
         # Prerequisite for PN81 (/rerank on :8020). Upstream-contributable.
         python3 /fixes/patch_pn82_bonus_logprobs_full_vocab_guard.py
+        # [Wave-1 2026-07-13] correctness backports vs BUG-069 + crash classes.
+        # PN86 vllm#46461: TQ+APC continuation guard (prefix K/V loss -> hallucinations)
+        # PN87 vllm#43650: mamba MTP cache-hit boundary (subsumed by #48361 in Wave-3 build)
+        # PN88 vllm#47574: zero fresh KV blocks on quantized+hybrid (incl. TQ spec trap)
+        # PN89 vllm#46324: documented no-op (Genesis P66 covers); fail-loud if neither
+        # PN90 vllm#47828: MTP quant-leak guard — verified no-op on dense, self-activates
+        # PN91g vllm#48475: GDN state-index clamp on 0-accepted spec steps
+        # PN92 vllm#47490: never silently override explicit spec method
+        # PN93 vllm#48053: cudagraph capture_error_mode=thread_local
+        # PN94 vllm#47833+#47953: MTP drafts share target embeddings
+        python3 /fixes/patch_pn86_46461_tq_prefill_continuation_guard.py
+        python3 /fixes/patch_pn87_43650_mamba_eagle_cache_hit_boundary.py
+        python3 /fixes/patch_pn88_47574_zero_kv_blocks_quantized_hybrid.py
+        python3 /fixes/patch_pn89_46324_piecewise_spec_capture_sizes.py
+        python3 /fixes/patch_pn90_47828_mtp_quant_leak_guard.py
+        python3 /fixes/patch_pn91g_48475_gdn_spec_state_index_clamp.py
+        python3 /fixes/patch_pn92_47490_explicit_spec_method_guard.py
+        python3 /fixes/patch_pn93_48053_cudagraph_capture_thread_local.py
+        python3 /fixes/patch_pn94_47833_mtp_share_target_embeddings.py
         # [PN81 — 2026-07-07] /rerank on :8020 (USER: reranker lives IN vLLM).
         # Adapts TEI + Cohere wire formats onto upstream /generative_scoring
         # (yes/no-logit scoring on the generate engine). Requires PN82.
