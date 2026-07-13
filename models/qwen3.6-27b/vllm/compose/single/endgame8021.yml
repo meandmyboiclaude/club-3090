@@ -200,7 +200,13 @@ services:
       - GENESIS_ENABLE_PN341=1
       - GENESIS_ENABLE_PN350=1
       - GENESIS_ENABLE_PN351=1
-      - GENESIS_ENABLE_PN353B=1
+      # [2026-07-14] DROPPED — SUPERSEDED MITIGATION: PN353B downgrades TQ _cudagraph_support
+      # UNIFORM_BATCH -> UNIFORM_SINGLE_TOKEN_DECODE (kills the FULL leg of FULL_AND_PIECEWISE,
+      # our doubly-validated #1 decode win, -5-8% TPS) to dodge the _prefill_attention .tolist()
+      # capture crash — which the LIVE root-cause fixes already close (/fixes PN79 #46067 scratch,
+      # PN93 #48053 thread_local, P67b spec-verify routing; wave-1 FULL=3 captured, burst 250).
+      # Also broke P67's dispatcher anchor (P67 kernel itself is baked in the cherry image).
+      # - GENESIS_ENABLE_PN353B=1
       # ----- fixed-BROKEN bucket (2026-07-13 agents): -----
       - GENESIS_ENABLE_PN385_FORCED_NAMED_EMPTY_PARAMS=1
       - GENESIS_ENABLE_PN288_TOOL_FINISH_REASON_OVERRIDE=1
@@ -220,6 +226,9 @@ services:
       - GENESIS_ENABLE_PN79_V2_MD5_CHUNK=1
       - GENESIS_ENABLE_PN79_V2_MD5_CHUNK_DELTA_H=1
       - GENESIS_ENABLE_PN91_DEVELOPER_ROLE=1
+      # [2026-07-14 NA-RIG audit] /sleep + /wake_up ARE exposed (VLLM_SERVER_DEV_MODE=1);
+      # stock wake path AttributeErrors on hybrid GDN nested KV — near-free guard.
+      - GENESIS_ENABLE_PN55_WAKE_UP_HYBRID_KV=1
       - GENESIS_ENABLE_SNDR_WORKSPACE_001=1
       - GENESIS_ENABLE_P62_STRUCT_OUT_SPEC_TIMING=1
       # OOM Protection
@@ -345,6 +354,10 @@ services:
         # (BUG-070 `{{` fix; supersedes never-applying P62 on dev1060+). Gate:
         # canary_grammar_mtp.py 0/12 doubled tokens.
         python3 /fixes/patch_pn96_44993_structured_output_marker_step_fsm.py
+        # [PN98 2026-07-14] BUG-069 residual: drop text-form tool-tag fragments
+        # demoted to content (strict-demotion + end-of-output lexer flush).
+        # Must run AFTER PN76 (deferred toolcall commit). Gate: canary_47194 0/15.
+        python3 /fixes/patch_pn98_toolcall_text_fragment_demotion.py
         # [PN81 — 2026-07-07] /rerank on :8020 (USER: reranker lives IN vLLM).
         # Adapts TEI + Cohere wire formats onto upstream /generative_scoring
         # (yes/no-logit scoring on the generate engine). Requires PN82.
