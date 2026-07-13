@@ -26,10 +26,11 @@
 # ===========================================================================
 services:
   vllm-qwen36-27b:
-    # [2026-07-07 bump candidate] nightly-69715823 (0.23.1rc1.dev799) — UNPROVEN until
-    # functional 6/6 + bench ±5% + soak. Rollback: image nightly-3f5a1e17... (also kept
-    # as localhost/vllm-rollback:3f5a1e17-20260707) via git tag validated-qwopus-3f5a1e17.
-    image: docker.io/vllm/vllm-openai:nightly-69715823df89b11ee684b84066390cbb9092d5c1
+    # [2026-07-13 bump candidate] nightly-9e57de71 (main 07-13) — UNPROVEN until
+    # functional + bench ±5% + TQ-KV correctness (51878e5b repacked K/V layout; also
+    # brings 481e481b hybrid partial prefix-cache). Rollback: validated dev799 image
+    # nightly-69715823... via git tag validated-qwopus-69715823.
+    image: docker.io/vllm/vllm-openai:nightly-9e57de7197f234f9d9187715d96e07e007048c0f
     container_name: vllm-qwen36-27b-tools-text
     restart: unless-stopped
     healthcheck:

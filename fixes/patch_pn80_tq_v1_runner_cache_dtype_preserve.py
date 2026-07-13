@@ -7,7 +7,7 @@ gpu_model_runner. Upstream's fix only covers the Model Runner V2 worker
 
 The --kv-cache-dtype-skip-layers feature (#46xxx) computes
     layer_cache_dtype_str = "auto" if kv_cache_spec.kv_quant_mode == NONE
-                            else cache_dtype
+                            else <cache dtype>
 in _reshape_kv_cache_tensors. TQFullAttentionSpec encodes its quantization
 in the spec subclass (kv_quant_mode stays NONE), so TQ layers get
 cache_dtype_str='auto' -> TurboQuantConfig.from_cache_dtype('auto') raises
@@ -16,6 +16,14 @@ ValueError at boot ("Unknown TurboQuant cache dtype: 'auto'").
 Observed: nightly-69715823 (dev799) boot crash in
 _init_minimal_kv_cache_for_profiling on TQ3 KV. Retire when upstream applies
 the #47609 exemption to the V1 runner path.
+
+[2026-07-13 rebase for nightly-9e57de71 (dev1060)] 51878e5b (KV layout
+refactor) + follow-ups rewrote the dtype-select to add a
+getattr(spec, "cache_dtype_str", ...) fallback — but TQFullAttentionSpec
+still has kv_quant_mode==NONE and no cache_dtype_str attr (verified in
+image), so the 'auto' branch still fires and TQ3 boot still crashes.
+Patcher now carries BOTH anchor forms (dev799 + dev1060) so rollback to the
+validated dev799 image keeps working.
 """
 import pathlib
 import sys
@@ -36,22 +44,50 @@ IMPORT_NEW = (
     "    TQFullAttentionSpec,  # PN80: vllm#47609 backport (V1 runner path)\n"
 )
 
-OLD = (
-    "                    layer_cache_dtype_str = (\n"
-    '                        "auto"\n'
-    "                        if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE\n"
-    "                        else self.cache_config.cache_dtype\n"
-    "                    )\n"
-)
-NEW = (
-    "                    # PN80: vllm#47609 backport — TQ specs keep kv_quant_mode==NONE\n"
-    "                    # but MUST receive the real cache_dtype (TQ backend rejects 'auto').\n"
-    "                    layer_cache_dtype_str = (\n"
-    '                        "auto"\n'
-    "                        if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE\n"
-    "                        and not isinstance(kv_cache_spec, TQFullAttentionSpec)\n"
-    "                        else self.cache_config.cache_dtype\n"
-    "                    )\n"
+# (OLD, NEW) anchor candidates, newest first. First OLD found in the file wins.
+DTYPE_SELECT_FORMS = (
+    # nightly-9e57de71 (dev1060, post-51878e5b) form
+    (
+        "                    layer_cache_dtype_str = (\n"
+        '                        "auto"\n'
+        "                        if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE\n"
+        "                        else getattr(\n"
+        "                            kv_cache_spec,\n"
+        '                            "cache_dtype_str",\n'
+        "                            None,\n"
+        "                        )\n"
+        "                        or self.cache_config.cache_dtype\n"
+        "                    )\n",
+        "                    # PN80: vllm#47609 backport — TQ specs keep kv_quant_mode==NONE\n"
+        "                    # but MUST receive the real cache_dtype (TQ backend rejects 'auto').\n"
+        "                    layer_cache_dtype_str = (\n"
+        '                        "auto"\n'
+        "                        if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE\n"
+        "                        and not isinstance(kv_cache_spec, TQFullAttentionSpec)\n"
+        "                        else getattr(\n"
+        "                            kv_cache_spec,\n"
+        '                            "cache_dtype_str",\n'
+        "                            None,\n"
+        "                        )\n"
+        "                        or self.cache_config.cache_dtype\n"
+        "                    )\n",
+    ),
+    # nightly-69715823 (dev799) form
+    (
+        "                    layer_cache_dtype_str = (\n"
+        '                        "auto"\n'
+        "                        if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE\n"
+        "                        else self.cache_config.cache_dtype\n"
+        "                    )\n",
+        "                    # PN80: vllm#47609 backport — TQ specs keep kv_quant_mode==NONE\n"
+        "                    # but MUST receive the real cache_dtype (TQ backend rejects 'auto').\n"
+        "                    layer_cache_dtype_str = (\n"
+        '                        "auto"\n'
+        "                        if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE\n"
+        "                        and not isinstance(kv_cache_spec, TQFullAttentionSpec)\n"
+        "                        else self.cache_config.cache_dtype\n"
+        "                    )\n",
+    ),
 )
 
 
@@ -68,20 +104,31 @@ def main() -> int:
         if "TQFullAttentionSpec" in body:
             print(f"{LOG} upstream drift: exemption already present — self-retire (no-op)")
             return 0
-    for name, anchor in (("import", IMPORT_OLD), ("dtype-select", OLD)):
-        if anchor not in text:
-            print(f"{LOG} FATAL: anchor-not-found ({name}) — upstream refactor; "
-                  f"re-derive before boot (TQ3 boot WILL crash without this fix)",
-                  file=sys.stderr)
-            return 1
-        if text.count(anchor) != 1:
-            print(f"{LOG} FATAL: ambiguous anchor ({name})", file=sys.stderr)
-            return 1
-    text = text.replace(IMPORT_OLD, IMPORT_NEW, 1).replace(OLD, NEW, 1)
-    TARGET.write_text(text)
-    print(f"{LOG} applied: TQFullAttentionSpec exempted from 'auto' cache-dtype "
-          f"in _reshape_kv_cache_tensors (vllm#47609 V1-runner backport)")
-    return 0
+
+    if IMPORT_OLD not in text:
+        print(f"{LOG} FATAL: anchor-not-found (import) — upstream refactor; "
+              f"re-derive before boot (TQ3 boot WILL crash without this fix)",
+              file=sys.stderr)
+        return 1
+    if text.count(IMPORT_OLD) != 1:
+        print(f"{LOG} FATAL: ambiguous anchor (import)", file=sys.stderr)
+        return 1
+
+    for old, new in DTYPE_SELECT_FORMS:
+        if old in text:
+            if text.count(old) != 1:
+                print(f"{LOG} FATAL: ambiguous anchor (dtype-select)", file=sys.stderr)
+                return 1
+            text = text.replace(IMPORT_OLD, IMPORT_NEW, 1).replace(old, new, 1)
+            TARGET.write_text(text)
+            print(f"{LOG} applied: TQFullAttentionSpec exempted from 'auto' cache-dtype "
+                  f"in _reshape_kv_cache_tensors (vllm#47609 V1-runner backport)")
+            return 0
+
+    print(f"{LOG} FATAL: anchor-not-found (dtype-select) — upstream refactor; "
+          f"re-derive before boot (TQ3 boot WILL crash without this fix)",
+          file=sys.stderr)
+    return 1
 
 
 sys.exit(main())
