@@ -59,6 +59,13 @@ The **reasoning suite** is also separate from `--full`; run it with `--reasoning
 
 `--full` runs the sandbox packs by default. `--no-sandboxed` drops `--full` back to the 5-pack deterministic scope (no Docker); `--sandboxed-only` runs just the 3 sandbox packs. `--reasoning` is independent of `--full`; use it for the four reasoning packs, with GPQA skipped until gated data is available.
 
+> ⚠️ **`--full` needs the sandbox images built first — "needs Docker" isn't enough.** The 3 sandboxed packs run inside pre-built `benchlocal-sandbox-*` Docker images that are **not auto-pulled**, and the build tooling is **not in the `pip install`** — it lives in a benchlocal-cli *checkout*. Build them once:
+> ```bash
+> git clone https://github.com/noonghunna/benchlocal-cli
+> bash benchlocal-cli/tools/build-sandboxes.sh        # ~30 GB free; the aider image is biggest — `docker system prune` if tight
+> ```
+> Then `--full` works. Without the images, `quality-test.sh` warns up front and runs the deterministic packs only; for a clean no-Docker run use **`--medium`** (or `--no-sandboxed`). (club-3090 #492 — benchlocal-cli's own mid-run hint pointed at a relative path that's wrong outside a checkout.)
+
 ## Install (one-time)
 
 ```bash
@@ -72,6 +79,13 @@ pip install -e /path/to/benchlocal-cli
 ```
 
 ## Run
+
+> **Live progress is on by default.** The wrapper forwards `--progress` to
+> benchlocal-cli, so per-scenario `[N/M] <pack> <id> …` lines stream to stderr
+> as the run advances. Long modes (`--full` ~30–40 min, `--reasoning`
+> similar, `--pack aider-polyglot-30` ~25–30 min) otherwise go dark for the
+> whole duration with no signal whether anything is wrong mid-run. Pass
+> `--no-progress` (or `PROGRESS=0`) for CI / log-volume-sensitive contexts.
 
 ```bash
 # default --medium against the auto-detected running compose
@@ -88,6 +102,9 @@ bash scripts/quality-test.sh --reasoning
 
 # explicit endpoint override
 URL=http://localhost:8011 bash scripts/quality-test.sh --quick
+
+# suppress live [N/M] progress for CI / log-volume contexts
+bash scripts/quality-test.sh --full --no-progress
 
 # --full includes the 3 Docker-sandboxed packs by default (BugFind/HermesAgent/CLI) — needs Docker
 bash scripts/quality-test.sh --full
@@ -114,7 +131,7 @@ Output:
 Example output:
 
 ```
-=== benchlocal-cli --medium  (endpoint: http://localhost:8020, model: qwen3.6-27b-autoround) ===
+=== benchlocal-cli --medium  (endpoint: http://localhost:8020, model: qwen3.6-27b) ===
 
 Pack                       | Pass / Total | Score | p50 latency | p95 latency | Status
 ToolCall-15 (v1.0.1)       |   14 / 15    |  93%  |     8.2s    |     12.1s   | ✅
@@ -126,16 +143,143 @@ ReasonMath-15 (v1.0.0)     |   11 / 15    |  73%  |    14.2s    |     22.6s   | 
 TOTAL                      |   65 / 75    |  87%  |             |             |
 
 Failure breakdown:
-  ToolCall-15           1 verifier_fail  (TC-07: wrong arg value for "filename")
-  InstructFollow-15     2 verifier_fail  (IF-03 word-count, IF-09 citation-format)
-  DataExtract-15        2 missing_field, 1 wrong_value
-  ReasonMath-15         4 wrong_answer   (RM-03, RM-07, RM-09, RM-12)
+- toolcall-15 TC-07: verifier_fail (wrong arg value for "filename": expected report.pdf, got output.pdf)
+- instructfollow-15 IF-03: verifier_fail (word count 247, target 250 ±5)
+- dataextract-15 DE-05: verifier_fail (7/14 atomic fields correct (50%). product_name: mismatch | product_price_paid: expected number)
+- reasonmath-15 RM-09: verifier_fail (expected 42, got 45)
 
 ==========================================================================
 Quality: line for compose schema field (paste into compose YAML header):
 ==========================================================================
 Quality:   ToolCall-15 14/15 (93%) · InstructFollow-15 13/15 (87%) · StructOutput-15 15/15 (100%) · DataExtract-15 12/15 (80%) · ReasonMath-15 11/15 (73%) (--medium, packs v1.0.x, 2026-05-09)
 ```
+
+## Scenario-level probes (selection, incremental, resume)
+
+Since benchlocal-cli [#84](https://github.com/noonghunna/benchlocal-cli/pull/84)/[#85](https://github.com/noonghunna/benchlocal-cli/pull/85) the wrapper passes through scenario-granular runs:
+
+```bash
+# one or more specific scenarios (pack-qualified, repeatable)
+bash scripts/quality-test.sh --scenario cli-40/CLI-31 --scenario reasonmath-15/RM-04 --no-thinking
+
+# a curated probe set from a file (newline PACK_ID/SCENARIO_ID, # comments),
+# BOTH reasoning modes — same pairing as a full eval:
+bash scripts/quality-test.sh --scenarios-file scripts/scenario-sets/tess4-model-floor.txt --no-thinking
+# ⚠ ON leg: boot the compose with reasoning parsing on FIRST (REASONING=on for
+#   llama.cpp composes, --reasoning-parser for vLLM) so <think> lands in
+#   reasoning_content, not the graded answer — then:
+bash scripts/quality-test.sh --scenarios-file scripts/scenario-sets/tess4-model-floor.txt \
+    --enable-thinking --repeat 3
+
+# journal each scored scenario (fsynced sidecar) so an interrupt is resumable
+bash scripts/quality-test.sh --full --no-thinking --incremental
+
+# resume an interrupted (or inspect-then-continue) run — restores the original
+# pack-set/selection/thinking/sampling/timeout config; only missing arms run
+bash scripts/quality-test.sh --resume results/quality/quality-<ts>.json.partial.jsonl
+```
+
+**Probe discipline (the tool enforces most of this):**
+
+- A selection result is **PARTIAL** — the JSON carries top-level `selection` + per-pack `catalog_scenario_count`, human output says `PARTIAL SELECTION`, and history ingestion / `rescore` refuse it without `--allow-partial`. **It is never a `/150` claim** — full 8-pack both modes remains the bar for BENCHMARKS rows, `Quality:` lines, and promotions.
+- Thinking-ON probes sample at temp 1.0 by pack contract → single ON probes are draws; pass `--repeat 3` (cheap at scenario granularity) when a number gates a decision.
+- `--resume` is mutually exclusive with mode/pack/selection/thinking/sampling/timeout flags — it restores those from the saved run; the wrapper refuses the combination rather than fork the config.
+
+**Curated probe sets** live in `scripts/scenario-sets/` with provenance headers:
+
+| file | what | when to run |
+|---|---|---|
+| `tess4-model-floor.txt` | 14 fails-everywhere (+2 thinking-only) across 2 rigs / 2 drafters / 2 engine builds — the Tess retrain-target list (#665 intersection) | before/after a Tess fine-tune or retrained drafter head; quantifying a "did the model move" claim. **Measured (Tess dual, b9967, 2026-07-12): OFF ~3.5 min · ON ~11 min single draw** (ON ×3 ≈ 30 min — still ⅓ of one full 8-pack leg) |
+| `tess4-engine-window.txt` | CLI-25/31/32 — the b9932→b9967 engine-window flips | first probe on any new engine build/pin arm, before paying for a full 8-pack. **Measured: ~40 s OFF** |
+
+**`scripts/rerun-failed-packs.sh`** now re-runs a prior run's failures as ONE selection run (was: whole-pack loops) — 6 failures over 5 packs = 6 scenarios, with `--incremental` durability and a REPRODUCED/FIXED verdict per original failure. `RERUN_DRY=1` previews the plan.
+
+## Which probe for which question — cheap comparison before a full eval
+
+A full 8-pack (both modes) is ~1–2 h and the bar for any *published* number. But most day-to-day questions — "is this quant better?", "did the retrain move?", "did the engine bump help?" — don't need it. They need the *right* cheap probe, because **the discriminating scenarios depend on what you're comparing**, and a targeted probe runs in minutes.
+
+The principle that makes this work: **same-family checkpoints tie on the deterministic packs and diverge only on specific fragile ones.** So you don't re-measure what won't move — you probe where the difference lives, and only "earn" the full eval when the probe moves.
+
+| You're asking… | Probe | "Better" means | Why it discriminates |
+|---|---|---|---|
+| Is this a better **quant / recipe** of the *same* model? | **cli-40** (`--pack cli-40`, ~15 min) | higher cli-40 (precision preserved) | Quant differences concentrate in agentic behavior; deterministic packs (TC/IF/SO/DE/RM) tie across recipes, so cli-40 is where 4-bit-vs-8-bit-vs-GGUF actually separates. Proven 2026-07-12 (recipe arms below). |
+| Did a **retrain / new fine-tune** of *this model line* crack its known-hard scenarios? | the model's **floor set** (e.g. `scenario-sets/tess4-model-floor.txt`, ~15 min) | more floor scenarios pass (capability added) | The floor is the model's hardest scenarios; quant can't move them (it preserves/degrades, doesn't add capability) — only real *training* does. |
+| Did an **engine build / pin bump** help? | the **engine-window set** (e.g. `tess4-engine-window.txt`, ~40 s) | the flip scenarios pass | Isolates the handful of scenarios a build version is known to move; the rest are engine-invariant. |
+| Is a **new / different** model worth a full eval at all? | `--medium` (5 deterministic packs, ~15–25 min) | overall lift | A different model has its *own* floor — the Tess floor won't gauge a Qwen. A broad slice is the right first screen. |
+| Are last run's failures **real or flaky**? | `scripts/rerun-failed-packs.sh <result.json>` | REPRODUCED vs FIXED | Re-runs only the failed scenarios as one selection. |
+
+**The gate rule (this is the whole method):** a probe is a **cheap positive trigger**, not a verdict. Probe *moves* → run the full 8-pack for the real number. Probe *doesn't* move → you've saved ~2.5 h, *and that's the call for quant/engine comparison* (they either move the fragile pack or they don't). It is the exact rule the recipe arms used: cli-40-OFF ≥ 21 earned a full run; huginnfork's 18 didn't, FP8's 22 did.
+
+**Two rules to not over-apply it:**
+- **The floor is model-line-specific and a *one-way* trigger.** A retrain that lifts the *mid-tier* churny scenarios (the ones that pass 1-in-4) can leave the floor flat — so a flat floor is ambiguous, not a "skip." Floor-moved is a strong yes; floor-flat means fall back to `--medium` or the full run, don't conclude "no gain."
+- **OFF is the clean discriminator; ON is churny.** Gate on the greedy OFF leg (deterministic, reproducible). ON legs sample at temp 1.0 — a single ON probe is a draw; use `--repeat 3` if an ON number is load-bearing.
+
+**Free pre-screen where you have it: KLD.** If the checkpoints ship KL-divergence self-reports (many quant exports do), they predict the quant ranking at *zero* GPU cost — 2026-07-12 the reports (fp8 0.013 < NVFP4A16 0.042 < NVFP4-W4A4) called the cli-40 order exactly. Sort by KLD, then cli-40-probe only the top candidate.
+
+**Worked example (2026-07-12 recipe arms).** Comparing four Tess checkpoints (migtissera NVFP4 / huginnfork NVFP4A16 / FP8 / GGUF) the naive way = four full 8-packs ≈ 10 h. Instead: KLD pre-screened the order, a cli-40 probe (~15 min each) ranked all four and gated the full runs, and only the two that cleared the gate got a full 8-pack. Total ≈ 2 h, same conclusion (precision is the lever, FP8 111/117 ties the GGUF-ON) — see `learnings/tess-4-27b.md` 2026-07-12 and [#662](https://github.com/noonghunna/club-3090/discussions/662).
+
+## pass@1 vs pass@N — the churn-harvest ceiling (and why we don't report it)
+
+Every `/150` total in this repo is **pass@1 at pack-contract sampling**: think-OFF legs are greedy (deterministic), think-ON legs are a *single draw* at temp 1.0 / top-p 0.95 / top-k 20. That contract is what makes totals comparable across rigs, engines, and dates.
+
+**The observation** (from the #665 cross-rig work, 2026-07-12): at temp 1.0, many "failing" scenarios aren't failures — they're **churners** with a per-draw pass probability. Measured examples on Tess-4-27B: scenarios that read as hard-0 on any single run pass 1-in-7 to ~2-in-5 across repeated draws (`tess4-model-floor.txt` Tier 2 documents six of them with evidence). Take the union of passes across enough draws and the effective ceiling rises sharply: a 7-draw window on a single 4090 reached ~139/150-equivalent coverage, and across every stack we've measured only **10 scenarios sit at p≈0** (Tier 1). The gap between a model's pass@1 total (~116–118) and its churn-harvest ceiling (~139) is ~20 points of *probability*, not capability.
+
+**Two consequences, deliberately kept apart:**
+
+### 1. As a serving technique, harvesting is legitimate — and now cheap to size
+
+If the **caller owns a verifier** — tests pass, JSON validates against a schema, an archive hash matches, a migration applies cleanly — then verifier-guided best-of-N (rejection sampling) converts probability gaps into successes at predictable cost:
+
+| per-draw p | N for ≥90% | N for ≥99% |
+|---:|---:|---:|
+| 0.15 | 15 | 29 |
+| 0.30 | 7 | 13 |
+| 0.40 | 5 | 10 |
+
+(`P = 1 − (1−p)^N`; cost ≈ N× tokens plus the verifier, and draws parallelize — see the concurrency numbers in FAQ.) Agent harnesses already do a degenerate version of this via retry-on-error; doing it *deliberately*, with the validator run before accepting, is strictly better. Measuring a scenario's p is now a minutes-scale task: `--scenarios-file <set> --repeat N` returns per-scenario pass rates directly.
+
+**When it applies:** only where verification is cheaper than generation and mechanical (schema/tests/hashes). It does nothing for open-ended prose, and nothing for Tier-1 capability gaps — no N rescues p≈0.
+
+**What it is not (yet):** a stack feature. It's a client-side pattern; if it graduates, it would be a retry-with-validator wrapper in front of the endpoint, never an engine or compose change. Structured-output constrained decoding remains the first choice where the check is expressible as a grammar — best-of-N is the fallback for checks that only a verifier can run.
+
+### 2. As a benchmark number, harvesting is laundering — and the tooling refuses it
+
+pass@N and pass@1 are different metrics, and mixing them inflates a model's number with the *verifier's* work. This is why the guardrails are shaped the way they are:
+
+- Selection results are labeled `PARTIAL SELECTION` and refuse history/`rescore` ingestion without `--allow-partial`.
+- `--repeat N` aggregates at ≥50% per scenario — a *majority* vote, not a best-of harvest.
+- Canonical sampling is pinned per pack; overrides mark the run non-canonical.
+
+**Reporting rules:** BENCHMARKS `/150` columns are pass@1-at-contract, always. If you publish a harvested number, label it `pass@k` with k and the verifier stated (e.g. "pass@7, pack verifiers as oracle") — and never in the same column as pass@1 totals. Scenario-level claims ("X now passes") follow the same discipline: a churner observed once is `1/N draws`, not "passes".
+
+*Credit: the ceiling observation and the "probability lifted vs capability trained in" framing come from @seanyourhighness's 7-draw b9967 window in #665.*
+
+## Diagnosing failures
+
+Failure reasons are surfaced in three places, cheapest first:
+
+| Need | Where |
+|---|---|
+| Why a scenario failed (reason + detail), run just finished | The **`Failure breakdown:`** block at the end of every run — `pack scenario: failure_mode (detail)`, full detail string. No extra command. |
+| Same, but the run scrolled away / an older run | `results/quality/quality-<ts>.json` (raw), or `benchlocal-cli inspect <json> --failed` |
+| The full prompt / response / verifier trace behind a failure | `benchlocal-cli inspect <json> --scenario <ID> --full` |
+| Filter by failure type · compare two runs · per-scenario tokens + latency | `benchlocal-cli inspect <json> --mode timeout` · `--diff prev.json` |
+
+`failure_mode` is one of: `verifier_fail` (answer wrong / below threshold) · `timeout` · `agent_runner_timeout` / `agent_runner_crashed` (sandboxed agentic packs) · `server_error` / `http_error` / `model_endpoint_unreachable` (serving problem, not a quality signal) · `result_json_malformed` · `wrong_answer` · `verifier_not_implemented` (stub, excluded from scoring).
+
+The breakdown is **terminal-only** — `quality-test.sh` does not tee it to a log file, but the same data persists in the saved JSON.
+
+## Per-scenario timeouts
+
+`quality-test.sh` forwards to `benchlocal-cli`, which sizes each scenario's timeout automatically — you rarely need to set one. Precedence (highest wins):
+
+1. **Manual** — `--timeout-per-case N` (or `TIMEOUT_PER_CASE=N`): used verbatim.
+2. **Auto-scaling (default)** — the budget scales by the endpoint's measured decode speed and, for thinking-on runs, by the thinking-token budget. A one-shot startup probe measures the rig's decode TPS (and fails fast if the endpoint is unreachable, rather than hanging). The scaling deliberately **over-budgets** — a timeout is a safety ceiling, not a target — which is what keeps thinking-on packs from spuriously timing out. Exact formula + flags (`--measured-tps` / `--reference-tps` / `--retry-on-timeout`): [benchlocal-cli README → Per-case timeouts](https://github.com/noonghunna/benchlocal-cli#per-case-timeouts).
+3. **Static default** — the pack's built-in `default_max_seconds`.
+
+**Don't hand-set `--timeout-per-case` to "fix" a slow run** unless you've confirmed the auto-probe measured wrong — the over-budget is intentional.
+
+> **Planned (not yet built):** an *opt-in* tier that sizes timeouts from a **soak-derived per-context-depth TPS curve** — a real "how fast at depth X" measurement for your exact rig/config, captured into the runtime measurement-record — instead of the single empty-context startup probe. It would be strictly opt-in and fall back to the auto-probe/default when no curve exists; measured data is never required. Tracked at [#114](https://github.com/noonghunna/club-3090/pull/114).
 
 ## Sampling & temperature
 
@@ -156,10 +300,16 @@ bash scripts/quality-test.sh --full
 
 # evaluate at the model's served / recommended temperature (inherits the compose default)
 bash scripts/quality-test.sh --full --sampling-from-server
-SAMPLING_FROM_SERVER=1 bash scripts/rebench-full.sh
+SAMPLING_FROM_SERVER=1 bash scripts/rebench-full.sh --with-8pack-thinking=both
 
-# or an explicit temperature, via benchlocal-cli directly
-benchlocal-cli run --full --endpoint http://localhost:8020 --model <name> --temperature 0.8
+# or an explicit temperature, via benchlocal-cli directly.
+# NB: invoking benchlocal-cli directly BYPASSES the wrapper's localhost guard. With a
+# localhost endpoint + a sandboxed *agentic* pack (HermesAgent-20 runs the agent INSIDE
+# the sandbox), you must set BENCHLOCAL_HERMES_RESOLVE_LOCALHOST=1 yourself — otherwise the
+# in-sandbox agent can't reach the host model and hermes silently scores ~0/20.
+# quality-test.sh sets this automatically for localhost URLs (see Limitations).
+BENCHLOCAL_HERMES_RESOLVE_LOCALHOST=1 \
+  benchlocal-cli run --full --endpoint http://localhost:8020 --model <name> --temperature 0.8
 ```
 
 ### Reasoning-on evals
@@ -173,8 +323,10 @@ bash scripts/quality-test.sh --reasoning --thinking-max-tokens 16384
 # force thinking on for every full-suite pack
 bash scripts/quality-test.sh --full --enable-thinking --thinking-max-tokens 16384
 
-# full rebench: bench.sh + both quality-test.sh legs inherit it
-ENABLE_THINKING=1 THINKING_MAX_TOKENS=16384 SAMPLING_FROM_SERVER=1 bash scripts/rebench-full.sh
+# full rebench incl. the 8-pack in both reasoning modes (off + on — the promotion gate).
+# The 8-pack thinking is driven by --with-8pack-thinking (=off forces --no-thinking,
+# =on forces --enable-thinking), NOT ENABLE_THINKING (which now only affects bench.sh). #338
+THINKING_MAX_TOKENS=16384 SAMPLING_FROM_SERVER=1 bash scripts/rebench-full.sh --with-8pack-thinking=both
 
 # TPS bench only
 ENABLE_THINKING=1 bash scripts/bench.sh
@@ -218,6 +370,50 @@ Suggested gates (informal, not enforced):
 
 For comparing a new pin / quant / config A/B against the previous version: a >10pp drop on any pack vs the previous baseline is a signal worth investigating before promoting `Status: ✅ Production`.
 
+### Rescoring saved results — MATERIALIZE, don't just read
+
+When a harness fix changes how saved runs score (e.g. the benchlocal-cli #79/#81
+fairness + reasoning-channel fixes), re-score the SAVED result JSONs with the
+`rescore` subcommand — and **write the corrected results back into the artifact**:
+
+```bash
+benchlocal-cli rescore results/rebench/<tag>/quality-full-thinking.json --in-place
+```
+
+`rescore` re-runs the deterministic scorers against each run's saved
+`raw_response` (sandbox packs like hermes/cli-40 are skipped — those need a live
+re-run). Printing the corrected totals to stdout and publishing them **without
+`--in-place`/`--output` leaves the tag artifact stale** — anything that later
+reads the tag (the `catalog-baseline.sh` induction tool, `rebench-report.py`,
+the measurement-record corpus) silently resurrects the pre-fix numbers. This
+bit the Agents-A1 gate: the published thinking-on 110/150 was rescore-corrected,
+but the tag JSON read 108/150 until the rescore was materialized on 2026-07-04.
+
+**Rule: a rescore that changes a number you publish must be materialized into
+the tag artifact in the same session** (keep a copy of the pre-rescore JSON
+elsewhere if you want the history; the tag carries the accepted truth).
+
+### Regression baselines (the curated corpus)
+
+Rather than hunt down "the previous baseline" by hand each time, the curated corpus in
+[`results/baselines/`](../results/baselines/README.md) holds committed `n≥3` aggregates per
+`(registry-slug, thinking-mode)`. [`scripts/quality-baseline.sh`](../scripts/quality-baseline.sh)
+captures and diffs against them:
+
+```bash
+# capture / refresh a baseline (n=3 aggregate; needs a live endpoint)
+bash scripts/quality-baseline.sh --slug vllm/qwen-35b-a3b-dual --capture
+# diff a fresh run vs the committed baseline — the regression check
+bash scripts/quality-baseline.sh --slug vllm/qwen-35b-a3b-dual
+# thinking-on companion baseline
+bash scripts/quality-baseline.sh --slug vllm/qwen-35b-a3b-dual --mode enable-thinking
+```
+
+`no-thinking` is canonical (temp-0, reproducible — diff against this for a CI-style gate);
+`enable-thinking` is the reasoning-on companion. It's a thin wrapper over `quality-test.sh --full`
+(`--repeat` → `--save-json`/`--previous-result`); extra args pass through (e.g.
+`--exit-on-regression` for a hard CI gate). `--dry-run` prints the resolved command.
+
 ## What it doesn't replace
 
 - **`bench.sh`** measures throughput, not quality. They're complementary.
@@ -227,8 +423,9 @@ For comparing a new pin / quant / config A/B against the previous version: a >10
 ## Limitations
 
 1. **Sandboxed packs need Docker** — BugFind / HermesAgent / CLI-40 run in Docker-hosted verifier sandboxes. On a host without Docker, run `--medium` (or `--full --no-sandboxed`) for the 5 deterministic packs.
-2. **Verifier translation is lossy in places** — the upstream BenchLocal evaluators have partial-credit branches we collapsed to pass/fail. See benchlocal-cli's [`docs/EXTRACTOR_NOTES.md`](https://github.com/noonghunna/benchlocal-cli/blob/master/docs/EXTRACTOR_NOTES.md) for the specific surfaces.
-3. **Single-run sampling at temperature 0** — each scenario runs once, greedy, by default (see [Sampling & temperature](#sampling--temperature) for the non-canonical override modes). For non-determinism debugging, use `benchlocal-cli run --pack <id> --repeat N`.
+2. **Sandboxed *agentic* packs need a container-reachable model URL** — HermesAgent-20 runs the agent *inside* the sandbox, so it calls the model over the network. A `localhost` / `127.x` / `[::1]` endpoint is the *container's* own loopback, not the host. `quality-test.sh` auto-detects this and exports `BENCHLOCAL_HERMES_RESOLVE_LOCALHOST=1` (rewrites the URL → `host.docker.internal` + adds `--add-host`). **If you bypass the wrapper and run `benchlocal-cli` directly against a localhost endpoint, set that env var yourself** — otherwise the in-sandbox agent never reaches the model and hermes silently scores ~0/20. Failure signature: uniform ~timeout-length per-scenario latencies + flat GPU (*not* `turn_count`, which is `0` for hermes regardless of engagement).
+3. **Verifier translation is lossy in places** — the upstream BenchLocal evaluators have partial-credit branches we collapsed to pass/fail. See benchlocal-cli's [`docs/EXTRACTOR_NOTES.md`](https://github.com/noonghunna/benchlocal-cli/blob/master/docs/EXTRACTOR_NOTES.md) for the specific surfaces.
+4. **Single-run sampling at temperature 0** — each scenario runs once, greedy, by default (see [Sampling & temperature](#sampling--temperature) for the non-canonical override modes). For non-determinism debugging, use `benchlocal-cli run --pack <id> --repeat N`.
 
 For the full pipeline architecture + JSONL pack format, read [benchlocal-cli's docs](https://github.com/noonghunna/benchlocal-cli/tree/master/docs).
 

@@ -2,7 +2,7 @@ schema_version: 1
 id: vllm-nightly-mtp
 display_name: vLLM nightly plus MTP
 type: vllm
-stability: nightly
+stability: deprecated
 install:
   method: docker_image
   spec: vllm/vllm-openai:nightly-01d4d1ad375dc5854779c593eee093bcebb0cada
@@ -42,4 +42,4 @@ required_overlays: []
 vendored_overlays: []
 required_genesis: true
 genesis_pin: v7.72.2
-notes: "Production nightly path for Qwen MTP. Pin held at nightly-01d4d1ad (2026-05-04, Sander's v7.72.2 PROD pin) — this is the SHA Genesis v7.72.2 patches were anchored against and all v7.72.2 BENCHMARKS rows reference. Bumping requires either a Genesis pin bump cycle (Sander v7.73.x) or local patch re-anchor + Qwen 27B/Gemma 31B rebench gate. supported_model_families lists qwen3-next-moe + gemma4-swa-moe so the schema is ready; the actual MoE production boot needs a Genesis re-anchor on a post-#42521 nightly. Until then qwen3-next-moe routes to the preview path on vllm-nightly-clean. Gemma 4 composes that don't need Genesis should route to vllm-nightly-clean directly. Launch exports this SHA as VLLM_NIGHTLY_SHA; VLLM_IMAGE can override the full image ref. PRIOR-BUG: commit 40f1ef78 (2026-05-14) accidentally set this to nightly-1acd67a7 (the post-Gemma4-merge Gemma SHA); fixed back to 01d4d1ad."
+notes: "DEPRECATED 2026-06-05 (#254): purged nightly — 01d4d1ad is 404 on Docker Hub, and all Genesis/TQ3 composes that used this engine were archived to compose/_archive/ + deregistered (zero registry users). Genesis path on hold upstream. Retained (not deleted) as the genesis_equipped test anchor (required_genesis:true) and for revival if Genesis re-anchors on a post-#42521 nightly. ORIGINAL: Production nightly path for Qwen MTP. Pin held at nightly-01d4d1ad (2026-05-04, Sander's v7.72.2 PROD pin) — this is the SHA Genesis v7.72.2 patches were anchored against and all v7.72.2 BENCHMARKS rows reference. Bumping requires either a Genesis pin bump cycle (Sander v7.73.x) or local patch re-anchor + Qwen 27B/Gemma 31B rebench gate. supported_model_families lists qwen3-next-moe + gemma4-swa-moe so the schema is ready; the actual MoE production boot needs a Genesis re-anchor on a post-#42521 nightly. Until then qwen3-next-moe routes to the preview path on vllm-nightly-clean. Gemma 4 composes that don't need Genesis should route to vllm-nightly-clean directly. Launch exports this SHA as VLLM_NIGHTLY_SHA; VLLM_IMAGE can override the full image ref. PRIOR-BUG: commit 40f1ef78 (2026-05-14) accidentally set this to nightly-1acd67a7 (the post-Gemma4-merge Gemma SHA); fixed back to 01d4d1ad."

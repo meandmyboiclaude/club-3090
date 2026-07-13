@@ -27,6 +27,7 @@ what existing variant did you compare against, what's the trade-off? -->
   bash scripts/report.sh --full > my-rig.md
   ```
   Runs hardware + stack + boot log capture **plus** verify-full + verify-stress 7/7 + SOAK_MODE=continuous + canonical bench in one ~35-min pass. Paste contents as a PR comment. See [docs/CLIFFS.md](../docs/CLIFFS.md) for why the soak-continuous step is load-bearing (catches Cliff 2b, which verify-stress doesn't).
+- [ ] **Profile header complete** (new/changed compose) — `# Profile (at-a-glance):` block with `Status:` set to one enum value (`✅`/`⚠️`/`🧪`/`👁️`/`⏸️`/`🗑️`) and a `Caveats:` line if `⚠️`/`👁️`/`⏸️`/`🗑️`. Enforced by `test-compose-status-drift`; schema in [CLAUDE.md](../CLAUDE.md).
 - [ ] **BENCHMARKS row added** — under the appropriate model section, mirroring existing column shape (incl. `Rig` column).
 - [ ] **CHANGELOG entry added** in `models/<model>/CHANGELOG.md`.
 

@@ -1,7 +1,7 @@
 # ===========================================================================
 # Profile (at-a-glance):
 #   Model:     Qwen3.6-27B (ubergarm MTP-IQ4_KS GGUF — imatrix IQK quant)
-#   Engine:    ik_llama.cpp (ghcr.io/ikawrakow/ik-llama-cpp:cu13-server)
+#   Engine:    ik_llama.cpp (ghcr.io/ikawrakow/ik-llama-cpp@sha256:5f914f1ccade922417af58c94bd1cbb558052c8852d86678ead3fe693eec0143)
 #   Topology:  Single 3090 (TP=1)
 #   Drafter:   MTP n=2, p-min 0.0 (built-in MTP head)
 #   KV:        q4_0 K + q4_0 V (default — max-context-first; -khad/-vhad
@@ -27,7 +27,7 @@
 #              the ceiling; 210K fills 193K leaving 863 MB — both under the 1024 MB
 #              agent-safety margin. 200000 (≈1131 MB at ceiling) is the safe default. -ub 512 @ 262144
 #              → 21.5 GB if you need the extra ~1 GB back.
-#   Status:    ✅ Shipped (advanced-quant track, #180). In the wizard +
+#   Status:    ✅ Production (advanced-quant track, #180). In the wizard +
 #              `bash scripts/switch.sh ik-llama/iq4ks-mtp`.
 #   Perf:      ~18-20% FASTER decode TPS than shipped llamacpp/mtp Q4_K_M
 #              (~60 narr / ~69 code vs ~50/58, at set-and-readback matched 370 W
@@ -64,9 +64,15 @@
 #      too. (vLLM keeps its own froggeric copy under vllm/patches/.)
 #
 # Engine pinned by digest (engine policy):
-#   ghcr.io/ikawrakow/ik-llama-cpp:cu13-server
+#   ghcr.io/ikawrakow/ik-llama-cpp@sha256:5f914f1ccade922417af58c94bd1cbb558052c8852d86678ead3fe693eec0143
 #     @sha256:c13e0798e4117649962833adc932362b64cb7080cfc9dbb1235161f43f8d5c49
-#   cu13 = matches our CUDA 13.2 host driver.
+#   cu13 = a CUDA 13.2 RUNTIME. Requires a driver whose supported CUDA >= 13.2
+#   (nvidia-smi top-right). ⚠️ On a driver < 13.2 — e.g. 580.159 = CUDA 13.0,
+#   which satisfies the README's "580.x+" but NOT this pin — cu13 forward-compat-
+#   fails on GeForce (CUDA error 804) -> silent CPU fallback -> crash loop (#633).
+#   The launcher auto-selects the cu12 sibling build there (same build 4574,
+#   CUDA 12.6, backward-compatible, community-validated ~68 TPS). Pin
+#   IK_LLAMA_IMAGE=ghcr.io/ikawrakow/ik-llama-cpp:cu12-server-4574 in .env to force it.
 #
 # Quick start:
 #   1. Get the MTP-IQ4_KS GGUF:
@@ -101,7 +107,7 @@
 
 services:
   ik-llama-qwen36-27b-iq4ks-mtp:
-    image: ${IK_LLAMA_IMAGE:-ghcr.io/ikawrakow/ik-llama-cpp:cu13-server}
+    image: ${IK_LLAMA_IMAGE:-ghcr.io/ikawrakow/ik-llama-cpp@sha256:5f914f1ccade922417af58c94bd1cbb558052c8852d86678ead3fe693eec0143}
     container_name: "${ESTATE_CONTAINER:-ik-llama-qwen36-27b}"
     restart: unless-stopped
     ports:
@@ -130,9 +136,7 @@ services:
       -khad
       -vhad
       -ngld 99
-      --multi-token-prediction
-      --draft-max ${MTP_DRAFT_N_MAX:-2}
-      --draft-p-min ${DRAFT_P_MIN:-0.0}
+      --spec-type mtp:n_max=${MTP_DRAFT_N_MAX:-2},p_min=${DRAFT_P_MIN:-0.0}
       --recurrent-ckpt-mode auto
       --merge-qkv
       -fa on

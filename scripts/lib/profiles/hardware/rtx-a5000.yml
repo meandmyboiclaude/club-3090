@@ -12,6 +12,8 @@ supported_kv_formats:
   - turboquant_3bit_nc
   - int8_per_token_head
   - q4_0
+  - q5_0
+  - q8_0
   - k8v4
 kv_format_default:
   long_context: turboquant_3bit_nc

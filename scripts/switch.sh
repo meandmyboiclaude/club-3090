@@ -7,37 +7,50 @@
 # Stateless — re-run any time you want a different config.
 #
 # Usage:
-#   bash scripts/switch.sh <variant>           # switch + tail until ready
-#   bash scripts/switch.sh <variant> --no-wait # switch and return immediately
-#   bash scripts/switch.sh --force <variant>   # skip hardware/free-VRAM preflight
-#   bash scripts/switch.sh --list              # show all variants
-#   bash scripts/switch.sh --down              # just bring down whatever's up
+#   bash scripts/switch.sh <variant>            # switch + tail until ready
+#   bash scripts/switch.sh <variant> --no-wait  # switch and return immediately
+#   bash scripts/switch.sh --force <variant>    # skip hardware/free-VRAM preflight
+#   bash scripts/switch.sh --owui <variant>     # after ready, also register it in Open WebUI (no-op if OWUI down)
+#   bash scripts/switch.sh --list               # actionable variants on THIS machine (deprecated hidden) + defaults
+#   bash scripts/switch.sh --list --all         # every variant — all GPU counts + deprecated
+#   bash scripts/switch.sh --list-all           # alias for --list --all
+#   bash scripts/switch.sh --defaults           # just the per-model defaults view
+#   bash scripts/switch.sh --down               # just bring down whatever's up
+#   bash scripts/switch.sh --set-default <slug>  # pin <slug> as YOUR default for its model (.env)
+#   bash scripts/switch.sh --clear-default <model>  # remove your pinned default for <model>
+#   bash scripts/switch.sh --explain <slug>      # one slug's full story: registry row + engine/model/hardware/drafter facts + kv-calc fit verdict + measured BENCHMARKS row
+#   bash scripts/switch.sh --explain <slug> --json  # same, as a structured JSON object
+#
+# `<…>/default` tokens auto-resolve to a concrete slug (design §13.1):
+#   <engine>/default        e.g. vllm/default — the maintainer's recommended
+#                           config for that engine on the detected topology.
+#   <engine>/<topo>/default e.g. vllm/dual/default — force the topology.
+#   <model>/default         e.g. qwen3.6-27b/default — YOUR preferred config:
+#                           your `.env` pin if set, else the curated pick
+#                           (ENGINE_PREFERENCE walk) for the detected topology.
 #
 # Variant names are derived from the compose registry (the single source of
 # truth); `bash scripts/switch.sh --list` is authoritative. A representative
 # subset (engine/file, file is the docker-compose.<file>.yml stem):
 #
-#   Single-card vLLM:
-#     vllm/default            48K + TQ3 + MTP + vision + tools (recommended)
-#     vllm/long-vision        198K + TQ3 + vision (cliff-safe; Cliff 2 single-prompt >50K still applies)
-#     vllm/long-text          180K + TQ3 + MTP + text-only (Balanced MTP — 60K single-prompt closed via v7.69 + #35975)
-#     vllm/long-text-no-mtp   200K + TQ3 + no MTP + text-only (Max-context — same Cliff 2 closure, more KV pool, slower decode)
-#     vllm/bounded-thinking   180K + TQ3 + structured-CoT FSM in reasoning (recommended grammar: DeepSeek scratchpad — 87.4% combined HE+/LCB v6)
-#     vllm/tools-text         75K + fp8 + MTP + text-only (IDE agents — Cline / Cursor)
-#     vllm/minimal            32K + fp8 (no Genesis, no spec-decode, simplest)
+#   Single-card (⭐ default = beellama/dflash):
+#     beellama/dflash         102K + DFlash spec-dec — single-card DEFAULT (code-fast ~100 TPS)
+#     vllm/minimal            32K + fp8, stable v0.22.0 — the supported vLLM single-card path
+#                             (`vllm/default` resolves here)
+#     (the Genesis/nightly single-card vLLM composes — vllm/default · long-text · long-vision ·
+#      long-text-no-mtp · bounded-thinking · tools-text — were DEPRECATED 2026-05-31, hidden
+#      from --list; see `switch.sh --list --all`. llama.cpp + ik_llama single-card below.)
 #
 #   Dual-card vLLM (TP=2):
-#     vllm/dual             262K + fp8 + 2 streams + vision (recommended dual)
+#     vllm/dual             262K + fp8 + 2 streams + vision (Qwen dual default)
 #     vllm/dual4            262K + fp8 + 4 streams + vision (4× 3090 PCIe baseline)
 #     vllm/dual4-dflash     262K + FP16 + DFlash N=5 + 2 streams + vision (4× 3090 code)
-#     vllm/dual-turbo       262K + TQ3 + 4 streams + vision (multi-tenant)
-#     vllm/dual-dflash      185K + FP16 + DFlash N=5 + vision (peak code TPS)
-#     vllm/dual-dflash-noviz 200K + FP16 + DFlash N=5 + no vision (peak code, max ctx)
-#     vllm/dual-nvlink          262K + fp8 + 2 streams + vision (NVLink stub — auto-detected via dual/)
-#     vllm/dual-nvlink-turbo    262K + TQ3 + 4 streams + vision (NVLink stub — auto-detected via dual/)
-#     vllm/dual-nvlink-dflash   185K + FP16 + DFlash N=5 + vision (NVLink stub — auto-detected via dual/)
-#     vllm/dual-nvlink-dflash-noviz 188K + FP16 + DFlash N=5 + no vision (NVLink stub — auto-detected via dual/)
-#     vllm/gemma-mtp        Gemma-4-31B + Google MTP drafter (32K, bf16 KV, vision — community/experimental, pre-merge)
+#     (NVLink is auto-detected at boot by every dual compose — no separate
+#      nvlink-* variant. Force it with NVLINK_MODE=force_on if auto-detect misses.)
+#     vllm/gemma-31b-dual       Gemma-4-31B dual default — ~224K + bf16 KV + vision, stock v0.24.0 (overlay-free) ⭐
+#       (the v0.22.0 gemma-int8-mtp / gemma-bf16-mtp / qat-w4a16 duals are DEPRECATED — see --list --all)
+#     (other Qwen dual variants — dflash / tq3 / bf16 / int8 — were deprecated
+#      2026-05-31; see `switch.sh --list --all`.)
 #
 #   Single-card llama.cpp:
 #     llamacpp/default      alias for llamacpp/mtp (Q4_K_M MTP, no vision)
@@ -87,119 +100,749 @@ if [[ -f "${ROOT_DIR}/.env" ]]; then
   done < "${ROOT_DIR}/.env"
   unset _env_line _env_key _env_val
 fi
+# #632 — surface a user engine-image pin (ik-llama / llama.cpp images are NOT
+# profile-injected, so a .env/shell pin is the only override path; echo it so a
+# wrong-image boot is never silent).  Fires only when actually set.
+[[ -n "${IK_LLAMA_IMAGE:-}" ]] && echo "[switch] ik-llama image pinned: ${IK_LLAMA_IMAGE}"
+[[ -n "${LLAMACPP_IMAGE:-}" ]] && echo "[switch] llama.cpp image pinned: ${LLAMACPP_IMAGE}"
 
 # Surface the resolved MODEL_DIR + its source so the precedence is unambiguous
 # (the exact confusion behind #425 / #187). Unset → the compose's built-in
 # default applies; preflight_compose_deps notes that case.
+#
+# Routing: normally stdout (unchanged). But on the new `--explain … --json`
+# emit path, the notice goes to stderr instead so the stdout stream stays clean
+# machine-parseable JSON. This is additive — every pre-existing invocation
+# (none of which is `--explain --json`) keeps stdout byte-identical. The guard
+# requires BOTH tokens so a bare (still-erroring) `--json` is untouched.
 if [[ -n "${MODEL_DIR:-}" ]]; then
-  echo "[switch] MODEL_DIR=${MODEL_DIR}"
+  _switch_json_emit=0 _switch_saw_explain=0 _switch_saw_json=0
+  for _switch_arg in "$@"; do
+    [[ "$_switch_arg" == "--explain" ]] && _switch_saw_explain=1
+    [[ "$_switch_arg" == "--json" ]] && _switch_saw_json=1
+  done
+  [[ "$_switch_saw_explain" -eq 1 && "$_switch_saw_json" -eq 1 ]] && _switch_json_emit=1
+  if [[ "$_switch_json_emit" -eq 1 ]]; then
+    echo "[switch] MODEL_DIR=${MODEL_DIR}" >&2
+  else
+    echo "[switch] MODEL_DIR=${MODEL_DIR}"
+  fi
+  unset _switch_json_emit _switch_saw_explain _switch_saw_json _switch_arg
 fi
 
 # Variant tables are DERIVED from the single source of truth
-# (scripts/lib/profiles/compose_registry.py COMPOSE_REGISTRY) so that every
-# registered compose is launchable and there are no launcher-only ghosts
-# (CONTRACT-2b-ii / registry↔launcher parity). The previous hardcoded
-# `declare -A` maps drifted out of the registry (e.g. vllm/dual-int8 shipped
-# in the registry + as dual/int8.yml but was unlaunchable here); deriving
-# eliminates that drift class structurally. `scripts/tests/test-switch-registry-parity.sh`
-# fails CI on ANY mismatch in either direction.
-#
-#   VARIANT_DEFAULT_PORT[<key>]  = registry default_port (matches each
-#                                  compose's "${PORT:-XXXX}:8000" fallback).
-#   VARIANTS[<key>]              = "engine|compose_dir|file" derived from the
-#                                  registry compose_path
-#                                  (<dir>/compose/<file>) + the key's engine
-#                                  prefix (vllm|llamacpp).
+# (scripts/lib/profiles/compose_registry.py COMPOSE_REGISTRY).
 declare -A VARIANT_DEFAULT_PORT=()
 declare -A VARIANTS=()
+declare -A VARIANT_STATUS=()
+declare -A VARIANT_STATUS_NOTE=()
+declare -A VARIANT_CONTAINER=()
+# shellcheck source=lib/registry-emit.sh
+source "${ROOT_DIR}/scripts/lib/registry-emit.sh"
+derive_switch_variant_tables "${ROOT_DIR}"
+# shellcheck source=lib/compose-meta.sh
+source "${ROOT_DIR}/scripts/lib/compose-meta.sh"
 
-_derive_variant_tables() {
-  local emit
-  if ! emit="$(python3 - "$ROOT_DIR" <<'PY' 2>/dev/null
-import sys
-from pathlib import Path
-
-root = Path(sys.argv[1])
-sys.path.insert(0, str(root))
-from scripts.lib.profiles.compose_registry import COMPOSE_REGISTRY
-
-for key, entry in COMPOSE_REGISTRY.items():
-    engine_prefix = key.split("/", 1)[0]
-    # switch.sh engine token: vllm | llamacpp (matches the on-disk tree).
-    engine = "llamacpp" if engine_prefix == "llamacpp" else engine_prefix
-    cp = entry["compose_path"]
-    if "/compose/" not in cp:
-        # A registry entry whose compose_path can't be split is a registry
-        # bug; surface it loudly rather than silently dropping the variant.
-        print(f"__ERR__\t{key}\tcompose_path lacks /compose/: {cp}")
-        continue
-    dirpart, filepart = cp.split("/compose/", 1)
-    compose_dir = f"{dirpart}/compose"
-    port = entry["default_port"]
-    print(f"{key}\t{engine}\t{compose_dir}\t{filepart}\t{port}")
-PY
-  )"; then
-    echo "[switch] ERROR: could not derive variant tables from compose_registry.py" >&2
-    echo "[switch]        (python3 + scripts/lib/profiles/compose_registry.py must be importable)" >&2
-    exit 2
-  fi
-  local key engine cdir cfile port
-  while IFS=$'\t' read -r key engine cdir cfile port; do
-    [[ -n "$key" ]] || continue
-    if [[ "$key" == "__ERR__" ]]; then
-      echo "[switch] ERROR: registry entry not launchable: ${engine} (${cdir})" >&2
-      exit 2
-    fi
-    VARIANTS["$key"]="${engine}|${cdir}|${cfile}"
-    VARIANT_DEFAULT_PORT["$key"]="$port"
-  done <<< "$emit"
-  if [[ ${#VARIANTS[@]} -eq 0 ]]; then
-    echo "[switch] ERROR: derived an empty variant table from compose_registry.py" >&2
-    exit 2
-  fi
+# Detected GPUs as an idx|name|mem_mib|sm;... spec (the launch_compat format).
+# Empty when detection fails -> the #246 arch-aware env simply stays off.
+switch_gpu_profile_spec() {
+  local lines idx name mem sm parts=()
+  lines="$(compose_hw_detect_gpus 2>/dev/null || true)"
+  [[ -n "$lines" ]] || { printf ''; return 0; }
+  while IFS=$'\t' read -r idx name mem sm; do
+    [[ -z "$idx" ]] && continue
+    parts+=("${idx}|${name}|${mem}|${sm}")
+  done <<< "$lines"
+  (IFS=';'; printf '%s' "${parts[*]}")
 }
 
-_derive_variant_tables
+# Teardown is registry-derived from VARIANT_CONTAINER (see down_running()). This
+# replaced a fixed `^(vllm-|llama-cpp-)` regex that missed beellama-/ik-llama-/
+# sglang- containers and leaked their VRAM across switches (#281).
 
-# Container name patterns we'll bring down — covers all current composes
-# AND any vllm/llama-cpp container we don't formally know about (catches
-# locally-built variants and one-off `docker run` instances that would
-# otherwise pin GPU memory invisibly to switch.sh).
-RUNNING_PATTERN="^(vllm-|llama-cpp-)"
+
+PRIMARY_MODEL="${PRIMARY_MODEL:-qwen3.6-27b}"
+
+switch_topology_from_gpus() {
+  local selector="${NVIDIA_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES:-}}" count=0
+  if [[ -n "$selector" && "$selector" != "all" && "$selector" != "void" ]]; then
+    IFS=',' read -ra _switch_gpu_tokens <<< "$selector"
+    local token
+    for token in "${_switch_gpu_tokens[@]}"; do
+      token="${token//[[:space:]]/}"
+      [[ -n "$token" ]] && count=$((count + 1))
+    done
+  elif command -v nvidia-smi >/dev/null 2>&1; then
+    count="$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | sed '/^$/d' | wc -l | tr -d ' ')"
+  else
+    count=1
+  fi
+  case "$count" in
+    0|1) printf 'single' ;;
+    2) printf 'dual' ;;
+    4) printf 'multi4' ;;
+    *) printf 'multi%s' "$count" ;;
+  esac
+}
+
+resolve_default_variant() {
+  # Resolves a `<…>/default` token to a concrete slug. Three forms (design
+  # §13.1):
+  #   <engine>/<topology>/default  → engine-recommendation, explicit topology
+  #   <X>/default                  → dispatch on X: engine name → engine
+  #                                   recommendation; model-id → the user's
+  #                                   model default (.env pin ‖ curated walk)
+  #   anything else                → passthrough (already a concrete slug)
+  local variant="$1" engine topology target
+  if [[ "$variant" =~ ^([^/]+)/(single|dual|multi[0-9]+)/default$ ]]; then
+    engine="${BASH_REMATCH[1]}"
+    topology="${BASH_REMATCH[2]}"
+    if ! target="$(registry_default_target "$ROOT_DIR" "$PRIMARY_MODEL" "$engine" "$topology")"; then
+      echo "ERROR: cannot resolve default variant '${variant}' for primary model ${PRIMARY_MODEL}." >&2
+      exit 1
+    fi
+    printf '%s' "$target"
+    return 0
+  elif [[ "$variant" =~ ^([^/]+)/default$ ]]; then
+    topology="$(switch_topology_from_gpus)"
+    if ! target="$(x_default_dispatch "$ROOT_DIR" "$variant" "$topology" "$PRIMARY_MODEL" "$(primary_sm_from_gpu_spec "$(switch_gpu_profile_spec 2>/dev/null || true)")")"; then
+      echo "ERROR: cannot resolve default variant '${variant}'." >&2
+      exit 1
+    fi
+    printf '%s' "$target"
+    return 0
+  fi
+  printf '%s' "$variant"
+}
 
 usage() {
   sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
   exit 0
 }
 
+# --- PR-B: user-pinnable model defaults (.env) -------------------------------
+ENV_FILE="${ROOT_DIR}/.env"
+
+# Derive (model, pin-key) from a slug, or fail with a message. Echoes
+# "<model>\t<pin-key>".
+slug_model_and_pinkey() {
+  local slug="$1" out
+  if ! out="$(python3 - "$ROOT_DIR" "$slug" <<'PY_SLUGINFO'
+import sys
+from pathlib import Path
+root = Path(sys.argv[1]); sys.path.insert(0, str(root))
+from scripts.lib.profiles.compose_registry import model_of_slug, model_default_pin_key  # noqa: E402
+slug = sys.argv[2]
+model = model_of_slug(slug)
+if not model:
+    print(f"unknown slug {slug!r} — run: scripts/switch.sh --list", file=sys.stderr)
+    raise SystemExit(1)
+print(f"{model}\t{model_default_pin_key(model)}")
+PY_SLUGINFO
+)"; then
+    return 1
+  fi
+  printf '%s' "$out"
+}
+
+# Write KEY=VALUE into .env, replacing any existing line for KEY (round-trips
+# with --clear-default). Preserves all other lines + ordering.
+env_set_key() {
+  local key="$1" value="$2" tmp
+  tmp="$(mktemp)"
+  if [[ -f "$ENV_FILE" ]]; then
+    # Drop any existing assignment for KEY (with or without `export`).
+    grep -vE "^[[:space:]]*(export[[:space:]]+)?${key}=" "$ENV_FILE" > "$tmp" || true
+  fi
+  printf '%s=%s\n' "$key" "$value" >> "$tmp"
+  mv "$tmp" "$ENV_FILE"
+}
+
+# Remove any assignment for KEY from .env (no-op if .env or the key is absent).
+env_clear_key() {
+  local key="$1" tmp
+  [[ -f "$ENV_FILE" ]] || return 0
+  tmp="$(mktemp)"
+  grep -vE "^[[:space:]]*(export[[:space:]]+)?${key}=" "$ENV_FILE" > "$tmp" || true
+  mv "$tmp" "$ENV_FILE"
+}
+
+set_default() {
+  local slug="$1" info model key
+  if [[ -z "${VARIANTS[$slug]:-}" ]]; then
+    echo "[switch] ERROR: '${slug}' is not a known variant — can't pin it." >&2
+    echo "[switch]        Run: bash scripts/switch.sh --list" >&2
+    exit 1
+  fi
+  if ! info="$(slug_model_and_pinkey "$slug")"; then
+    exit 1
+  fi
+  IFS=$'\t' read -r model key <<< "$info"
+  env_set_key "$key" "$slug"
+  echo "[switch] pinned '${slug}' as your default for ${model} (${key} in .env)."
+  echo "[switch] bare 'launch.sh' / '${model%%/*}…' resolves there now; clear it with:"
+  echo "[switch]   bash scripts/switch.sh --clear-default ${model}"
+  exit 0
+}
+
+clear_default() {
+  local model="$1" key
+  key="$(python3 - "$ROOT_DIR" "$model" <<'PY_CLEARKEY'
+import sys
+from pathlib import Path
+root = Path(sys.argv[1]); sys.path.insert(0, str(root))
+from scripts.lib.profiles.compose_registry import model_default_pin_key  # noqa: E402
+print(model_default_pin_key(sys.argv[2]))
+PY_CLEARKEY
+)"
+  if [[ -f "$ENV_FILE" ]] && grep -qE "^[[:space:]]*(export[[:space:]]+)?${key}=" "$ENV_FILE"; then
+    env_clear_key "$key"
+    echo "[switch] cleared your pinned default for ${model} (removed ${key} from .env)."
+  else
+    echo "[switch] no pinned default set for ${model} (${key} not in .env) — nothing to clear."
+  fi
+  exit 0
+}
+
+# Map a registry status word to the marker shown in --list and to launch
+# gating. `production` → unmarked; `caveats` → "(caveats)"; the (NA) set
+# (experimental/preview/upstream-gated/deprecated) → "(NA: <word>)".
+status_marker() {
+  case "$1" in
+    production|"") printf '' ;;
+    caveats)       printf '(caveats)' ;;
+    *)             printf '(NA: %s)' "$1" ;;
+  esac
+}
+
+# Map a topology word (as `switch_topology_from_gpus` emits it, or as a
+# compose file's first path segment carries it) to a numeric rank, so we can
+# compare "can this machine run that slug?". single=1, dual=2, multi*=3+.
+# Unknown → 9 (sorts last; never filtered out by accident). Echoes the rank.
+topology_rank() {
+  case "$1" in
+    single)  printf '1' ;;
+    dual)    printf '2' ;;
+    multi*)  printf '3' ;;
+    *)       printf '9' ;;
+  esac
+}
+
+# Is GPU detection RELIABLE for the hardware filter? True iff we have a
+# concrete signal: an explicit selector (CUDA/NVIDIA_VISIBLE_DEVICES naming
+# specific GPUs) OR nvidia-smi present AND reporting ≥1 GPU. Without either we
+# can't trust the count — switch_topology_from_gpus falls back to "single" in
+# that case, but for the --list filter we must FAIL OPEN (show all) rather than
+# hide dual/multi based on a guess. Returns 0 (reliable) / 1 (unknown).
+list_gpu_detect_reliable() {
+  local selector="${NVIDIA_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES:-}}"
+  if [[ -n "$selector" && "$selector" != "all" && "$selector" != "void" ]]; then
+    return 0
+  fi
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    local n
+    n="$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | sed '/^$/d' | wc -l | tr -d ' ')"
+    [[ "${n:-0}" -ge 1 ]] && return 0
+  fi
+  return 1
+}
+
+# Human GPU-count label for a detected topology word, for the filter note
+# (e.g. "single" → "1", "dual" → "2", "multi4" → "4", "multi6" → "6").
+topology_gpu_label() {
+  case "$1" in
+    single)  printf '1' ;;
+    dual)    printf '2' ;;
+    multi*)  printf '%s' "${1#multi}" ;;
+    *)       printf '?' ;;
+  esac
+}
+
 list_variants() {
-  echo "Available variants:"
+  # Grouped by model · topology so each slug's binding is visible at a glance.
+  # VARIANTS stores "<engine>|<dir>|<file>" where
+  #   dir  = models/<model>/<engine>/compose      → model is dir field 2
+  #   file = <topology>/<quant>/<serving>.yml      → topology/quant/serving
+  # (the registry emitter splits compose_path on "/compose/", so dir stops at
+  #  /compose and the topology+quant live in file). Engine is the slug prefix.
+  # The trailing column is the health marker derived from the registry status.
+  #
+  # Hardware filter (PR-C): a dual/multi slug can't run on a 1-GPU box, so by
+  # default we hide slugs whose topology rank exceeds what this machine can run
+  # (detected via switch_topology_from_gpus, which reads CUDA/NVIDIA_VISIBLE_-
+  # DEVICES then nvidia-smi). `--list --all` (LIST_ALL=1) shows everything for
+  # discoverability. Fail-open: if detection is unavailable we show ALL rather
+  # than hide based on a failed probe.
+  local show_all="${LIST_ALL:-0}" detected_topo max_rank
+  detected_topo="$(switch_topology_from_gpus 2>/dev/null || true)"
+  if [[ -z "$detected_topo" ]] || ! list_gpu_detect_reliable; then
+    # Detection unavailable / count unknown → fail-open, show everything. We do
+    # NOT hide dual/multi off the back of switch_topology_from_gpus's "single"
+    # fallback when there's no real signal (no selector, no nvidia-smi).
+    show_all=1
+    max_rank=9
+  else
+    max_rank="$(topology_rank "$detected_topo")"
+  fi
+
+  echo "Available variants — grouped by model · topology (right cols: <quant>/<serving>.yml · max-ctx + health):"
+  echo "  Health: bare max-ctx = production · (caveats, <ctx>) = works w/ documented limits · (NA: …, <ctx>) = needs --force"
+  echo "  Context: a single value = registry matches the compose default · 'A/B' = validated(registry)/compose-default mismatch"
+
+  # Counts: split into VISIBLE vs HIDDEN by the hardware filter, so the header
+  # reflects what's actually shown (+ how many were hidden). Health split is
+  # over the VISIBLE set; the by-topology hidden tally drives the note.
+  local _prod=0 _cav=0 _na=0 _hidden=0 _dep_hidden=0 _gated_hidden=0 _inc_hidden=0
+  declare -A _seen_models=() _hidden_by_topo=()
   for v in "${!VARIANTS[@]}"; do
-    IFS='|' read -r eng dir file <<< "${VARIANTS[$v]}"
-    echo "  ${v}  →  ${dir}/${file}"
-  done | sort
+    IFS='|' read -r _e _d _f <<< "${VARIANTS[$v]}"
+    IFS=/ read -ra _ds <<< "$_d"
+    IFS=/ read -ra _fs <<< "$_f"
+    local _vtopo="${_fs[0]:-unknown}" _vrank
+    _vrank="$(topology_rank "$_vtopo")"
+    # Hide non-active statuses by default: deprecated (tombstoned / going away),
+    # upstream-gated (PARKED — blocked on an external fix, not abandoned), and
+    # incubating (pre-experimental — works but not ready for the actionable list).
+    # --all reveals all three.
+    if [[ "$show_all" != "1" ]]; then
+      case "${VARIANT_STATUS[$v]:-production}" in
+        deprecated)     _dep_hidden=$((_dep_hidden + 1)); continue ;;
+        upstream-gated) _gated_hidden=$((_gated_hidden + 1)); continue ;;
+        incubating)     _inc_hidden=$((_inc_hidden + 1)); continue ;;
+      esac
+    fi
+    if [[ "$show_all" != "1" && "$_vrank" -gt "$max_rank" ]]; then
+      _hidden=$((_hidden + 1))
+      _hidden_by_topo["$_vtopo"]=$(( ${_hidden_by_topo["$_vtopo"]:-0} + 1 ))
+      continue
+    fi
+    _seen_models["${_ds[1]:-?}"]=1
+    case "${VARIANT_STATUS[$v]:-production}" in
+      production) _prod=$((_prod + 1)) ;;
+      caveats)    _cav=$((_cav + 1)) ;;
+      *)          _na=$((_na + 1)) ;;
+    esac
+  done
+  local _visible=$(( _prod + _cav + _na ))
+  # List the hidden topologies in rank order so both the header tally and the
+  # filter note name exactly what's missing (e.g. "dual/multi4"). Pure bash —
+  # no external grep/sort dependency.
+  local _topo_list="" _t
+  local _hidden_topos
+  _hidden_topos="$(
+    for _t in "${!_hidden_by_topo[@]}"; do
+      printf '%s\t%s\n' "$(topology_rank "$_t")" "$_t"
+    done | sort -k1,1n -k2,2 | cut -f2
+  )"
+  while IFS= read -r _t; do
+    [[ -n "$_t" ]] || continue
+    _topo_list="${_topo_list:+$_topo_list/}$_t"
+  done <<< "$_hidden_topos"
+  local _hidden_note=""
+  if [[ "$_hidden" -gt 0 ]]; then
+    _hidden_note="  (+${_hidden} ${_topo_list} hidden — --all)"
+  fi
+  local _dep_note=""
+  if [[ "$_dep_hidden" -gt 0 ]]; then
+    _dep_note="  (+${_dep_hidden} deprecated hidden — --all)"
+  fi
+  local _gated_note=""
+  if [[ "$_gated_hidden" -gt 0 ]]; then
+    _gated_note="  (+${_gated_hidden} parked/upstream-gated hidden — --all)"
+  fi
+  local _inc_note=""
+  if [[ "$_inc_hidden" -gt 0 ]]; then
+    _inc_note="  (+${_inc_hidden} incubating hidden — --all)"
+  fi
+  echo "  Models: ${#_seen_models[@]} · variants: ${_visible} (${_prod} production · ${_cav} caveats · ${_na} NA)${_hidden_note}${_dep_note}${_gated_note}${_inc_note}"
+
+  {
+    for v in "${!VARIANTS[@]}"; do
+      IFS='|' read -r eng dir file <<< "${VARIANTS[$v]}"
+      IFS=/ read -ra dseg <<< "$dir"    # dseg[1] = model
+      IFS=/ read -ra fseg <<< "$file"   # fseg[0]=topology fseg[1]=quant fseg[2]=serving
+      topo="${fseg[0]:-unknown}"
+      rank="$(topology_rank "$topo")"
+      if [[ "$show_all" != "1" ]]; then
+        case "${VARIANT_STATUS[$v]:-production}" in deprecated|upstream-gated|incubating) continue ;; esac
+      fi
+      if [[ "$show_all" != "1" && "$rank" -gt "$max_rank" ]]; then
+        continue
+      fi
+      marker="$(status_marker "${VARIANT_STATUS[$v]:-production}")"
+      printf '%s\t%d\t%s\t%s\t%s/%s\t%s\t%s\n' \
+        "${dseg[1]:-?}" "$rank" "$topo" "$v" "${fseg[1]:-?}" "${fseg[2]:-${file}}" "$marker" "${VARIANT_CTX[$v]:-}"
+    done
+  } | sort -t$'\t' -k1,1 -k2,2n -k4,4 | awk -F'\t' '
+    { rows[NR] = $0; cnt[$1]++ }
+    END {
+      for (i = 1; i <= NR; i++) {
+        split(rows[i], f, "\t")
+        if (f[1] != m) { printf "\n%s  (%d variants)\n", f[1], cnt[f[1]]; m = f[1]; t = "" }
+        tl = (f[3] == t ? "" : f[3]); t = f[3]
+        ann = f[6]; ctx = f[7]
+        if (ctx != "") {
+          if (ann == "") ann = ctx                  # production: bare max-ctx (stays "unmarked")
+          else sub(/\)$/, ", " ctx ")", ann)         # caveats / NA: fold ctx into the paren
+        }
+        printf "  %-8s %-34s %-36s %s\n", tl, f[4], f[5], ann
+      }
+    }
+  '
+  # Don't silently hide: one-line note when (and only when) the filter dropped
+  # something. No note under --all or when nothing was hidden.
+  if [[ "$_hidden" -gt 0 ]]; then
+    local _gpu_label
+    _gpu_label="$(topology_gpu_label "$detected_topo")"
+    echo
+    echo "(showing ${detected_topo}-GPU configs for this ${_gpu_label}-GPU machine — use --list --all for ${_topo_list})"
+  fi
+  echo
+  show_defaults_view
+  echo
+  echo "Switch to one:  bash scripts/switch.sh <variant>"
+  echo "Or via wizard:  bash scripts/launch.sh   (or: launch.sh --variant <variant>)"
+  exit 0
+}
+
+# Discoverability (design §7): per model, what `<model>/default` resolves to on
+# the DETECTED topology, marked user-pin vs curated, with a hint to pin. Shared
+# between `--list` (appended) and `--defaults` (standalone). Reads the .env pin
+# straight from the loaded environment (callers load .env above).
+show_defaults_view() {
+  local topology
+  topology="$(switch_topology_from_gpus)"
+  echo "Defaults — what \`<model>/default\` resolves to on this rig (${topology}):"
+  echo "  (pin = your .env pin · curated = ENGINE_PREFERENCE walk · — = none for this topology)"
+  local models model pin_key pin_value resolved source note
+  models="$(python3 -c "import sys; sys.path.insert(0,'$ROOT_DIR'); from scripts.lib.profiles.compose_registry import model_set; print('\n'.join(sorted(model_set())))")"
+  while IFS= read -r model; do
+    [[ -n "$model" ]] || continue
+    pin_key="$(python3 -c "import sys; sys.path.insert(0,'$ROOT_DIR'); from scripts.lib.profiles.compose_registry import model_default_pin_key; print(model_default_pin_key('$model'))")"
+    pin_value="${!pin_key:-}"
+    note=""
+    if resolved="$(model_default_target "$ROOT_DIR" "$model" "$topology" 2>/dev/null)"; then
+      if [[ -n "$pin_value" && "$resolved" == "$pin_value" ]]; then
+        source="pin"
+      elif [[ -n "$pin_value" ]]; then
+        source="curated"
+        note="  (your pin ${pin_value} was ignored — invalid/mismatched; see warnings)"
+      else
+        source="curated"
+      fi
+      printf '  %-18s %-32s [%s]%s\n' "$model" "$resolved" "$source" "$note"
+    else
+      printf '  %-18s %-32s [%s]\n' "$model" "—" "pick explicitly"
+    fi
+  done <<< "$models"
+  echo "  Pin your own:    bash scripts/switch.sh --set-default <slug>"
+  echo "  Clear a pin:     bash scripts/switch.sh --clear-default <model>"
+}
+
+defaults_view_standalone() {
+  show_defaults_view
+  exit 0
+}
+
+# --- --explain: one slug's full story ----------------------------------------
+#
+# `--explain <slug> [--json]` prints ONE slug's full story: its registry
+# variant row (status / port / container / ctx) joined with the engine / model
+# / hardware / drafter facts, the kv-calc fit verdict for the local card(s),
+# and the measured BENCHMARKS.md row if one exists. `--json` emits the same
+# data as a structured object; the default is a readable block.
+#
+# This is a READ-ONLY, terminal action — it never brings a container up/down,
+# never touches .env, and is strictly additive to the existing flag set.
+
+# Map the local GPU (nvidia-smi name) to a hardware-profile id under
+# scripts/lib/profiles/hardware/<id>.yml, which is what kv-calc's `--fit --card`
+# expects. Falls back to rtx-3090 (this rig's card) when detection is
+# unavailable so --explain still produces a fit verdict offline. CLUB3090_CARD
+# overrides the detection explicitly. Echoes the card id.
+explain_detect_card() {
+  if [[ -n "${CLUB3090_CARD:-}" ]]; then
+    printf '%s' "$CLUB3090_CARD"
+    return 0
+  fi
+  local name=""
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    name="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || true)"
+  fi
+  case "$name" in
+    *"RTX 3090 Ti"*) printf 'rtx-3090-ti' ;;
+    *"RTX 3090"*)    printf 'rtx-3090' ;;
+    *"RTX 4090"*)    printf 'rtx-4090' ;;
+    *"RTX 5090"*)    printf 'rtx-5090' ;;
+    *"A5000"*)       printf 'rtx-a5000' ;;
+    *"A100"*)        printf 'a100-40gb' ;;
+    *"H100"*)        printf 'h100-80gb' ;;
+    *)               printf 'rtx-3090' ;;   # this rig's default
+  esac
+}
+
+# Emit the joined registry/engine/model/hardware/drafter facts for one slug as
+# a single JSON object on stdout (reuses COMPOSE_REGISTRY + the slug helpers —
+# never reimplements the row). Exits non-zero with a message on an unknown slug.
+explain_registry_json() {
+  local root="$1" slug="$2"
+  python3 - "$root" "$slug" <<'PY_EXPLAIN_REG'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+from scripts.lib.profiles.compose_registry import (  # noqa: E402
+    COMPOSE_REGISTRY,
+    model_of_slug,
+    slug_topology,
+)
+
+slug = sys.argv[2]
+entry = COMPOSE_REGISTRY.get(slug)
+if entry is None:
+    print(f"unknown slug {slug!r} — run: scripts/switch.sh --list", file=sys.stderr)
+    raise SystemExit(1)
+
+cp = entry["compose_path"]
+serving = cp.rsplit("/", 1)[-1] if "/" in cp else cp
+out = {
+    "slug": slug,
+    "model": entry.get("model") or model_of_slug(slug),
+    "engine": entry.get("engine"),
+    "topology": slug_topology(slug),
+    "weights_variant": entry.get("weights_variant"),
+    "workload": entry.get("workload"),
+    "drafter": entry.get("drafter"),
+    "kv_format": entry.get("kv_format"),
+    "tp": entry.get("tp"),
+    "pp": entry.get("pp"),
+    "max_ctx": entry.get("max_ctx"),
+    "max_num_seqs": entry.get("max_num_seqs"),
+    "mem_util": entry.get("mem_util"),
+    "vision": bool(entry.get("category") == "vision")
+    or "vision" in (entry.get("workload") or ""),
+    "requires_nvlink": entry.get("requires_nvlink", False),
+    "required_sm": entry.get("required_sm"),
+    "default_port": entry.get("default_port"),
+    "kvcalc_key": entry.get("kvcalc_key"),
+    "status": entry.get("status") or "production",
+    "status_note": entry.get("status_note") or "",
+    "compose_path": cp,
+    "serving_file": serving,
+}
+print(json.dumps(out))
+PY_EXPLAIN_REG
+}
+
+# Call the sibling kv-calc `--fit <slug> --card <id> --json` contract and echo
+# its JSON on stdout. That flag is being built in parallel; if it isn't wired
+# yet (or errors), echo an "unavailable" object so --explain still completes —
+# the LIVE integration is asserted in the Guard phase, not here.
+explain_fit_json() {
+  local root="$1" slug="$2" card="$3" out
+  # Capture kv-calc's output regardless of exit status: it emits a structured
+  # {"verdict":"unknown",...} (RC=2) for an unresolved card, which we want to
+  # surface — not hide behind the "unavailable" stub. Only fall back to the
+  # stub when there is genuinely no output (kv-calc absent / crashed).
+  out="$(python3 "${root}/tools/kv-calc.py" --fit "$slug" --card "$card" --json 2>/dev/null)" || true
+  if [[ -n "$out" ]]; then
+    printf '%s' "$out"
+    return 0
+  fi
+  printf '{"available": false, "card": "%s", "reason": "kv-calc --fit not available"}' "$card"
+}
+
+# Find the measured BENCHMARKS.md row(s) for a slug's compose serving-file, if
+# any. BENCHMARKS rows reference the compose by its `<serving>.yml` filename in
+# a backtick-quoted leading table cell (e.g. "| `minimal.yml` (…) | …"). We emit
+# a JSON array of {row, columns[]} objects (empty array when none match) so the
+# assembler stays language-agnostic. Pure stdlib — no markdown dependency.
+explain_benchmarks_json() {
+  local root="$1" serving="$2"
+  python3 - "$root" "$serving" <<'PY_EXPLAIN_BENCH'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+serving = sys.argv[2]
+
+bench = root / "BENCHMARKS.md"
+rows = []
+if bench.is_file() and serving:
+    needle = "`" + serving + "`"
+    for line in bench.read_text().splitlines():
+        s = line.strip()
+        if not s.startswith("|"):
+            continue
+        cells = [c.strip() for c in s.strip("|").split("|")]
+        if not cells:
+            continue
+        # Match only when the FIRST (Compose) cell names this serving file, so
+        # we don't pick up incidental mentions elsewhere in the table.
+        if needle in cells[0]:
+            rows.append({"row": s, "columns": cells})
+
+print(json.dumps(rows))
+PY_EXPLAIN_BENCH
+}
+
+# Assemble the full story object (registry row + fit verdict + benchmarks) for
+# one slug and print it as a single JSON object on stdout. Exits non-zero (and
+# the heredoc message goes to stderr) when the slug is unknown.
+explain_assemble_json() {
+  local root="$1" slug="$2" card reg fit bench
+  card="$(explain_detect_card)"
+  if ! reg="$(explain_registry_json "$root" "$slug")"; then
+    return 1
+  fi
+  fit="$(explain_fit_json "$root" "$slug" "$card")"
+  local serving
+  serving="$(printf '%s' "$reg" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("serving_file",""))')"
+  bench="$(explain_benchmarks_json "$root" "$serving")"
+  python3 - "$reg" "$fit" "$bench" "$card" <<'PY_EXPLAIN_ASSEMBLE'
+import json
+import sys
+
+reg = json.loads(sys.argv[1])
+fit = json.loads(sys.argv[2])
+bench = json.loads(sys.argv[3])
+card = sys.argv[4]
+
+out = {
+    "slug": reg["slug"],
+    "registry": reg,
+    "card": card,
+    "fit": fit,
+    "benchmarks": bench,
+}
+print(json.dumps(out, indent=2))
+PY_EXPLAIN_ASSEMBLE
+}
+
+# Render the assembled story object as a readable human block on stdout.
+explain_render_human() {
+  local obj="$1"
+  python3 - "$obj" <<'PY_EXPLAIN_HUMAN'
+import json
+import sys
+
+obj = json.loads(sys.argv[1])
+reg = obj["registry"]
+
+
+def show(label, value):
+    if value is None or value == "":
+        value = "—"
+    print(f"  {label:<14} {value}")
+
+
+print(f"{obj['slug']}  —  {reg.get('model') or '?'}  ({reg.get('topology') or '?'})")
+status = reg.get("status") or "production"
+note = reg.get("status_note") or ""
+status_line = status if not note else f"{status}  ·  {note}"
+print(f"  status:        {status_line}")
+print()
+print("  Config (registry):")
+show("engine", reg.get("engine"))
+show("weights", reg.get("weights_variant"))
+show("workload", reg.get("workload"))
+show("drafter", reg.get("drafter"))
+show("KV", reg.get("kv_format"))
+show("TP / PP", f"{reg.get('tp')} / {reg.get('pp')}")
+show("max ctx", reg.get("max_ctx"))
+show("max seqs", reg.get("max_num_seqs"))
+show("mem-util", reg.get("mem_util"))
+show("vision", "yes" if reg.get("vision") else "no")
+show("port", reg.get("default_port"))
+show("compose", reg.get("compose_path"))
+
+fit = obj.get("fit") or {}
+print()
+print(f"  Fit verdict (card={obj.get('card')}):")
+if not fit.get("available", True) or "verdict" not in fit:
+    reason = fit.get("reason") or "no fit data"
+    print(f"    (unavailable — {reason})")
+else:
+    verdict = fit.get("verdict", "?")
+    vram = fit.get("vram_est_gb")
+    band = fit.get("band_gb")
+    mctx = fit.get("max_ctx")
+    line = f"    {verdict}"
+    if vram is not None:
+        line += f"  (~{vram:.1f} GB"
+        if band is not None:
+            line += f" ±{band:.1f}"
+        line += ")"
+    if mctx is not None:
+        line += f"  max ctx {mctx}"
+    print(line)
+    if fit.get("error"):
+        print(f"      - {fit['error']}")
+
+bench = obj.get("benchmarks") or []
+print()
+print("  Measured (BENCHMARKS.md):")
+if not bench:
+    print("    (no measured row for this compose yet)")
+else:
+    for b in bench:
+        print(f"    {b['row']}")
+PY_EXPLAIN_HUMAN
+}
+
+explain_variant() {
+  local slug="$1" as_json="$2" resolved obj
+  # Honour the same `<…>/default` token resolution as a normal launch, so
+  # `--explain vllm/default` explains the slug it WOULD launch.
+  resolved="$(resolve_default_variant "$slug")"
+  if ! obj="$(explain_assemble_json "$ROOT_DIR" "$resolved")"; then
+    echo "[switch] ERROR: cannot explain '${slug}'." >&2
+    echo "[switch]        Run: bash scripts/switch.sh --list" >&2
+    exit 1
+  fi
+  if [[ "$as_json" == "1" ]]; then
+    printf '%s\n' "$obj"
+  else
+    explain_render_human "$obj"
+  fi
   exit 0
 }
 
 down_running() {
-  local running
-  running=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -E "$RUNNING_PATTERN" || true)
-  if [[ -z "$running" ]]; then
-    echo "[switch] no club-3090 container running"
-    return
-  fi
+  # Closed-world teardown: bring down ONLY containers switch.sh manages — those
+  # whose name is in the registry-derived VARIANT_CONTAINER set — each via its
+  # own compose file (+ --remove-orphans). Containers we don't manage (the
+  # auxiliary services stack, estate instances with a distinct ESTATE_CONTAINER
+  # name, unrelated user containers) are left untouched; gpu_preflight() is the
+  # safety net for any non-managed process still pinning the GPU. This catches
+  # beellama-/ik-llama-/sglang- containers the old prefix regex missed (#281).
+  local running c
+  running=$(docker ps --format '{{.Names}}' 2>/dev/null || true)
+  # Set of container names we manage (deduped, non-empty values of the map).
+  local -A managed=()
+  local slug
+  for slug in "${!VARIANT_CONTAINER[@]}"; do
+    [[ -n "${VARIANT_CONTAINER[$slug]}" ]] && managed["${VARIANT_CONTAINER[$slug]}"]=1
+  done
+  local brought_down=0
   for c in $running; do
+    [[ -n "${managed[$c]:-}" ]] || continue   # not ours — leave it alone
+    brought_down=1
     echo "[switch] bringing down: ${c}"
-    # find the compose dir from the container's labels — fallback to direct stop
+    # derive the compose dir/file from the container's labels — stop fallback
     local lbl_dir lbl_file
     lbl_dir=$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project.working_dir"}}' "$c" 2>/dev/null || true)
     lbl_file=$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project.config_files"}}' "$c" 2>/dev/null || true)
     if [[ -n "$lbl_dir" && -n "$lbl_file" ]]; then
-      (cd "$lbl_dir" && ${COMPOSE_BIN} -f "$lbl_file" down) || docker stop "$c" >/dev/null
+      (cd "$lbl_dir" && ${COMPOSE_BIN} -f "$lbl_file" down --remove-orphans) || docker stop "$c" >/dev/null
     else
       docker stop "$c" >/dev/null
     fi
   done
+  [[ "$brought_down" -eq 1 ]] || echo "[switch] no club-3090 container running"
 }
 
 gpu_preflight() {
@@ -271,9 +914,10 @@ gpu_preflight() {
 }
 
 export_variant_engine_pin() {
-  local variant="$1" output line key value
-  [[ "$variant" == vllm/* ]] || return 0
-  if ! output="$(python3 "$LAUNCH_PROFILE" resolve-variant-pin --variant "$variant" --format shell 2>&1)"; then
+  local variant="$1" output line key value gpu_spec
+  [[ "$variant" == vllm/* || "$variant" == beellama/* ]] || return 0
+  gpu_spec="$(switch_gpu_profile_spec 2>/dev/null || true)"
+  if ! output="$(python3 "$LAUNCH_PROFILE" resolve-variant-pin --variant "$variant" --format shell --gpu-spec "$gpu_spec" 2>&1)"; then
     echo "$output" >&2
     exit 2
   fi
@@ -281,14 +925,62 @@ export_variant_engine_pin() {
     [[ -n "$key" ]] || continue
     case "$key" in
       VLLM_NIGHTLY_SHA) export VLLM_NIGHTLY_SHA="$value" ;;
+      VLLM_IMAGE) export VLLM_IMAGE="$value" ;;
+      BEELLAMA_IMAGE) export BEELLAMA_IMAGE="$value" ;;
+      # #246 arch-aware env (pilot slugs; hardware-profile balanced default)
+      KV_CACHE_DTYPE)
+        export KV_CACHE_DTYPE="$value"
+        echo "[switch] arch-aware KV dtype: ${value} (hardware-profile default for detected GPUs — #246)" ;;
+      MAX_NUM_SEQS)
+        export MAX_NUM_SEQS="$value"
+        echo "[switch] memory-envelope concurrency: MAX_NUM_SEQS=${value} (measured for this card class — #246 Phase 2)" ;;
+      GPU_MEMORY_UTILIZATION)
+        export GPU_MEMORY_UTILIZATION="$value"
+        echo "[switch] memory-fraction floor: GPU_MEMORY_UTILIZATION=${value} (unified-memory card can't safely give the default — #246 Phase 2)" ;;
+      VLLM_USE_DEEP_GEMM)
+        export VLLM_USE_DEEP_GEMM="$value"
+        echo "[switch] fp8 weights: VLLM_USE_DEEP_GEMM=${value} (consumer card has no DeepGEMM recipe — disc #571)" ;;
+      VLLM_ATTENTION_BACKEND) export VLLM_ATTENTION_BACKEND="$value" ;;
       *) echo "[switch] ERROR: unexpected engine pin export: $key" >&2; exit 2 ;;
     esac
   done <<< "$output"
-  if [[ -n "${VLLM_IMAGE:-}" ]]; then
-    echo "[switch] vLLM image override: ${VLLM_IMAGE} (profile nightly SHA ${VLLM_NIGHTLY_SHA})"
+  if [[ -n "${BEELLAMA_IMAGE:-}" ]]; then
+    echo "[switch] beellama image: ${BEELLAMA_IMAGE}"
+  elif [[ -n "${VLLM_IMAGE:-}" ]]; then
+    if [[ -n "${VLLM_NIGHTLY_SHA:-}" ]]; then
+      echo "[switch] vLLM image override: ${VLLM_IMAGE} (profile nightly SHA ${VLLM_NIGHTLY_SHA})"
+    else
+      echo "[switch] vLLM image: ${VLLM_IMAGE}"
+    fi
   else
-    echo "[switch] vLLM nightly SHA: ${VLLM_NIGHTLY_SHA}"
+    echo "[switch] vLLM nightly SHA: ${VLLM_NIGHTLY_SHA:-unset}"
   fi
+}
+
+status_gate() {
+  # Lifecycle gate (PR-A health flag). production → launch silently;
+  # caveats → launch with a one-line notice; the (NA) set
+  # (experimental/preview/upstream-gated/deprecated) → warn + require --force.
+  local v="$1" status note
+  status="${VARIANT_STATUS[$v]:-production}"
+  note="${VARIANT_STATUS_NOTE[$v]:-}"
+  case "$status" in
+    production)
+      ;;
+    caveats)
+      echo "[switch] NOTE: '${v}' is ⚠️ production-with-caveats.${note:+  ${note}}"
+      ;;
+    *)
+      if [[ "${FORCE:-0}" != "1" ]]; then
+        echo "[switch] ERROR: '${v}' is (NA: ${status}) — not a reliable config.${note:+  ${note}}" >&2
+        echo "[switch]        It is surfaced for visibility, but won't launch without an explicit override." >&2
+        echo "[switch]        Re-run with --force if you know what you're doing:" >&2
+        echo "[switch]          bash scripts/switch.sh --force ${v}" >&2
+        exit 1
+      fi
+      echo "[switch] WARNING: forcing (NA: ${status}) variant '${v}'.${note:+  ${note}}"
+      ;;
+  esac
 }
 
 up_variant() {
@@ -298,6 +990,7 @@ up_variant() {
     echo "Run: bash scripts/switch.sh --list" >&2
     exit 1
   fi
+  status_gate "$v"
   IFS='|' read -r eng dir file <<< "${VARIANTS[$v]}"
   local full_dir="${ROOT_DIR}/${dir}"
   if [[ ! -f "${full_dir}/${file}" ]]; then
@@ -320,14 +1013,27 @@ up_variant() {
     preflight_compose_deps "${full_dir}/${file}" || exit 1
     if [[ "$eng" == "vllm" ]]; then
       preflight_compose_hardware "${full_dir}/${file}" "$v" "${FORCE:-0}" || exit 1
+      # Free-VRAM gate: fail fast (not a 600s restart-loop) when the GPUs don't have
+      # room for this config's gpu_memory_utilization — e.g. a desktop/other scene
+      # still holding VRAM after a switch (club-3090 #535). Runs AFTER down_running(),
+      # so its settle-retry also covers the just-torn-down container's VRAM lag.
+      preflight_compose_gpu_fit "${full_dir}/${file}" "${FORCE:-0}" || exit 1
     fi
+    # LMCache host-RAM guard — runs even under --force (incubating LMCache slugs
+    # launch WITH --force, yet over-sizing --l1-size-gb can OOM the host; #133).
+    # No-op for composes without an LMCache-l1-gb metadata header.
+    preflight_lmcache_ram "${full_dir}/${file}" || exit 1
     preflight_kv_format_hint "${full_dir}/${file}" || true
+    # Single-card util-override guard — runs even under --force (the nvfp4 slug
+    # launches with --force, and util=0.92 on one card OOMs the tool-prefill; #617).
+    preflight_single_card_util "${full_dir}/${file}" "$v" || true
   fi
   gpu_preflight
 
   echo "[switch] bringing up: ${v}  (${dir}/${file})"
   export_variant_engine_pin "$v"
-  (cd "${full_dir}" && ${COMPOSE_BIN} -f "${file}" up -d)
+  preflight_ik_llama_image "$v"   # #633 — cu12 fallback on <13.2 drivers (unless pinned)
+  (cd "${full_dir}" && ${COMPOSE_BIN} -f "${file}" up -d --remove-orphans)
 }
 
 resolve_ready_url() {
@@ -345,10 +1051,8 @@ wait_ready() {
   # Find the container we just brought up so we can detect crashes mid-boot
   # AND surface stage progress markers from its logs while we wait.
   local container
-  container=$(docker ps --format '{{.Names}}' 2>/dev/null \
-    | grep -E '^(vllm-qwen36-27b|llama-cpp-qwen36-27b|vllm-gemma-4-31b)' | head -1)
-
-  if [[ -z "$container" ]]; then
+  container="${VARIANT_CONTAINER[$VARIANT]:-}"
+  if [[ -z "$container" ]] || ! docker ps --format '{{.Names}}' 2>/dev/null | grep -Fxq -- "$container"; then
     # Compose started but no container is up — almost always a syntax error
     # or env-var issue caught before vLLM even started.
     echo "[switch] ERROR: no container running after 'compose up' — boot failed before vLLM started." >&2
@@ -397,19 +1101,70 @@ wait_ready() {
     fi
   done
   echo "[switch] ✓ ready (${elapsed}s)"
+  # F3 (CLI parity with c3's serving card): print the USABLE endpoint — the LAN
+  # URL an agent/client should point at, the served model id, and the auth
+  # status. LANIP's source of truth is the repo .env (#512, loaded above; shell
+  # env wins); fall back to the shared c3_lan_ip helper in a SUBSHELL
+  # (comfyui-paths.sh sets studio paths at source time — keep that contained),
+  # then localhost.
+  local _lanip _served _port
+  _lanip="${LANIP:-}"
+  if [[ -z "$_lanip" && -f "${ROOT_DIR}/services/comfyui/comfyui-paths.sh" ]]; then
+    _lanip="$(bash -c ". '${ROOT_DIR}/services/comfyui/comfyui-paths.sh' >/dev/null 2>&1; c3_lan_ip" 2>/dev/null || true)"
+  fi
+  _lanip="${_lanip:-localhost}"
+  _port="${READY_URL#*://}"; _port="${_port#*:}"; _port="${_port%%/*}"
+  _served="$(curl -sf --max-time 3 "${READY_URL}" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"][0]["id"])' 2>/dev/null || true)"
+  echo "[switch] ▶ API:  http://${_lanip}:${_port}/v1   (model: ${_served:-?} · OpenAI-compatible · no auth)"
 }
 
 # --- arg parsing ---
 WAIT=1
 FORCE="${FORCE:-0}"
 VARIANT=""
+LIST_REQUESTED=0
+LIST_ALL=0
+OWUI_REGISTER=0
+EXPLAIN_REQUESTED=0
+EXPLAIN_SLUG=""
+EXPLAIN_JSON=0
+JSON_FLAG_SEEN=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) usage ;;
-    --list) list_variants ;;
+    # --list is deferred (not run inline) so `--list --all` works in either
+    # order; --all toggles the hardware filter off. --list-all is the sibling.
+    --list) LIST_REQUESTED=1 ;;
+    --all) LIST_ALL=1 ;;
+    --list-all) LIST_REQUESTED=1; LIST_ALL=1 ;;
+    # --explain <slug> [--json] is a deferred terminal action (like --list), so
+    # `--explain X --json` and `--explain --json X` both work. The slug is the
+    # next non-flag token; --json (below) toggles structured output.
+    --explain)
+      EXPLAIN_REQUESTED=1
+      if [[ -n "${2:-}" && "$2" != --* ]]; then
+        EXPLAIN_SLUG="$2"
+        shift
+      fi
+      ;;
+    # --json only modifies --explain. We record it so a standalone --json (no
+    # --explain) still falls through to the same "Unknown flag" error as before
+    # (preserved byte-for-byte below the loop).
+    --json) EXPLAIN_JSON=1; JSON_FLAG_SEEN=1 ;;
+    --defaults) defaults_view_standalone ;;
+    --set-default)
+      [[ -n "${2:-}" ]] || { echo "ERROR: --set-default needs a <slug> (e.g. vllm/dual)." >&2; exit 1; }
+      set_default "$2"
+      ;;
+    --clear-default)
+      [[ -n "${2:-}" ]] || { echo "ERROR: --clear-default needs a <model> (e.g. qwen3.6-27b)." >&2; exit 1; }
+      clear_default "$2"
+      ;;
     --down) down_running; exit 0 ;;
     --no-wait) WAIT=0 ;;
     --force) FORCE=1 ;;
+    --owui) OWUI_REGISTER=1 ;;
     --*) echo "Unknown flag: $1"; exit 1 ;;
     *)
       if [[ -n "$VARIANT" ]]; then
@@ -422,10 +1177,53 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+# --explain (possibly with --json) is a deferred terminal action — resolve it
+# once after the whole arg vector is parsed, so token order doesn't matter. The
+# slug may have landed in EXPLAIN_SLUG (caught next to --explain) or, if it was
+# separated from --explain by --json, in VARIANT (the positional catch-all).
+if [[ "$EXPLAIN_REQUESTED" -eq 1 ]]; then
+  if [[ -z "$EXPLAIN_SLUG" && -n "$VARIANT" ]]; then
+    EXPLAIN_SLUG="$VARIANT"
+    VARIANT=""
+  fi
+  if [[ -z "$EXPLAIN_SLUG" ]]; then
+    echo "ERROR: --explain needs a <slug> (e.g. vllm/dual). Add --json for structured output." >&2
+    exit 1
+  fi
+  explain_variant "$EXPLAIN_SLUG" "$EXPLAIN_JSON"   # exits
+fi
+# --json only applies to --explain. A standalone --json reproduces the original
+# "Unknown flag" rejection byte-for-byte (it used to hit the --* case).
+if [[ "$JSON_FLAG_SEEN" -eq 1 ]]; then
+  echo "Unknown flag: --json"; exit 1
+fi
+
+# --list (possibly with --all) is a terminal action — run it once, after the
+# whole arg vector is parsed, so order doesn't matter.
+if [[ "$LIST_REQUESTED" -eq 1 ]]; then
+  list_variants   # exits
+fi
+# --all only makes sense alongside --list / --list-all.
+if [[ "$LIST_ALL" -eq 1 ]]; then
+  echo "ERROR: --all only applies to --list (try: bash scripts/switch.sh --list --all)." >&2
+  exit 1
+fi
+
 [[ -n "$VARIANT" ]] || usage
+VARIANT="$(resolve_default_variant "$VARIANT")"
+# Explicit selection / pin of an off-arch default (e.g. beellama/dflash on a
+# 4090) still launches — but warn loudly (#693). The curated default already
+# steered away; this catches the deliberate-or-pinned case.
+warn_if_default_arch_gated "$ROOT_DIR" "$VARIANT" "$(primary_sm_from_gpu_spec "$(switch_gpu_profile_spec 2>/dev/null || true)")"
 
 resolve_ready_url "${VARIANT}"
 down_running
 up_variant "${VARIANT}"
 [[ $WAIT -eq 1 ]] && wait_ready
+# --owui: optionally surface the just-launched endpoint in Open WebUI's model
+# picker (no-op if OWUI isn't running). Only meaningful once the server is ready.
+if [[ "$OWUI_REGISTER" -eq 1 && "$WAIT" -eq 1 ]]; then
+  _owui_port="${READY_URL##*:}"; _owui_port="${_owui_port%%/*}"
+  bash "$(dirname "$0")/lib/owui-register.sh" "$_owui_port" || true
+fi
 echo "[switch] done. Try:  curl -s ${READY_URL%/v1/models}/v1/models | jq ."

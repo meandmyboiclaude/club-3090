@@ -34,20 +34,28 @@ class DiagnoseProfileError(Exception):
 
 
 COMPOSE_ALIASES = {
-    "gemma-dual-int8": "vllm/gemma-int8",
-    "gemma-dual-int8-262k": "vllm/gemma-int8-262k",
-    "gemma-dual-dflash": "vllm/gemma-dflash",
-    "gemma-dual-awq": "vllm/gemma-awq",
-    "gemma-dual": "vllm/gemma-mtp",
+    "gemma-dual-int8": "vllm/gemma-int8-mtp",
+    "gemma-dual-int8-262k": "vllm/gemma-int8-mtp",
+    "gemma-dual": "vllm/gemma-bf16-mtp",
 }
 
 OVERLAY_PATH_HINTS = {
     "vllm-pr40361-marlin-pad": ["models/qwen3.6-27b/vllm/patches/vllm-marlin-pad"],
-    "vllm-pr41703-dflash": ["models/gemma-4-31b/vllm/patches/vllm-gemma4-dflash"],
-    "vllm-pr41703-dflash-rebased": ["models/gemma-4-31b/vllm/patches/vllm-gemma4-dflash"],
-    "vllm-pr42102-dflash-kv-quant": ["models/gemma-4-31b/vllm/patches/vllm-gemma4-dflash-int8"],
     "vllm-pr35936-qwen3coder-tool-parser": [
         "models/qwen3.6-27b/vllm/patches/vllm-pr35936-required-fallback"
+    ],
+    "vllm-pr40391-rebased": [
+        "models/gemma-4-31b/vllm/patches/vllm-pr40391-v0.22.0"
+    ],
+    "vllm-gemma4-tool-parser-fixes": [
+        "models/gemma-4-31b/vllm/patches/vllm-pr42006-v0.22.0"
+    ],
+    "vllm-pr41800-truncate-prompt-tokens": [
+        "models/gemma-4-31b/vllm/patches/vllm-pr41800-truncate-prompt-tokens",
+        "models/qwen3.6-27b/vllm/patches/vllm-pr41800-truncate-prompt-tokens",
+    ],
+    "dgemma-gemma-image-fixes": [
+        "models/diffusiongemma-26b-a4b/vllm/patches/gemma-image-fixes"
     ],
 }
 
@@ -262,6 +270,11 @@ def print_overlays(engine) -> bool:
         print("  ✓ vendored_overlays: []")
     for overlay in overlays:
         overlay_id = overlay.get("id") if isinstance(overlay, dict) else str(overlay)
+        if isinstance(overlay, dict) and overlay.get("image_baked"):
+            # Capability provided by the pinned engine image (not a mountable
+            # file overlay), so there is no on-disk source to verify.
+            print(f"  ✓ {overlay_id}: image-baked (provided by pinned engine image)")
+            continue
         exists, rel = overlay_exists(overlay_id)
         if exists:
             print(f"  ✓ {overlay_id}: {rel}")
@@ -407,8 +420,9 @@ def command_diagnose(args: argparse.Namespace) -> int:
     overlays_ok = print_overlays(engine)
     try:
         if engine.type == "vllm":
-            pin = resolve_engine_pin(profiles, engine.id).get("VLLM_NIGHTLY_SHA")
-            print(f"  ✓ VLLM_NIGHTLY_SHA resolves: {pin}")
+            pins = resolve_engine_pin(profiles, engine.id)
+            for key, value in pins.items():
+                print(f"  ✓ {key} resolves: {value}")
     except ProfileError as exc:
         print(f"  ✗ {exc}")
         overlays_ok = False

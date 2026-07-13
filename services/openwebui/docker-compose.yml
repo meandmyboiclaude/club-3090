@@ -1,24 +1,70 @@
 services:
   open-webui:
-    image: ghcr.io/open-webui/open-webui:main
+    # Pinned (was :main) — v0.9.6 live-validated 2026-06-09: image-gen + chat config
+    # survive the migration. Bump deliberately, re-validate the image-gen wiring.
+    image: ghcr.io/open-webui/open-webui:v0.9.6
     container_name: open-webui
     restart: unless-stopped
     ports:
       - "8080:8080"
     volumes:
       - open-webui-data:/app/backend/data
+    env_file:
+      # Image generation: Ideogram-4 → ComfyUI (:8188). PersistentConfig — applies on a
+      # FRESH volume; on an existing volume set it in Admin → Settings → Images instead.
+      - ./imagegen.env
     environment:
-      - OLLAMA_BASE_URL=http://host.docker.internal:11434
-      - OPENAI_API_BASE_URL=http://host.docker.internal:4000/v1
-      - OPENAI_API_KEY=sk-litellm-master-key
-      - WEBUI_SECRET_KEY=change-this-secret-key
+      # Chat models — bootstrap one connection PER BACKEND on a FRESH volume (PersistentConfig),
+      # pointing OWUI straight at each model's own port rather than at the LiteLLM gateway. OWUI
+      # hides models from an UNREACHABLE connection, so each model appears in the picker only while
+      # its gpu-mode scene is actually serving — scene-accurate, no listing dead routes. (Going via
+      # LiteLLM :4000 instead would always list every catalog model, since the gateway is always up;
+      # that masking is exactly what this avoids. LiteLLM stays running for other clients — it just
+      # leaves OWUI's picker.) Served names match the catalog, so model IDs are unchanged:
+      #   :8090 = ai-studio qwen director (uncensored prompt crafter; studio lanes call it internally,
+      #           and it doubles as a general chat model). Up only in the ai-studio scene.
+      #   :8010 = qwen3.6-27b     (gpu-mode qwen27b)
+      #   :8051 = qwen3.6-35b-a3b-autoround (gpu-mode qwen35b-a3b)
+      #   :8032 = gemma-4-31b     (gpu-mode gemma-31b)
+      #   :8038 = gemma-4-12b-int8          (gpu-mode gemma12b)
+      #   :8199 = deckard-40b               (gpu-mode deckard)
+      # Plural *_URLS / *_KEYS are ;-separated. On an EXISTING volume the stored config wins — re-run
+      # scripts/setup-ai-studio.sh (it registers these + drops a stale :4000) or set them in
+      # Admin → Settings → Connections. Backends are no-auth on localhost, so the key is a placeholder.
+      - OPENAI_API_BASE_URLS=http://host.docker.internal:8090/v1;http://host.docker.internal:8010/v1;http://host.docker.internal:8051/v1;http://host.docker.internal:8032/v1;http://host.docker.internal:8038/v1;http://host.docker.internal:8199/v1
+      - OPENAI_API_KEYS=sk-noauth;sk-noauth;sk-noauth;sk-noauth;sk-noauth;sk-noauth
+      # Ollama removed from the stack 2026-06-22 — disable the API so OWUI doesn't
+      # probe a dead :11434 on boot (chat routes through the OpenAI API above).
+      - ENABLE_OLLAMA_API=false
+      # Leave empty → Open WebUI generates a strong random key on first boot and persists it
+      # in the data volume (.webui_secret_key). NEVER ship a hardcoded shared secret (it would
+      # let anyone forge session tokens). Override via the host env only to share sessions
+      # across replicas: WEBUI_SECRET_KEY=<your-secret> docker compose up -d
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-}
 
-      # --- Web search / RAG ---
-      - ENABLE_RAG_WEB_SEARCH=true
-      - RAG_WEB_SEARCH_ENGINE=searxng
-      - RAG_WEB_SEARCH_RESULT_COUNT=5
-      - RAG_WEB_SEARCH_CONCURRENT_REQUESTS=5
+      # --- Web search (SearXNG) ---  v0.9.x env names: the old ENABLE_RAG_WEB_SEARCH /
+      # RAG_WEB_SEARCH_* names were renamed upstream and are now IGNORED (→ web search silently
+      # off). SearXNG runs at :8088 with JSON output enabled; OWUI substitutes <query>.
+      # Config path rag.web.search.* — seeded from these on boot when unset in the DB.
+      - ENABLE_WEB_SEARCH=true
+      - WEB_SEARCH_ENGINE=searxng
+      - WEB_SEARCH_RESULT_COUNT=5
+      - WEB_SEARCH_CONCURRENT_REQUESTS=5
       - SEARXNG_QUERY_URL=http://host.docker.internal:8088/search?q=<query>&format=json
+      # Inject SearXNG results straight into the prompt instead of embed→vector-retrieve. The
+      # retrieve path needs a reranker for hybrid search and was silently returning 0 chunks (web
+      # results never reached the model); bypassing it is the reliable path. web_loader off = use
+      # the search snippets, not full-page fetches → small, fast context. (rag.web.search.bypass_*)
+      - BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL=true
+      - BYPASS_WEB_SEARCH_WEB_LOADER=true
+
+      # --- Vector DB (Qdrant) ---  document / knowledge RAG vectors live in the qdrant service
+      # (:6333) instead of the embedded Chroma default. VECTOR_DB is a plain STARTUP env (applies
+      # on every boot, not PersistentConfig). QDRANT_ON_DISK persists vectors to qdrant's volume.
+      # Switching backends does NOT migrate existing Chroma embeddings — re-index any knowledge.
+      - VECTOR_DB=qdrant
+      - QDRANT_URI=http://host.docker.internal:6333
+      - QDRANT_ON_DISK=true
 
       # Fallback / additional providers (keys loaded if set in env)
       - BRAVE_SEARCH_API_KEY=${BRAVE_SEARCH_API_KEY:-}
@@ -32,7 +78,12 @@ services:
       - ENABLE_RAG_LOCAL_WEB_FETCH=true
 
       # --- Image/file upload, document RAG ---
+      # Hybrid (BM25 + vector + rerank) retrieval for document RAG. Needs a cross-encoder reranker:
+      # bge-reranker-base (~280 MB) runs IN-PROCESS in OWUI on CPU (no GPU contention, no separate
+      # service), auto-downloaded from HF on first use. Document-RAG only — web search bypasses
+      # retrieval (above). For higher recall swap to BAAI/bge-reranker-v2-m3 (~2.3 GB, still CPU).
       - ENABLE_RAG_HYBRID_SEARCH=true
+      - RAG_RERANKING_MODEL=BAAI/bge-reranker-base
     extra_hosts:
       - "host.docker.internal:host-gateway"
 

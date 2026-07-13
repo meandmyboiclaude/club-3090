@@ -66,6 +66,7 @@ model_label() {
     qwen3.6-35b-a3b) echo "Qwen 3.6 35B-A3B" ;;
     gemma-4-31b) echo "Gemma 4 31B" ;;
     gemma-4-26b-a4b) echo "Gemma 4 26B-A4B" ;;
+    diffusiongemma-26b-a4b) echo "DiffusionGemma 26B-A4B (dLLM)" ;;
     *) echo "$1" ;;
   esac
 }
@@ -93,6 +94,7 @@ load_weight_recipe() {
     exit 1
   fi
   MODEL_REPO="${WEIGHT_REPO}"
+  MODEL_REVISION="${WEIGHT_REVISION:-}"
   MODEL_SUBDIR="${WEIGHT_SUBDIR}"
   GGUF_FILES="${WEIGHT_FILES}"
   VERIFY_GLOB="${WEIGHT_VERIFY_GLOB:-*.safetensors}"
@@ -141,6 +143,21 @@ case "${1:-}" in
     ;;
 esac
 
+# setup.sh takes a SINGLE positional (the model). It DOWNLOADS WEIGHTS — it does
+# NOT select or boot a serving config. A stray second arg (commonly a launch slug
+# like `vllm/int8`) used to be silently ignored, which let users believe it did
+# something — see issue #250, where the slug was dropped and the real failure
+# (a purged-nightly compose pin) got mis-attributed to it. Reject it loudly and
+# point at the launch path. (`both` recurses with a single arg, so it's unaffected.)
+if [[ $# -gt 1 ]]; then
+  echo "ERROR: setup.sh takes a single model name; got extra argument(s): ${*:2}" >&2
+  echo "       setup.sh only DOWNLOADS WEIGHTS for a model — e.g. bash scripts/setup.sh ${1}" >&2
+  echo "       To LAUNCH a serving config (a slug such as 'vllm/gemma-31b-dual'), use:" >&2
+  echo "         bash scripts/launch.sh --variant <slug>      # or: bash scripts/switch.sh <slug>" >&2
+  echo "       See the slugs available for a model:  bash scripts/switch.sh --list" >&2
+  exit 64
+fi
+
 MODEL_NAME="${1:-}"
 if [[ -z "${MODEL_NAME}" ]]; then
   if [[ -t 0 && -t 1 ]]; then
@@ -168,13 +185,18 @@ ALWAYS_DRAFT_KEY=""
 DFLASH_KEY=""
 PRIMARY_WEIGHT_KEY=""
 EXTRA_WEIGHT_KEYS=()
-NEEDS_GENESIS=0
+# Genesis is opt-in: nothing in the shipped catalog requires it anymore (its last
+# unique feature on this stack — turboquant_3bit_nc KV — is now provided by beellama
+# KVarN; #182). The clone only fires if a user explicitly sets NEEDS_GENESIS=1 (e.g.
+# to revive an archived TQ3 compose). The per-model dispatch below no longer flips it on.
+NEEDS_GENESIS="${NEEDS_GENESIS:-0}"
 
 case "${MODEL_NAME}" in
   qwen3.6-27b)
     PRIMARY_WEIGHT_KEY="qwen3.6-27b:autoround-int4"
     DFLASH_KEY="qwen3.6-27b:dflash"
-    NEEDS_GENESIS=1
+    # Genesis no longer auto-requested: qwen3.6-27b.yml declares requires_genesis:false
+    # and the live autoround composes run overlay-free on vllm-stable v0.22.0 (#182).
     ;;
   qwen3.6-35b-a3b)
     PRIMARY_WEIGHT_KEY="qwen3.6-35b-a3b:autoround-int4"
@@ -187,11 +209,26 @@ case "${MODEL_NAME}" in
   gemma-4-26b-a4b)
     PRIMARY_WEIGHT_KEY="gemma-4-26b-a4b:autoround-int4-mixed"
     ;;
+  diffusiongemma-26b-a4b)
+    # dLLM, fp8 only (no autoround variant). Default WEIGHTS=autoround is a no-op
+    # here — the fp8 key set below is what's fetched.
+    PRIMARY_WEIGHT_KEY="diffusiongemma-26b-a4b:fp8"
+    ;;
   *)
-    echo "ERROR: unsupported model '${MODEL_NAME}'."
-    echo "Supported: qwen3.6-27b, qwen3.6-35b-a3b, gemma-4-31b, gemma-4-26b-a4b"
-    echo "(To add a new model, extend the model dispatch in scripts/setup.sh and profiles/models/*.yml)"
-    exit 1
+    # An unknown friendly model name is fatal ONLY when WEIGHT_KEY is NOT set.
+    # WEIGHT_KEY is the authoritative "exact catalog entry" fetch-now flow (used
+    # by preflight + the serve-cockpit Download action): the recipe fully
+    # specifies <model>:<variant>, and load_weight_recipe() validates that the
+    # key's model matches MODEL_NAME — so the hardcoded per-family dispatch isn't
+    # needed for an arbitrary catalog entry. Leave PRIMARY_WEIGHT_KEY empty here;
+    # the WEIGHT_KEY override below sets it.
+    if [[ -z "${WEIGHT_KEY:-}" ]]; then
+      echo "ERROR: unsupported model '${MODEL_NAME}'."
+      echo "Supported: qwen3.6-27b, qwen3.6-35b-a3b, gemma-4-31b, gemma-4-26b-a4b, diffusiongemma-26b-a4b"
+      echo "(To add a new model, extend the model dispatch in scripts/setup.sh and profiles/models/*.yml,"
+      echo " or pass WEIGHT_KEY=<model>:<variant> to fetch an exact catalog entry directly.)"
+      exit 1
+    fi
     ;;
 esac
 
@@ -234,8 +271,40 @@ elif [[ "${WEIGHTS}" == "awq" ]]; then
       echo "ERROR: WEIGHTS=awq is only wired for gemma-4-31b and gemma-4-26b-a4b." >&2
       exit 1 ;;
   esac
+elif [[ "${WEIGHTS}" == "fp8" ]]; then
+  case "${MODEL_NAME}" in
+    qwen3.6-27b)
+      PRIMARY_WEIGHT_KEY="qwen3.6-27b:fp8"
+      NEEDS_GENESIS=0
+      ;;
+    *)
+      echo "ERROR: WEIGHTS=fp8 is only wired for qwen3.6-27b." >&2
+      exit 1 ;;
+  esac
+elif [[ "${WEIGHTS}" == "qwopus-coder" ]]; then
+  # Qwopus3.6-27B-Coder Q5_K_M GGUF (embedded MTP head) for beellama/qwopus-coder.
+  case "${MODEL_NAME}" in
+    qwen3.6-27b)
+      PRIMARY_WEIGHT_KEY="qwen3.6-27b:qwopus-coder-mtp-q5km"
+      NEEDS_GENESIS=0
+      ;;
+    *)
+      echo "ERROR: WEIGHTS=qwopus-coder is only wired for qwen3.6-27b." >&2
+      exit 1 ;;
+  esac
+elif [[ "${WEIGHTS}" == "carnice-v2" ]]; then
+  # Carnice-V2-27B Q5_K_M GGUF (embedded MTP head) for beellama/carnice-v2-single-q5km-mtp.
+  case "${MODEL_NAME}" in
+    qwen3.6-27b)
+      PRIMARY_WEIGHT_KEY="qwen3.6-27b:carnice-v2-q5km"
+      NEEDS_GENESIS=0
+      ;;
+    *)
+      echo "ERROR: WEIGHTS=carnice-v2 is only wired for qwen3.6-27b." >&2
+      exit 1 ;;
+  esac
 elif [[ "${WEIGHTS}" != "autoround" ]]; then
-  echo "ERROR: WEIGHTS='${WEIGHTS}' not recognized (use 'autoround', 'awq', 'gguf', or 'iq4ks')." >&2
+  echo "ERROR: WEIGHTS='${WEIGHTS}' not recognized (use 'autoround', 'awq', 'fp8', 'qwopus-coder', 'carnice-v2', 'gguf', or 'iq4ks')." >&2
   exit 1
 fi
 
@@ -250,6 +319,22 @@ if [[ "${WITH_ASSISTANT_DRAFT:-0}" == "1" ]]; then
 fi
 
 load_weight_recipe "${PRIMARY_WEIGHT_KEY}"
+
+# ---------- Companion artifacts (cockpit Download) ----------
+# The serve-cockpit Download action reads the slug's `weights_companions` from the
+# registry (a DFlash draft model / mmproj vision projector its compose mounts from
+# a separate subdir) and passes them as a space/comma-separated WEIGHT_EXTRA_KEYS
+# list of fully-qualified <model>:<variant> keys.  Fetch them ALONGSIDE the core
+# so a downloaded slug actually serves — otherwise it reads "present" then fails
+# to boot for the missing companion.  Each is a normal catalog entry pulled by the
+# EXTRA_WEIGHT_KEYS loop below (after the SKIP_MODEL guard), with its own SHA verify.
+if [[ -n "${WEIGHT_EXTRA_KEYS:-}" ]]; then
+  read -ra _COMPANION_KEYS <<< "${WEIGHT_EXTRA_KEYS//,/ }"
+  for _ck in "${_COMPANION_KEYS[@]}"; do
+    [[ -n "${_ck}" ]] && EXTRA_WEIGHT_KEYS+=("${_ck}")
+  done
+  [[ -n "${_COMPANION_KEYS[*]:-}" ]] && echo "[model]   + companion(s): ${_COMPANION_KEYS[*]}"
+fi
 
 # ---------- MODEL_DIR resolution ----------
 # Order of precedence:
@@ -411,43 +496,19 @@ need sha256sum
 echo "Setup root:   ${ROOT_DIR}"
 echo "Model dir:    ${MODEL_DIR}"
 
-# ---------- Genesis patches ----------
-# We track Sandermage's tree at HEAD and rely on tagged commits / SHA pinning
-# in the compose files for reproducibility. The repo layout changed substantially
-# between v7.13 (monolithic patch_genesis_unified.py shim) and v7.14 (modular
-# vllm/_genesis package + per-patch env opts). Newer composes mount the package;
-# the legacy compose still references the v7.13 shim.
-# Pin Genesis to the exact commit our published numbers were measured against.
-# Currently pointing at v7.69 dev tip (commit 2db18df, 2026-05-02 PM). Bumped
-# from v7.66 (fc89395) for the v7.69 patch set, which addresses the 3
-# regressions the v7.68 cross-rig retest found ([club-3090#19] and our
-# v7.68-cliff2-test branch summary):
-#   - F1 (PN30 part3 drift-marker bug) — fixed via specific marker
-#     `[Genesis PN30 v7.68 dst-shaped]` so part3 idempotency check no longer
-#     collides with part1+2 markers in the same file.
-#   - F2 (P103 setattr lost on `exec vllm serve`) — fixed via self-install
-#     hook text-patched into chunk.py end-of-file. Survives any startup
-#     mechanism (workers, fork, spawn, exec). The "rebound at 0 caller sites"
-#     log message in v7.68 was misleading — internal callers DID get the
-#     setattr in the entrypoint shell process, but `exec` replaced the image
-#     and lost it. v7.69 hook fires every time chunk.py imports.
-#   - F3 (PN32 v1 chunked at wrong level) — rewritten as PN32 v2 to patch
-#     `_forward_core` directly + thread initial_state via prior chunk's
-#     last_recurrent_state. Composes with P103: v2 chunks the OUTER FLA
-#     call, P103 chunks INSIDE the FLA inner h tensor.
-# Recommended Cliff 2 closure env bundle for single-24GB-GPU:
-#   GENESIS_ENABLE_P103=1                          (close inner FLA h tensor)
-#   GENESIS_ENABLE_PN32_GDN_CHUNKED_PREFILL=1      (close outer FLA call buffer)
-#   GENESIS_PN32_GDN_CHUNK_SIZE=8192               (default)
-#   GENESIS_PN32_GDN_CHUNK_THRESHOLD=16384         (default)
-#   GENESIS_FLA_FWD_H_MAX_T=16384                  (P103 default)
-# v7.69 also retains v7.68's accept-and-fold of our 3 cross-rig sidecars:
-# PN25 v7.68 (TP=1 worker-spawn registration), PN30 v7.68 (DS conv-state
-# layout dst-shaped temp), PN34 (vllm#39226 runtime workspace_lock).
-# Pinned to dev SHA 2db18df because v7.69 is feature-complete on dev pending
-# our retest validation; if clean, Sander will tag stable.
-# Bumping GENESIS_PIN requires re-running verify-stress.sh against your composes
-# to confirm the new commit works on your config.
+# ---------- Genesis patches (opt-in only) ----------
+# Genesis is no longer fetched by default. No shipped compose requires it: its one
+# unique feature on this stack — turboquant_3bit_nc KV — is now covered by beellama
+# KVarN, and the Genesis-anchored vLLM engines were deprecated when the catalog moved
+# to stock vllm/vllm-openai:v0.22.0 (their TQ3/Genesis composes live in compose/_archive/).
+# We are not reviving Genesis in the near term (#182).
+#
+# The pin below is retained ONLY for an explicit revival: running
+#   NEEDS_GENESIS=1 bash scripts/setup.sh qwen3.6-27b
+# clones Sandermage's tree at this commit so an archived TQ3 compose can be brought back.
+# Bumping it is parked on Sander's next *stable* Genesis tag (the in-flight memory-rework
+# WIP supersedes the 7b9fd319 skeleton); any bump requires re-running verify-stress.sh
+# against the revived compose. Override with GENESIS_PIN=<ref> if reviving against another.
 GENESIS_PIN="${GENESIS_PIN:-7b9fd319}"
 
 if [[ "${NEEDS_GENESIS:-1}" != "1" ]]; then
@@ -490,16 +551,20 @@ _hf_download_repo() {
   local repo="$1"
   local subdir="$2"
   local files="${3:-}"
+  local revision="${4:-}"
+  # Optional commit-SHA / tag pin (#319). Empty -> track HEAD (today's behavior).
+  local rev_args=()
+  [[ -n "$revision" ]] && rev_args=(--revision "$revision")
   mkdir -p "${MODEL_DIR}/${subdir}"
   if command -v hf >/dev/null 2>&1; then
     echo "[model]   Using 'hf download' (hf_transfer if available) ..."
     # files is intentionally word-split: empty -> whole repo; non-empty -> selected files.
     HF_HUB_ENABLE_HF_TRANSFER=1 HF_HUB_DISABLE_XET=1 \
-      hf download "$repo" ${files} --local-dir "${MODEL_DIR}/${subdir}"
+      hf download "$repo" ${files} "${rev_args[@]}" --local-dir "${MODEL_DIR}/${subdir}"
   elif command -v huggingface-cli >/dev/null 2>&1; then
     echo "[model]   Using 'huggingface-cli download' ..."
     HF_HUB_ENABLE_HF_TRANSFER=1 HF_HUB_DISABLE_XET=1 \
-      huggingface-cli download "$repo" ${files} --local-dir "${MODEL_DIR}/${subdir}"
+      huggingface-cli download "$repo" ${files} "${rev_args[@]}" --local-dir "${MODEL_DIR}/${subdir}"
   else
     echo "ERROR: neither 'hf' nor 'huggingface-cli' found. Install with:" >&2
     echo "  pip install 'huggingface-hub[hf_transfer]'" >&2
@@ -513,14 +578,17 @@ _verify_downloaded_files() {
   local repo="$1"
   local subdir="$2"
   local verify_glob="$3"
+  # Pin the etag lookup to the same revision we downloaded (#319). Empty -> main
+  # HEAD; a stale pin would otherwise etag-check against a newer HEAD and FAIL.
+  local revision="${4:-main}"
   local fail=0 count=0 f expected actual
 
-  echo "[verify]  Checking SHA256 of every ${verify_glob} against HF x-linked-etag ..."
+  echo "[verify]  Checking SHA256 of every ${verify_glob} against HF x-linked-etag (rev: ${revision}) ..."
   cd "${MODEL_DIR}/${subdir}"
   for f in ${verify_glob}; do
     [[ -f "$f" ]] || continue
     count=$((count + 1))
-    expected="$(curl -sfI "https://huggingface.co/${repo}/resolve/main/$f" \
+    expected="$(curl -sfI "https://huggingface.co/${repo}/resolve/${revision}/$f" \
       | grep -i '^x-linked-etag:' | tr -d '"\r' | awk '{print $NF}' || true)"
     actual="$(sha256sum "$f" | awk '{print $1}')"
     if [[ -z "$expected" ]]; then
@@ -550,13 +618,17 @@ download_weight_key() {
   local key="$1"
   load_weight_recipe "$key"
   echo "[model]   Downloading ${WEIGHT_LABEL:-$key} ..."
-  _hf_download_repo "$WEIGHT_REPO" "$WEIGHT_SUBDIR" "$WEIGHT_FILES"
-  _verify_downloaded_files "$WEIGHT_REPO" "$WEIGHT_SUBDIR" "$WEIGHT_VERIFY_GLOB"
+  _hf_download_repo "$WEIGHT_REPO" "$WEIGHT_SUBDIR" "$WEIGHT_FILES" "${WEIGHT_REVISION:-}"
+  _verify_downloaded_files "$WEIGHT_REPO" "$WEIGHT_SUBDIR" "$WEIGHT_VERIFY_GLOB" "${WEIGHT_REVISION:-main}"
 }
 
-VERIFY_GLOB="${VERIFY_GLOB_OVERRIDE:-*.safetensors}"
-_hf_download_repo "${MODEL_REPO}" "${MODEL_SUBDIR}" "${GGUF_FILES}"
-_verify_downloaded_files "${MODEL_REPO}" "${MODEL_SUBDIR}" "${VERIFY_GLOB}"
+# #634 — honour the PRIMARY recipe's verify_glob (set by load_weight_recipe →
+# line 100, e.g. "*.gguf" for GGUF keys), NOT a re-hardcoded *.safetensors, or
+# every GGUF primary fetch (WEIGHTS=gguf/iq4ks) fails verify despite a good
+# download.  An explicit VERIFY_GLOB_OVERRIDE still wins.
+VERIFY_GLOB="${VERIFY_GLOB_OVERRIDE:-${VERIFY_GLOB}}"
+_hf_download_repo "${MODEL_REPO}" "${MODEL_SUBDIR}" "${GGUF_FILES}" "${MODEL_REVISION:-}"
+_verify_downloaded_files "${MODEL_REPO}" "${MODEL_SUBDIR}" "${VERIFY_GLOB}" "${MODEL_REVISION:-main}"
 
 for extra_key in "${EXTRA_WEIGHT_KEYS[@]}"; do
   download_weight_key "$extra_key"
@@ -612,7 +684,7 @@ case "${MODEL_NAME}" in
     SAMPLE_CONTAINER="vllm-qwen36-27b"
     SAMPLE_COMPOSE_FLAGS_DUAL=" -f dual/autoround-int4/fp8-mtp.yml"
     SAMPLE_PORT="8020"
-    SAMPLE_MODEL_NAME="qwen3.6-27b-autoround"
+    SAMPLE_MODEL_NAME="qwen3.6-27b"
     NEXT_STEPS_NOTE="Or dual-card vLLM (Marlin patched files already vendored in-repo):
   cd models/${MODEL_NAME}/vllm/compose && docker compose -f dual/autoround-int4/fp8-mtp.yml up -d"
     ;;
@@ -622,11 +694,10 @@ case "${MODEL_NAME}" in
     # Use scripts/switch.sh which auto-selects the right compose by variant.
     SAMPLE_COMPOSE_FLAGS_DUAL=""
     SAMPLE_PORT="8030"
-    SAMPLE_MODEL_NAME="gemma-4-31b-autoround"
+    SAMPLE_MODEL_NAME="gemma-4-31b"
     NEXT_STEPS_NOTE="Available variants:
-  bash scripts/switch.sh vllm/gemma-mtp        # MTP drafter, TP=2, port 8030 (recommended)
-  bash scripts/switch.sh vllm/gemma-mtp-tp1    # MTP drafter, TP=1 (single-card; upstream-blocked on Ampere fp8)
-  bash scripts/switch.sh vllm/gemma-dflash     # DFlash drafter, TP=2, port 8032 (requires WITH_DFLASH_DRAFT=1)"
+  bash scripts/switch.sh vllm/gemma-31b-dual        # bf16 KV, TP=2, port 8032 (dual-card, v0.24.0 overlay-free)
+  bash scripts/switch.sh beellama/gemma-dflash # DFlash, single-card default, port 8061"
     ;;
   gemma-4-26b-a4b)
     SAMPLE_CONTAINER="vllm-gemma-4-26b-a4b"
@@ -636,6 +707,15 @@ case "${MODEL_NAME}" in
     NEXT_STEPS_NOTE="Available variants:
   bash scripts/switch.sh vllm/gemma-26b-awq
   WITH_ASSISTANT_DRAFT=1 bash scripts/setup.sh gemma-4-26b-a4b  # fetch MTP assistant if using awq-mtp"
+    ;;
+  diffusiongemma-26b-a4b)
+    SAMPLE_CONTAINER="vllm-diffusiongemma-26b-a4b-fp8-tp2"
+    SAMPLE_COMPOSE_FLAGS_DUAL=""
+    SAMPLE_PORT="8042"
+    SAMPLE_MODEL_NAME="diffusiongemma-26b-a4b"
+    NEXT_STEPS_NOTE="🧪 experimental dLLM (vLLM's first), dual-card. Launch needs --force (non-functional status):
+  bash scripts/switch.sh --force vllm/diffusiongemma-dual
+  # or: gpu-mode dgemma   (stops other GPU models, serves on :8199)"
     ;;
   qwen3.6-35b-a3b)
     SAMPLE_CONTAINER="vllm-qwen36-35b-a3b"
@@ -652,7 +732,7 @@ echo "[setup] Next: bash scripts/launch.sh"
 echo ""
 echo "Next — single-card vLLM (default):"
 if [[ "${MODEL_NAME}" == "gemma-4-31b" ]]; then
-  echo "  bash scripts/switch.sh vllm/gemma-mtp"
+  echo "  bash scripts/switch.sh vllm/gemma-31b-dual"
   echo "  docker logs -f ${SAMPLE_CONTAINER}"
 else
   echo "  cd models/${MODEL_NAME}/vllm/compose && docker compose up -d"

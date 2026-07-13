@@ -1,0 +1,126 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Qwen3.6-40B-Deckard (uncensored dense merge, Q6_K MTP GGUF)
+#   Engine:    llama.cpp (mainline server-cuda-b9570, draft-mtp)
+#   Topology:  Dual 3090 (layer-split -ts 1,1)
+#   Drafter:   MTP n=2 (--spec-type draft-mtp, sweet-spot — see BENCHMARKS.md)
+#   KV:        q8_0 K + q8_0 V
+#   Vision:    no
+#   Template:  native (GGUF-embedded)
+#   Max ctx:   131072 (q8_0 KV; 192K OOMs on the dual split)
+#   Genesis:   N/A — llama.cpp engine
+#   Status:    ✅ Production
+#   Engine-profile: llama-cpp-local
+#   Quality:   core 8-pack 105/150 (70%) think-off, MTP off==on (spec-dec
+#              lossless); det 62/75 · sandbox 43/75 (--medium, 2026-06-09).
+#   Best for:  Uncensored dual-card chat/agentic; ~41 tok/s (MTP n=2), 128K ctx. ⭐
+# NOTE: dual-only (the 31 GB Q6_K can't fit one 24 GB card); on a 2-GPU box it's
+# mutually exclusive with single-card / image-studio work — that's a topology
+# fact, not a defect, so it ships ✅ (not ⚠️). Arch CONFIRMED qwen35-dense
+# (standard GQA, 97 layers) from the GGUF header.
+# ---------------------------------------------------------------------------
+# Qwen3.6-40B-Deckard on llama.cpp — dual 3090, MTP n=2, 128K ctx, no vision.
+#
+# Deckard is a **dense 40B uncensored** community merge of the Qwen3.6 family
+# (thinking model; emits <think>). The GGUF is PiehSoft's MTP-injected build —
+# a BF16-precision MTP head on DavidAU's Qwen3.6-40B Opus-Deckard Q6_K base
+# (hf: PiehSoft/Qwen3.6-40B-Deckard-MTP-Q6_K).
+#
+# Why dual-only: the Q6_K GGUF is 31 GB — it cannot fit a single 24 GB card.
+# Layer-split across both 3090s via `-ts 1,1` (tensor-split), which pipelines
+# layers across the PCIe bus (no NVLink needed — layer-split avoids cross-GPU
+# all-reduce).
+#
+# MTP win (dense model): MTP on vs off at n=2: off 22.7 → on **36 narrative /
+# 46 code tok/s** (+59% / +104%), draft acceptance 76–80%. Dense models benefit
+# more from MTP than MoE (no MoE routing penalty on the draft head).
+#
+# Context ceiling (q8_0 KV): 32K/64K/128K boot OK (44 GB total @128K, 34.8
+# tok/s); **192K OOMs → max stable = 131072**. q4_0 KV would go higher but has
+# not been tested yet.
+#
+# Engine pin: validated on `ghcr.io/ggml-org/llama.cpp:server-cuda-b9570`
+# (the IMMUTABLE tag for the 2026-06-09 build, digest sha256:1c4ff61a…). MTP
+# `--spec-type draft-mtp` (PR #22673, mainline) works on it. We pin the immutable
+# bXXXX — NOT the rolling `:server-cuda` (it regressed at b9282 with a crash loop,
+# #187). The shared `llama-cpp-local` engine pins the older b9246 (for the 27B —
+# too old for Deckard-40B), so we pin the newer b9570 at the compose level via
+# LLAMACPP_IMAGE rather than bumping the shared engine pin. Bump via .env once a
+# newer build is validated:  LLAMACPP_IMAGE=ghcr.io/ggml-org/llama.cpp:server-cuda-bXXXX
+#
+# Override defaults via .env or shell:
+#   MODEL_DIR              host dir to mount as /models  (default: ../../../../../../models-cache)
+#   GGUF_FILE              path under /models  (default: qwen3.6-40b-deckard-gguf/piehsoft-q6k/Qwen3.6-40B-Deckard-MTP-Q6_K.gguf)
+#   CTX_SIZE               KV pool size        (default: 131072; 192K OOMs at q8_0 KV)
+#   BATCH_SIZE             llama.cpp -b        (default: 4096)
+#   UBATCH_SIZE            llama.cpp -ub       (default: 512)
+#   KV_TYPE                K and V quant type  (default: q8_0)
+#   NP                     parallel slots      (default: 1)
+#   MTP_DRAFT_N_MAX        MTP draft tokens    (default: 2 — sweet spot per BENCHMARKS.md)
+#   TENSOR_SPLIT           manual tensor split (default: 1,1)
+#   SERVED_NAME            --alias value       (default: deckard-40b)
+#   REASONING              thinking gate       (default: off — stack-wide policy)
+#   REASONING_FORMAT       reasoning routing   (default: deepseek — hygiene)
+#   REPEAT_PENALTY         repetition penalty  (default: 1.1 — anti-loop; was 1.0)
+#   REPEAT_LAST_N          repeat window       (default: 256 — anti-loop; llama.cpp default 64)
+#   DRY_MULTIPLIER         DRY sampler strength (default: 0.0 = OFF). For severe long-ctx
+#                          loops (e.g. ~262K), set 0.8 — strongest loop-breaker, but it can
+#                          over-suppress legitimate repetition in CODE, so it's opt-in (#517).
+#   DRY_BASE / DRY_ALLOWED_LENGTH  DRY tuning   (defaults: 1.75 / 2; only active when DRY_MULTIPLIER>0)
+#   PORT                   host port           (default: 8199)
+#   CUDA_VISIBLE_DEVICES   which GPUs to use   (default: 0,1)
+#
+# Quick start:
+#   1. Get the MTP-enabled GGUF (setup.sh/launch.sh auto-fetch it, or manually):
+#        hf download PiehSoft/Qwen3.6-40B-Deckard-MTP-Q6_K \
+#          Qwen3.6-40B-Deckard-MTP-Q6_K.gguf --local-dir <MODEL_DIR>/qwen3.6-40b-deckard-gguf/piehsoft-q6k
+#   2. From this directory:
+#        MODEL_DIR=/your/models/dir docker compose -f mtp.yml up -d
+#   3. curl http://localhost:8199/v1/models  → should list deckard-40b.
+
+services:
+  llama-cpp-deckard-40b:
+    image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda-b9967}
+    container_name: "${ESTATE_CONTAINER:-llama-cpp-deckard-40b}"
+    restart: unless-stopped
+    ports:
+      - "${ESTATE_PORT:-${PORT:-8199}}:8080"
+    volumes:
+      - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
+    # ⚠ -np 1 is intentional — do NOT raise it. One decode stream per dual-card
+    #   config; extra slots divide throughput and can OOM the spec-context buffer.
+    command: >-
+      --host 0.0.0.0
+      --port 8080
+      -m /models/${GGUF_FILE:-qwen3.6-40b-deckard-gguf/piehsoft-q6k/Qwen3.6-40B-Deckard-MTP-Q6_K.gguf}
+      --alias ${SERVED_NAME:-deckard-40b}
+      -c ${CTX_SIZE:-131072}
+      -b ${BATCH_SIZE:-4096}
+      -ub ${UBATCH_SIZE:-512}
+      -ngl 99
+      -ts ${TENSOR_SPLIT:-1,1}
+      -fa on
+      --cache-type-k ${KV_TYPE:-q8_0}
+      --cache-type-v ${KV_TYPE:-q8_0}
+      -np ${NP:-1}
+      --spec-type draft-mtp
+      --spec-draft-n-max ${MTP_DRAFT_N_MAX:-2}
+      --jinja
+      --reasoning ${REASONING:-off}
+      --reasoning-format ${REASONING_FORMAT:-deepseek}
+      --temp ${TEMP:-${TEMPERATURE:-0.6}}
+      --top-p ${TOP_P:-0.95}
+      --top-k ${TOP_K:-20}
+      --min-p ${MIN_P:-0.0}
+      --repeat-penalty ${REPEAT_PENALTY:-1.1}
+      --repeat-last-n ${REPEAT_LAST_N:-256}
+      --dry-multiplier ${DRY_MULTIPLIER:-0.0}
+      --dry-base ${DRY_BASE:-1.75}
+      --dry-allowed-length ${DRY_ALLOWED_LENGTH:-2}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

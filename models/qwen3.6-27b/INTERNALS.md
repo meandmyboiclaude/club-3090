@@ -148,7 +148,7 @@ else:
     output = marlin_gemm(weight)         # original fast path
 ```
 
-Status: PR is **OPEN, MERGEABLE**, labeled `bug`, sitting in maintainer queue. When it lands, drop the `/opt/ai/engines/vllm/primary/` mount from the dual compose. Until then, the volume-mount path lets users get the fix without forking themselves.
+Status: PR is **OPEN, MERGEABLE**, labeled `bug`, sitting in maintainer queue. When it lands, drop the marlin-pad overlay from the dual composes. Until then, the vendored overlay (`vllm/patches/vllm-marlin-pad/{marlin.py,MPLinearKernel.py}`, mounted read-only into the stock image by each dual compose) gives users the fix with no fork or clone.
 
 ---
 
@@ -191,6 +191,68 @@ For Sandermage's documented numbers on his A5000 setup, see his [MODELS.md](http
 
 ---
 
+## LMCache KV-offload (opt-in, 🐣 incubating) — RAM & disk sizing
+
+`vllm/qwen-27b-dual-lmcache` (compose `vllm-lmcache/compose/dual/fp8/lmcache.yml`, club-3090 #133) layers an LMCache tiered persistent prefix-KV cache onto the dual-max fidelity profile (FP8 + int8-PTH KV + MTP n=3). It caches each session's prefix KV so long multi-turn / multi-session workloads reuse context instead of re-prefilling (cold→warm TTFT ~7–8×). **This is the measured mitigation for [Cliff 3](../../docs/CLIFFS.md#cliff-3--deltanet-ssm-state-is-not-prefix-cacheable-the-prefill-cliff)** — unlike vLLM's native prefix cache (which replays the DeltaNet state from token 0), LMCache's HMA hybrid support caches the recurrent state itself, so a warm prefix loads in 0.5–2.4 s instead of a full replay. Best for *resumed/repeated* prefixes; the *growing-loop* case is promising but not yet benchmarked end-to-end. **Zero decode penalty** — controlled A/B (toggle only the connector): 74 narr / 94 code TPS == without LMCache, MTP intact (~83% accept). The offload is async/overlapped.
+
+### Two KV rates — do not conflate them
+- **On-GPU live KV: ~18.9 KB/token** (int8-PTH) — this only sets the *max servable context* (a single 262K request needs ~4.72 GB of GPU KV pool). It is **NOT** the cache footprint.
+- **LMCache offload cache: ~131 KB/token, MEASURED** (L1 RAM 134, L2 disk 125 — from `lmcache_mp_l1_memory_usage_bytes` = 4.93 GB and 4.6 GB on disk, for a 36,808-token session). ~7× the GPU rate (LMCache stores a fuller representation). **Use this rate to size RAM and disk** — an earlier draft wrongly used the 18.9 GPU rate and overstated capacity ~7×.
+
+### Cache sizing — RAM (L1) & disk (L2) vs context cached
+Per warm session (~131 KB/token):
+
+| Context cached | cache size (RAM *or* disk) |
+|--:|--:|
+| 50K | ~6.5 GB |
+| 128K | ~17 GB |
+| 262K (full) | ~33 GB |
+
+How many sessions fit per tier:
+
+| Tier | ~50K sessions | ~262K sessions |
+|---|--:|--:|
+| **L1 RAM** `--l1-size-gb 30` (default; needs ~58 GB host RAM) | ~4 | <1 |
+| **L1 RAM** `--l1-size-gb 50` (cap on a 94 GB rig; ~78 GB host RAM) | ~7 | ~1.4 |
+| **L2 disk** 100 GB | ~15 | ~3 |
+| **L2 disk** 500 GB | ~76 | ~15 |
+| **L2 disk** 1 TB | ~155 | ~30 |
+
+**Rule of thumb:** a few *hot* sessions in L1 RAM, the long tail on L2 disk (rehydrate ~5 s vs ~43 s re-prefill — table below). L1 lives in shared memory, so `shm_size` must be ≥ `--l1-size-gb`.
+
+⚠️ **RAM sizing is preflight-gated.** `scripts/preflight.sh::preflight_lmcache_ram` hard-fails launch if available RAM < `l1-size-gb` + 28 GB reserve, **even under `--force`** (a 100 GB cache on this 94 GB rig once OOM'd the host and forced a reboot — the incident that motivated the guard); it also soft-warns on low L2 disk space. Cap L1 at ~50 GB here.
+
+**Operational gotcha fixed 2026-06-21:** LMCache's tunables are read by the in-container `bash -c` entrypoint (`$${LMCACHE_L1_GB:-30}`, `$${LMCACHE_L2:-0}`, etc.). Docker Compose only forwards host env into that process when the names are declared in `environment:`. The compose now declares `LMCACHE_L1_GB`, `LMCACHE_L2`, `LMCACHE_L2_ADAPTER`, and `LMCACHE_CHUNK_SIZE` with empty defaults, so bash still owns the fallback values. Regression guard: `scripts/tests/test-lmcache-env-passthrough.sh`. Verify a live launch with `docker exec <container> env | grep LMCACHE` and the `lmcache server` command line.
+
+### Disk (the optional L2 tier — `LMCACHE_L2_ADAPTER`, off by default)
+Set `LMCACHE_L2=1` to use the gitignored repo-root `lmcache-kv/` mount (`/lmcache-kv` in-container), or set `LMCACHE_L2_ADAPTER` to a JSON adapter spec to spill evicted (older) sessions from RAM to disk instead of dropping them, and to **survive container restarts**:
+```
+LMCACHE_L2=1
+LMCACHE_L2_ADAPTER='{"type":"fs","base_path":"/mnt/ssd/lmcache-kv"}'
+```
+Use the **`fs`** adapter (`base_path`), **not `nixl_store`** — this image's NIXL backend is broken (`libcudart.so.13` ImportError); `fs` is a plain filesystem store with no NIXL dependency. Disk footprint is **~125 KB/token measured** (4.6 GB for a 37K session → ~33 GB per full 262K session — LMCache's L2 stores ~7× lower-density than the int8-PTH GPU cache, so size disk accordingly), still effectively unbounded; LRU auto-evicts within the cap. Point custom `base_path` at an SSD dir — **not `/tmp`** (tmpfs, wiped on reboot, competes for RAM).
+
+**Measured on-rig (2026-06-17, 36,807-token session, ~1.9 GB/s disk):**
+
+| | TTFT | vs cold |
+|---|--:|--:|
+| Cold (re-prefill) | 43.3 s | 1× |
+| **L2 rehydrate** (from disk, after container restart) | **4.8 s** | **~9× faster** |
+| L1 hit (warm RAM) | 1.4 s | ~31× faster |
+
+**Cross-restart persistence confirmed**: after a full container restart (L1 RAM cleared), the log shows `46/46 retained keys (0 L1, 46 L2)` — the session rehydrated entirely from L2 disk. For restart tests, prefer a clean `docker compose down && docker compose up -d`; cross-rig #423 found `docker restart` can race GPU-memory release and crash-loop TP worker init on PCIe 3090 rigs.
+
+**Warm-L2 latency is compute-bound, not disk-bound (cross-rig confirmed 2026-06-24, #423).** alexpolo1's bare-metal 2× 3090 + **real NVMe** run breaks the warm-L2 TTFT down as **405 ms disk prefetch + 37 ms host→GPU + ~4.8 s recompute** (Mamba/GDN-state reconstruction) — disk is <10% of the number. A faster SSD barely moves warm-load on this hybrid (his NVMe 5.30 s ≈ the ~1.9 GB/s VM disk 4.8 s above, within recompute noise): **the L2 tier buys persistence + capacity, not warm-load speed.** Same run reconfirms the rates cross-rig — 131 KB/token, decode zero-penalty (83.8/81.0 narr · 101/104 code, within CV), and host RAM flat at the pre-pinned L1 pool (no per-session creep — size RAM once, up front).
+
+⚠️ **An aborted prefill banks only the completed prefix (#423, 2026-06-24).** LMCache commits a session's KV blocks **only when the request completes** — so a client disconnect / timeout *mid-prefill* leaves orphaned data on disk but indexes only the completed prefix (a resend showed `46/320` retained keys) and re-prefills from scratch. For the warm-session win on very long contexts, **the first prefill must run to completion** — don't let an upstream client timeout kill it (a full ~255K cold prefill exceeds 5 min).
+
+**No reduced-size L2 on this model (measured 2026-06-17).** LMCache's only built-in MP-mode compressor — the **fp8 serde** (`"serde":{"type":"fp8","fp8_dtype":"float8_e4m3fn"}` on the adapter) — **shape-errors on this model's KV**: `RuntimeError: shape '[2, 16, 1584, 260]' is invalid for input of size 53539200` (the serializer assumes a layout that doesn't match the hybrid GDN / head_dim-256 / int8-PTH source). Result: **60 serialize fails / 30 store fails, L2 stays empty (0 files)** — serving is unaffected (L1 works), but nothing reaches disk. **CacheGen** (the larger ~3–4× compressor) is "not implemented for MP mode yet — coming soon." So **don't add an fp8 serde** here; L2 is uncompressed (~131 KB/token) until one of those is fixed (re-test trigger). The plain `fs` adapter (no serde) is the working path.
+
+### Why incubating, not production
+Runs LMCache's third-party image (`lmcache/vllm-openai`, **DIGEST-pinned** — the tag is mutable and bundles a newer vLLM 0.23.1-dev than our v0.22.0 pin); L2 has no working compression yet (fp8 serde shape-errors on this model, CacheGen-MP pending); the 38 GB image is pulled on-demand. Promotion to ✅ wants LMCache installed into our own vLLM image. The earlier "LMCache halves decode" conclusion was an uncontrolled-measurement error, retracted — see [#133](https://github.com/noonghunna/club-3090/issues/133).
+
+---
+
 ## Upstream status
 
 | Issue | Status | Notes |
@@ -203,7 +265,7 @@ For Sandermage's documented numbers on his A5000 setup, see his [MODELS.md](http
 | [vllm#40914](https://github.com/vllm-project/vllm/pull/40914) | **OPEN, negative locally** | Synthetic-args K+1 route. Local rebase stabilized acceptance but corrupted output (`!` flood) and broke tool/multi-turn; dropping it improved to 5/7 but did not close needles. Not a P67-equivalent for this stack. |
 | [PR #40798](https://github.com/vllm-project/vllm/pull/40798) | Hypothesized fix that didn't pan out | Workspace-manager refactor. Probe 8 backported it; bug persisted. Useful negative result documented on the PR thread. |
 
-When PR #40361 lands, we drop the `/opt/ai/engines/vllm/primary/` mount from dual composes. Do not assume PR #40914 alone makes Genesis-free TQ+MTP shippable; re-test only when upstream has a P67-equivalent multi-query correctness fix.
+When PR #40361 lands, we drop the marlin-pad overlay from dual composes. Do not assume PR #40914 alone makes Genesis-free TQ+MTP shippable; re-test only when upstream has a P67-equivalent multi-query correctness fix.
 
 ---
 

@@ -167,6 +167,27 @@ def resolve_arch(root: Path, runtime: dict, arches: list[dict], model: str) -> t
     return matched_arch, arch_row
 
 
+def resolve_arch_from_config(runtime: dict, arches: list[dict], config_arch: str):
+    """Map a config.json architectures[0] string -> (canonical_arch, arch_row)
+    via arch_model_xref. Matches either the canonical (inner) arch key itself or
+    any `config_architectures` alias (the OUTER multimodal wrapper class a weights
+    repo reports — e.g. Qwen3_5ForConditionalGeneration -> Qwen3NextForCausalLM).
+    Used by the [C0] pull gate so an uncurated derive (abliterated / fine-tune) of
+    an already-supported arch is not false-aborted with "no arch_patches matrix row".
+    arch_patches.yml stays a closed key-set; the alias lives in the editable xref.
+    Returns (None, None) when the config arch maps to no row."""
+    if not config_arch:
+        return None, None
+    xref = runtime.get("arch_model_xref") or {}
+    for canonical, meta in xref.items():
+        aliases = (meta or {}).get("config_architectures") or []
+        if config_arch == canonical or config_arch in aliases:
+            row = next((r for r in arches if r.get("arch") == canonical), None)
+            if row is not None:
+                return canonical, row
+    return None, None
+
+
 # --------------------------------------------------------------------------
 # Step 3 — engine-pin validation (validation ONLY; never rewrites image).
 # --------------------------------------------------------------------------
@@ -208,7 +229,7 @@ def validate_engine_pin(engine_id: str, engine: dict, arch_row: dict) -> str:
     ``image: ${VLLM_IMAGE:-...}`` expression untouched (correction #2).
     """
     spec = (engine.get("install") or {}).get("spec", "")
-    # spec looks like 'vllm/vllm-openai:nightly-<sha>' or 'vllm-stable@0.20.2'
+    # spec looks like 'vllm/vllm-openai:nightly-<sha>' or 'vllm-pip-baseline@0.20.2'
     sha = ""
     if ":" in spec and "nightly-" in spec:
         sha = spec.split("nightly-", 1)[1].strip()
@@ -911,7 +932,7 @@ def generate_from_profile(root: Path, einput) -> tuple[str, dict]:
         f"  {svc}:",
         f"    image: {image}",
         f'    container_name: "${{ESTATE_CONTAINER:-{svc}}}"',
-        '    restart: "no"',
+        "    restart: ${CLUB3090_RESTART:-unless-stopped}",
         "    ports:",
         f'      - "${{BIND_HOST:-0.0.0.0}}:${{ESTATE_PORT:-${{PORT:-{port}}}}}:8000"',
         "    volumes:",

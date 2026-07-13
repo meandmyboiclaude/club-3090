@@ -29,7 +29,7 @@ pull → derive (read repo config/safetensors)
                 calibration backbone)
 ```
 
-**v0.8.2 surfaces (current):**
+**Pull-gate surfaces (current):**
 - `scripts/pull.sh … --recommend` — appends an honest one-line fit verdict (FITS / FITS-but-not-yet-accepted / DOES-NOT-FIT) over the same gate result; presentation only, never changes the verdict, carries the boot-fit≠runtime caveat.
 - **Failure on-ramp** — every hard-block leaves a redacted `.pull-captures/<slug>/<ts>/` bundle; `scripts/pull.sh --submit-last` (or `--submit <dir>`) is a separate, consented, user-invoked step that submits it (works with *or without* `gh`; no telemetry, no auto-send).
 - **Broadened arch registry** — materially more safetensors architectures pass `[C0]` without `--experimental-arch`; native built-ins reach a clean serve verdict, per-repo remote-code stays fail-closed (zero false-pass).

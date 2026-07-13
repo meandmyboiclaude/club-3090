@@ -65,7 +65,7 @@ ik_compose="${TMP_DIR}/ik.yml"
 cat > "$ik_compose" <<'YAML'
 services:
   ik:
-    image: ${IK_LLAMA_IMAGE:-ghcr.io/ikawrakow/ik-llama-cpp:cu13-server}
+    image: ${IK_LLAMA_IMAGE:-ghcr.io/ikawrakow/ik-llama-cpp@sha256:5f914f1ccade922417af58c94bd1cbb558052c8852d86678ead3fe693eec0143}
     command: >-
       --model /models/${GGUF_FILE:-qwen3.6-27b-gguf/ubergarm-mtp-iq4ks/Qwen3.6-27B-MTP-IQ4_KS.gguf}
 YAML
@@ -80,7 +80,7 @@ llama_compose="${TMP_DIR}/llama.yml"
 cat > "$llama_compose" <<'YAML'
 services:
   llama:
-    image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda-b9246}
+    image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda-b9967}
     command: >-
       -m /models/${GGUF_FILE:-qwen3.6-27b-gguf/unsloth-mtp-q4km/Qwen3.6-27B-Q4_K_M.gguf}
 YAML
@@ -93,7 +93,7 @@ vllm_compose="${TMP_DIR}/gemma.yml"
 cat > "$vllm_compose" <<'YAML'
 services:
   vllm:
-    image: ghcr.io/noonghunna/vllm-club3090:latest
+    image: vllm/vllm-openai:v0.21.0
     command:
       - --model
       - /root/.cache/huggingface/gemma-4-31b-autoround-int4
@@ -118,7 +118,7 @@ extends_stub="${TMP_DIR}/stub.yml"
 cat > "$extends_base" <<'YAML'
 services:
   vllm-base:
-    image: ghcr.io/noonghunna/vllm-club3090:latest
+    image: vllm/vllm-openai:v0.21.0
     command:
       - --model
       - /root/.cache/huggingface/qwen3.6-27b-autoround-int4
@@ -163,6 +163,34 @@ assert_contains "$out" "hf download Ex0bit/Qwen3.6-27B-PRISM-EAGLE3"
 assert_contains "$out" "WITH_PRISM_EAGLE3=1 bash scripts/setup.sh qwen3.6-27b"
 mkdir -p "${TMP_DIR}/models/qwen3.6-27b-autoround-int4" "${TMP_DIR}/models/qwen3.6-27b-prism-eagle3/compressed"
 out="$(run_deps "$sglang_compose" "${TMP_DIR}/models")"
+[[ -z "$out" ]]
+
+# beellama.cpp DFlash: the image is NOT ggml-org/ik-llama (so it must still be
+# detected as a llama.cpp-family GGUF server), and the drafter is named via
+# --spec-draft-model (not -m). A present target + MISSING drafter must refuse
+# with the drafter path + its hf-download hint — the #288 George report, where
+# a missing drafter otherwise crashed cryptically in-container.
+beellama_compose="${TMP_DIR}/beellama.yml"
+cat > "$beellama_compose" <<'YAML'
+services:
+  beellama:
+    image: ${BEELLAMA_IMAGE:-ghcr.io/anbeeld/beellama.cpp:server-cuda-v0.3.0-e0663be2713c}
+    command: >-
+      -m /models/${GGUF_FILE:-qwen3.6-27b-gguf/unsloth-q5ks/Qwen3.6-27B-Q5_K_S.gguf}
+      --spec-draft-model /models/${DRAFT_FILE:-qwen3.6-27b-gguf/anbeeld-dflash-iq4xs/Qwen3.6-27B-DFlash-IQ4_XS.gguf}
+YAML
+mkdir -p "${TMP_DIR}/bl-models/qwen3.6-27b-gguf/unsloth-q5ks"
+touch "${TMP_DIR}/bl-models/qwen3.6-27b-gguf/unsloth-q5ks/Qwen3.6-27B-Q5_K_S.gguf"
+out="$(expect_missing "$beellama_compose" "${TMP_DIR}/bl-models")"
+assert_contains "$out" "qwen3.6-27b-gguf/anbeeld-dflash-iq4xs/Qwen3.6-27B-DFlash-IQ4_XS.gguf"
+assert_contains "$out" "speculative drafter GGUF"
+assert_contains "$out" "hf download Anbeeld/Qwen3.6-27B-DFlash-GGUF Qwen3.6-27B-DFlash-IQ4_XS.gguf"
+# the target is present, so it must NOT be reported missing
+assert_not_contains "$out" "unsloth-q5ks/Qwen3.6-27B-Q5_K_S.gguf (llama.cpp GGUF weights)"
+# add the drafter → must pass
+mkdir -p "${TMP_DIR}/bl-models/qwen3.6-27b-gguf/anbeeld-dflash-iq4xs"
+touch "${TMP_DIR}/bl-models/qwen3.6-27b-gguf/anbeeld-dflash-iq4xs/Qwen3.6-27B-DFlash-IQ4_XS.gguf"
+out="$(run_deps "$beellama_compose" "${TMP_DIR}/bl-models")"
 [[ -z "$out" ]]
 
 echo "test-preflight-compose-deps: ok"

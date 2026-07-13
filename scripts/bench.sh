@@ -26,7 +26,8 @@
 #
 # Env vars:
 #   URL                Endpoint. Default: http://localhost:8020
-#   MODEL              Served model name. Default: qwen3.6-27b-autoround
+#   MODEL              Served model name. Default: auto-detected from
+#                      /v1/models, else qwen3.6-27b
 #   CONTAINER          Container for log scraping. Default: vllm-qwen36-27b
 #   RUNS               Measured runs per prompt. Default: 5
 #   WARMUPS            Warm-up runs (shared across both). Default: 3
@@ -40,14 +41,34 @@
 #                      llama.cpp containers enable this automatically.
 #   PP_FALLBACK_TOKENS Approximate filler-token target for PP=1. Default: 10000
 #   PP_MAX_TOKENS      Completion cap for the PP fallback request. Default: 16
+#   PREFILL_PROBE      Set to 0 to skip the canonical two-depth prefill/TTFT
+#                      probe (catalog-baselines 2c). Default: 1. Each request
+#                      uses a FRESH salted haystack — composes serve
+#                      enable_prefix_caching, so identical prompts re-measure
+#                      the CACHE HIT, not prefill. Depths exceeding the served
+#                      context are skipped with a note.
+#   PREFILL_DEPTHS     CSV of prompt-token depths. Default: 10000,90000 (the
+#                      shallow/deep warm anchors; 90K sits inside the DeltaNet
+#                      degradation regime and pairs with the verify-stress
+#                      ladder's ~94K rung for anchor calibration).
+#   PREFILL_RUNS       Measured runs per depth. Default: 3
 #   ENABLE_THINKING    Set to 1 to send chat_template_kwargs.enable_thinking=true
 #                      in bench requests. Default: 0.
+#   FORCE_TOKENS       Force EXACTLY this many output tokens per run (sets
+#                      max_tokens + min_tokens + ignore_eos), overriding
+#                      MAX_TOKENS_NARR/CODE. Use to bench at a fixed / larger output
+#                      size. Essential for DIFFUSION LMs: they self-terminate early
+#                      (~1-2K words), so raising the cap alone won't lengthen the
+#                      generation — you must force the length to measure sustained
+#                      throughput. vLLM-oriented (ignore_eos/min_tokens). 0 = off
+#                      (model decides length). Default: 0.
 #
 # Usage:
 #   bash scripts/bench.sh
 #   ONLY=code bash scripts/bench.sh
 #   PP=1 bash scripts/bench.sh
 #   RUNS=10 bash scripts/bench.sh
+#   FORCE_TOKENS=4000 bash scripts/bench.sh   # fixed 4000-tok output (diffusion / sustained-TPS)
 
 set -euo pipefail
 
@@ -60,7 +81,10 @@ if [[ -f "${ROOT_DIR}/scripts/preflight.sh" ]]; then
   preflight_autodetect_endpoint || true
 fi
 URL="${URL:-http://localhost:8020}"
-MODEL="${MODEL:-qwen3.6-27b-autoround}"
+# Resolve the served model from /v1/models when MODEL is unset (#372). The qwen
+# literal below is only a last resort if detection no-ops (endpoint unreachable).
+declare -F preflight_autodetect_model >/dev/null && preflight_autodetect_model
+MODEL="${MODEL:-qwen3.6-27b}"
 CONTAINER="${CONTAINER:-vllm-qwen36-27b}"
 RUNS="${RUNS:-5}"
 WARMUPS="${WARMUPS:-3}"
@@ -73,7 +97,14 @@ QUIET="${QUIET:-0}"
 PP="${PP:-0}"
 PP_FALLBACK_TOKENS="${PP_FALLBACK_TOKENS:-10000}"
 PP_MAX_TOKENS="${PP_MAX_TOKENS:-16}"
+PREFILL_PROBE="${PREFILL_PROBE:-1}"
+PREFILL_DEPTHS="${PREFILL_DEPTHS:-10000,90000}"
+PREFILL_RUNS="${PREFILL_RUNS:-3}"
+# The probe knobs reach the python heredoc via the environment (the argv tuple
+# is full); export them here.
+export PREFILL_PROBE PREFILL_DEPTHS PREFILL_RUNS
 ENABLE_THINKING="${ENABLE_THINKING:-0}"
+FORCE_TOKENS="${FORCE_TOKENS:-0}"
 
 need() {
   command -v "$1" >/dev/null 2>&1 || { echo "ERROR: '$1' not in PATH." >&2; exit 1; }
@@ -175,30 +206,39 @@ fi
 
 python3 - "$URL" "$MODEL" "$WARMUPS" "$RUNS" "$QUIET" "$ONLY" \
             "$CONTAINER" "$PP_MODE" "$PP_FALLBACK_TOKENS" "$PP_MAX_TOKENS" \
-            "$ENABLE_THINKING" \
+            "$ENABLE_THINKING" "$FORCE_TOKENS" \
             "$PROMPT_NARR" "$MAX_TOKENS_NARR" \
             "$PROMPT_CODE" "$MAX_TOKENS_CODE" << 'PYEOF'
-import json, re, shutil, subprocess, sys, time, urllib.request, statistics as s
+import json, os, random, re, shutil, string, subprocess, sys, time, urllib.request, statistics as s
 
 (URL, MODEL, WARMUPS, RUNS, QUIET, ONLY,
  CONTAINER, PP_MODE, PP_FALLBACK_TOKENS, PP_MAX_TOKENS,
- ENABLE_THINKING, PROMPT_NARR, MAX_NARR, PROMPT_CODE, MAX_CODE) = sys.argv[1:]
+ ENABLE_THINKING, FORCE, PROMPT_NARR, MAX_NARR, PROMPT_CODE, MAX_CODE) = sys.argv[1:]
 WARMUPS = int(WARMUPS); RUNS = int(RUNS); QUIET = int(QUIET) == 1
 MAX_NARR = int(MAX_NARR); MAX_CODE = int(MAX_CODE)
 PP_FALLBACK_TOKENS = int(PP_FALLBACK_TOKENS); PP_MAX_TOKENS = int(PP_MAX_TOKENS)
 ENABLE_THINKING = ENABLE_THINKING == "1"
+FORCE = int(FORCE)   # >0: force EXACTLY this many output tokens (max+min+ignore_eos)
 
 def run_once(prompt, max_tokens):
-    body = json.dumps({
+    # FORCE>0: force EXACTLY FORCE output tokens (overrides the per-prompt cap) so the
+    # model can't self-terminate early — required to measure sustained throughput at a
+    # chosen output size on diffusion LMs (which stop ~1-2K words otherwise).
+    mt = FORCE if FORCE > 0 else max_tokens
+    req_body = {
         "model": MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": max_tokens,
+        "max_tokens": mt,
         "temperature": 0.6,
         "top_p": 0.95,
         "stream": True,
         "stream_options": {"include_usage": True},
         "chat_template_kwargs": {"enable_thinking": ENABLE_THINKING},
-    }).encode()
+    }
+    if FORCE > 0:
+        req_body["min_tokens"] = FORCE
+        req_body["ignore_eos"] = True
+    body = json.dumps(req_body).encode()
     req = urllib.request.Request(f"{URL}/v1/chat/completions", data=body,
                                  headers={"Content-Type": "application/json"})
     t_send = time.time()
@@ -342,12 +382,103 @@ def run_pp_fallback():
         print(stats("PP tok/s", pp_vals))
         print(f"  TTFT          mean={s.mean(ttfts)*1000:6.0f}ms  std=    0ms  min={min(ttfts)*1000:.0f}ms  max={max(ttfts)*1000:.0f}ms")
 
+def prefill_prompt(target_tokens, salt):
+    """Cache-busted long prompt (catalog-baselines 2c).
+
+    Composes serve ``enable_prefix_caching=True`` — an identical prompt
+    re-measures the PREFIX-CACHE HIT, not prefill.  vLLM's prefix cache is
+    block-chained, so a unique FIRST line breaks the whole chain; the salt is
+    also woven through the filler as belt-and-braces against block-aligned
+    partial hits."""
+    filler = (
+        f"calibration {salt} segment with stable token shape for the prefill probe. "
+        "This sentence is intentionally plain so tokenizer variance stays modest. "
+    )
+    words_per_chunk = max(len(filler.split()), 1)
+    chunks = max(1, target_tokens // words_per_chunk)
+    return (
+        f"[probe {salt}] Read the following calibration text. Reply with the single word DONE.\n\n"
+        + filler * chunks
+    )
+
+def run_prefill_probe():
+    """Canonical two-depth prefill/TTFT probe (catalog-baselines 2c): warm
+    engine, FRESH salted haystack per request, prefill tok/s = prompt_tokens/TTFT.
+    The deep anchor pairs with the verify-stress ladder's nearest rung for
+    anchor calibration (agreement certifies the ladder's whole depth curve).
+    A depth the served context can't hold is SKIPPED with a note."""
+    depths = [int(x) for x in os.environ.get("PREFILL_DEPTHS", "10000,90000").split(",") if x.strip()]
+    n = max(1, int(os.environ.get("PREFILL_RUNS", "3")))
+
+    def salt():
+        return "".join(random.choices(string.ascii_lowercase, k=8))
+
+    for target in depths:
+        label = f"prefill-{target // 1000}k"
+        print(
+            f"\n========== {label.upper()} (target={target} prompt tokens, "
+            f"max_tokens={PP_MAX_TOKENS}, cache-busted: fresh haystack per run) =========="
+        )
+        print("=== warmups (1) ===")
+        # The warmup doubles as the TOKEN CALIBRATOR: the word-count heuristic
+        # overshoots (salted filler tokenizes ~1.3 tok/word), so the measured
+        # runs scale their request by the warmup's actual/target ratio — the
+        # depth label stays honest to within a few percent.
+        request_tokens = target
+        try:
+            w, t, _k, ptoks = run_once(prefill_prompt(target, salt()), PP_MAX_TOKENS)
+            _pp, _t, line = fmt_pp("warm-1", w, t, ptoks)
+            if not QUIET:
+                print(line)
+            if ptoks > 0:
+                request_tokens = max(200, int(target * target / ptoks))
+                print(f"  [calibrated: {ptoks} tok at request={target} → measured runs request {request_tokens}]")
+        except Exception as e:
+            msg = str(e)
+            if any(x in msg for x in ("400", "maximum context", "max_model_len", "context length", "context window")):
+                print(f"  SKIP: {target} tokens exceeds the served context ({msg[:100]})")
+                continue
+            print(f"  warm-1     FAIL: {e}")
+        print(f"\n=== measured ({n}) ===")
+        pps, ttfts = [], []
+        for i in range(n):
+            try:
+                w, t, _k, ptoks = run_once(prefill_prompt(request_tokens, salt()), PP_MAX_TOKENS)
+                pp, ttft, line = fmt_pp(f"run-{i+1}", w, t, ptoks)
+                if not QUIET:
+                    print(line)
+                pps.append(pp)
+                ttfts.append(ttft)
+            except Exception as e:
+                print(f"  run-{i+1}    FAIL: {e}")
+        if pps:
+            print(f"\n=== summary [{label}] (n={len(pps)}) ===")
+            # prompt_tokens/TTFT = the CLIENT-OBSERVED rate (includes
+            # tokenization + transfer + scheduling) — the user-truth number.
+            print(stats("prefill tok/s", pps))
+            print(
+                f"  TTFT          mean={s.mean(ttfts)*1000:6.0f}ms  "
+                f"std={(s.stdev(ttfts)*1000 if len(ttfts) > 1 else 0):5.0f}ms  "
+                f"min={min(ttfts)*1000:.0f}ms  max={max(ttfts)*1000:.0f}ms"
+            )
+            # Engine-internal rate from the vLLM stats log — windowed (tokens
+            # per 10s stats window), so treat as approximate; the gap between
+            # this and the client-observed rate is tokenization/transfer/
+            # scheduling overhead, not prefill compute.
+            if PP_MODE == "log":
+                vals = scrape_prompt_throughput(CONTAINER, len(pps) * 2)
+                vals = [v for v in vals if v > 0][-len(pps):]
+                if vals:
+                    print(stats("PP tok/s (engine log, windowed)", vals))
+
 if ONLY in ("both", "narr"):
     run_set("narrative", PROMPT_NARR, MAX_NARR)
 if ONLY in ("both", "code"):
     run_set("code", PROMPT_CODE, MAX_CODE)
 if PP_MODE == "fallback":
     run_pp_fallback()
+if os.environ.get("PREFILL_PROBE", "1") == "1":
+    run_prefill_probe()
 PYEOF
 
 # GPU state

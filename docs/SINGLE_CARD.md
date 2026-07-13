@@ -34,6 +34,8 @@ For workloads that **don't** accumulate context across turns (single-shot RAG, s
 > ⛔ **The four vLLM rows below are struck through — they're pinned to a purged vLLM nightly ([#167](https://github.com/noonghunna/club-3090/issues/167)) and won't boot until the next Genesis-compatible pin lands.** Until then, use the **llama.cpp / ik_llama** rows — they work today and are cliff-immune. (`minimal.yml` is Genesis-free and *can* still run on a current image via `VLLM_IMAGE=vllm/vllm-openai:latest`.)
 
 > 💡 **Simplest vs fastest (single-card):** `llamacpp/default` (mainline Q4_K_M, clean upstream image) is the no-friction pick; **`ik-llama/iq4ks-mtp` is ~18–20% faster + leanest VRAM** (separate fork + IQK quant) for max single-card speed. Both are cliff-immune — see [#184](https://github.com/noonghunna/club-3090/discussions/184).
+>
+> 🎯 **Don't want to choose?** `bash scripts/switch.sh qwen3.6-27b/default` (or a bare `bash scripts/launch.sh`) resolves the **blessed single-card default automatically** — on one 3090 that's **`ik-llama/iq4ks-mtp` (fastest + leanest)**, with **`llamacpp/default` as the cliff-immune alternative** (this is the `single` order in `ENGINE_PREFERENCE`: `ik-llama > llama.cpp > vllm`; `beellama` ranks first but isn't onboarded yet — see [docs/UPSTREAM.md](UPSTREAM.md)). Pin your own with `--set-default <slug>`; see the [FAQ](FAQ.md#how-do-i-set-my-own-default-config).
 
 | What you're doing | Compose | Max ctx | Narr / Code TPS | VRAM (24 GB / card) |
 |---|---|---|---|---|
@@ -146,7 +148,7 @@ For the cross-card TP=2 picture, see [`DUAL_CARD.md`](DUAL_CARD.md).
 
 **Workload:** best quality-per-bit GGUF on a single 3090. Same cliff-immunity as llama.cpp (same ggml memory model), but with fork-exclusive IQK imatrix quants that beat mainline Q4_K_M on perplexity.
 
-ubergarm `Qwen3.6-27B-MTP-IQ4_KS.gguf` (IQK imatrix quant, built-in MTP head) + q4_0 KV + `-khad`/`-vhad` (Hadamard K+V cache transforms) + MTP `n=2` + `--merge-qkv` + `--parallel-tool-calls` (ik-exclusive). **200K context** (max-safe default; native max 262K) on one 3090. At matched 370 W it's **~18–20% faster than `llamacpp/mtp`** on TPS (~60 narr / ~69 code vs ~50 / ~58), quality-tied (8-pack 103 vs 102), and **~0.5–0.8 GB leaner** — the faster *and* leaner single-card path. (A 2026-05-22 "tie" was a wrong-engine measurement artifact — corrected 2026-05-23 via a power-cap-controlled A/B, [#184](https://github.com/noonghunna/club-3090/discussions/184).) Engine: `ghcr.io/ikawrakow/ik-llama-cpp:cu13-server`. See [`docs/engines/IK_LLAMA.md`](engines/IK_LLAMA.md) for the full deep dive.
+ubergarm `Qwen3.6-27B-MTP-IQ4_KS.gguf` (IQK imatrix quant, built-in MTP head) + q4_0 KV + `-khad`/`-vhad` (Hadamard K+V cache transforms) + MTP `n=2` + `--merge-qkv` + `--parallel-tool-calls` (ik-exclusive). **200K context** (max-safe default; native max 262K) on one 3090. At matched 370 W it's **~18–20% faster than `llamacpp/mtp`** on TPS (~60 narr / ~69 code vs ~50 / ~58), quality-tied (8-pack 103 vs 102), and **~0.5–0.8 GB leaner** — the faster *and* leaner single-card path. (A 2026-05-22 "tie" was a wrong-engine measurement artifact — corrected 2026-05-23 via a power-cap-controlled A/B, [#184](https://github.com/noonghunna/club-3090/discussions/184).) Engine: `ghcr.io/ikawrakow/ik-llama-cpp` (digest-pinned `cu13-server` build). See [`docs/engines/IK_LLAMA.md`](engines/IK_LLAMA.md) for the full deep dive.
 
 ### ik_llama + IQ4_KS + MTP + vision — `iq4ks-mtp-vision.yml`
 
@@ -240,7 +242,7 @@ Two env-override knobs available on every vLLM compose (defaults preserved if un
 ```bash
 MAX_MODEL_LEN=32768 \
 GPU_MEMORY_UTILIZATION=0.80 \
-  bash scripts/switch.sh vllm/long-text
+  bash scripts/switch.sh vllm/minimal
 ```
 
 - `MAX_MODEL_LEN` — shrink the KV-cache budget; trades long-context for fit. `90000` is a safe value for `long-text.yml` on rigs with ~1 GB of overhead (4090 with display, etc.). Validated on @laurimyllari's 4090 ([disc #62](../../../noonghunna/club-3090/discussions/62)).
@@ -272,13 +274,13 @@ bash scripts/setup.sh qwen3.6-27b
 bash scripts/launch.sh
 
 # 3. Or skip the wizard:
-bash scripts/launch.sh --variant vllm/tools-text   # IDE agent path
+bash scripts/launch.sh --variant beellama/dflash   # single-card default (DFlash, code-fast)
 bash scripts/launch.sh --variant llamacpp/default  # easy mode
 
 # 4. Sanity test
 curl -sf http://localhost:8020/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"qwen3.6-27b-autoround","messages":[{"role":"user","content":"Capital of France?"}],"max_tokens":200}'
+  -d '{"model":"qwen3.6-27b","messages":[{"role":"user","content":"Capital of France?"}],"max_tokens":200}'
 
 # 5. Switch later without re-running setup
 bash scripts/switch.sh vllm/long-vision    # for example

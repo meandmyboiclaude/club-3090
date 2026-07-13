@@ -1,0 +1,59 @@
+schema_version: 1
+id: vllm-diffusion-gemma
+display_name: vLLM DiffusionGemma (stock v0.24.0 + Ampere/TP fix-mounts)
+type: vllm
+stability: experimental
+install:
+  method: docker_image
+  # Stock vLLM v0.24.0 — the DiffusionGemma arch is NATIVE here (PR #45163 merged
+  # 2026-06-12, shipped in v0.24.0; DiffusionGemmaForBlockDiffusion registers). Bumped
+  # 2026-07-02 off the former :gemma branch digest (dgemma branch 74b5964f) now that the
+  # arch landed in a tagged release — drops a mutable/branch image for the same pinned
+  # stable tag the rest of the stack uses. The 3 Ampere/TP fix-mounts below are STILL
+  # required (NOT in #45163 — see vendored_overlays).
+  spec: vllm/vllm-openai:v0.24.0
+min_sm: 8.0
+supported_model_families:
+  - diffusion-gemma
+features:
+  int8_per_token_head: false
+  turboquant_3bit_nc: false
+  marlin_pad_sub_tile_n: false
+  qwen3_coder_tool_parser: false
+supported_kv_formats:
+  - bf16
+  - fp16
+supported_drafters: []                # diffusion LM — no AR spec-dec
+supported_weight_formats:
+  - compressed-tensors                # RedHatAI fp8-dynamic pack → Marlin W8A16 on sm_86
+required_overlays: []
+vendored_overlays:
+  - id: dgemma-gemma-image-fixes
+    pr_url: https://github.com/vllm-project/vllm/pull/45163
+    upstream_status: open
+    upstream_merged_in_version: null
+    local_status: vendored
+    delivery: site_package_overlay      # 3 files bind-mounted over the image's vllm pkg (wired_at: volumes)
+    purpose: >-
+      Stock vLLM v0.24.0 has the DiffusionGemma arch NATIVE (PR #45163 merged 2026-06-12,
+      shipped in v0.24.0), so we no longer sideload the model code nor pin a branch image.
+      But 3 fixes are NOT upstream (not in PR #45163) and so not in stock v0.24.0 — vLLM
+      builds/tests on H100/B200 and their recipe is TP=1, so neither our Ampere fp8 path
+      nor our TP=2 path is exercised. The compose bind-mounts them from
+      models/diffusiongemma-26b-a4b/vllm/patches/gemma-image-fixes/:
+      marlin.py + marlin_utils_fp8.py = sm_86 fp8 Marlin sub-tile-K pad (:gemma clean
+      dies in warmup with "Invalid thread config … num_bits=8 … max_shared_mem=101376"
+      for K=352/1056); diffusion_gemma.py = TP-vocab soft-embed + :656 dtype fix (:gemma's
+      copy is the pristine branch file → TP=2 vocab bug). Eager-only (torch.compile works,
+      no gain). Validated 2026-06-11 (:gemma) + RE-VALIDATED on stock v0.24.0 2026-07-02
+      (boots + coherent at TP=2 with the 3 mounts; native #45163 diffusion_gemma.py alone
+      → TP=2 vocab matmul mismatch, so the TP-vocab fix is still required). ~177/180 TPS
+      typical / ~1100 peak. REBASE on any vLLM pin bump (diff the new image's marlin /
+      diffusion_gemma vs these, re-apply the K-pad + TP-vocab deltas).
+required_genesis: false
+notes: >-
+  vLLM's first discrete-diffusion LM (DiffusionGemma 26B-A4B) on the V2 model runner
+  (VLLM_USE_V2_MODEL_RUNNER=1), on STOCK vllm/vllm-openai:v0.24.0 (arch native via #45163)
+  + 3 vendored Ampere/TP fix-mounts. Boots+serves on 2x RTX 3090 (Ampere sm_86). gemma4
+  tool+reasoning parsers work. Eager-only. Experimental: still 3 vendored fixes (sm_86
+  fp8-Marlin K-pad + TP-vocab, not upstreamed) + no soak. See the model's learnings + the fix dir README.

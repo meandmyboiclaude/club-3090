@@ -3,14 +3,18 @@ arches:
   - arch: Qwen3NextForCausalLM
     family: qwen3-next-hybrid
     engine_pin:
+      - pin: vllm-stable@v0.22.0
+        loads: true
+      - pin: vllm-stable@v0.24.0
+        loads: true
       - pin: vllm-nightly-clean@bf610c2f56764e1b30bc6065f4ceace3d6e59036
-        loads: true
+        loads: false
       - pin: vllm-nightly-mtp@01d4d1ad375dc5854779c593eee093bcebb0cada
-        loads: true
-        enables: [tq3-kv, mtp, genesis]
+        loads: false
+        reason: "Engine DEPRECATED 2026-06-05 (#254): purged nightly + Genesis path on hold; zero registry users, not offered for derive."
       - pin: vllm-nightly-dflash@e47c98ef7a38792996e452ef53914e21e41928e9
-        loads: true
-        enables: [dflash]
+        loads: false
+        reason: "Engine DEPRECATED 2026-06-05 (#327): purged nightly + DFlash blocked on Qwen3-Next (DeltaNet rollback); zero registry users, not offered for derive."
       - pin: genesis@v7.72.2
         loads: true
         enables: [tq3-kv, mtp, cliff2-mitigations]
@@ -27,7 +31,7 @@ arches:
     requires_trust_remote_code: "false"
     requires_trust_remote_code_evidence: "qwen3.6-27b weights config.json (qwen3.6-27b-autoround-int4) architectures=[Qwen3_5ForConditionalGeneration], auto_map absent, no *modeling*.py modeling file shipped with the weights -> built-in vLLM/transformers class, no remote code executed; see scripts/lib/profiles/profile_runtime.yml arch_model_xref.Qwen3NextForCausalLM"
     kernel_constraints:
-      - "AutoRound INT4 TP paths may need Marlin pad-sub-tile-n until vllm#40361 lands."
+      - "AutoRound INT4 TP paths need Marlin tile-N alignment — native in vLLM v0.24.0 via vllm#45295 (our vllm#40361 closed-superseded); the vendored vllm-marlin-pad overlay is de-registered (patches.yml: merged/deprecated 2026-07-02)."
       - "TurboQuant KV is Genesis-gated on shipped production composes."
       - "Boot-fit does not imply accumulated-context stability; single-card vLLM remains Cliff-2-prone."
     confidence: exact
@@ -36,8 +40,12 @@ arches:
   - arch: Qwen3_5MoeForConditionalGeneration
     family: qwen3-next-moe
     engine_pin:
-      - pin: vllm-nightly-clean@bf610c2f56764e1b30bc6065f4ceace3d6e59036
+      - pin: vllm-stable@v0.22.0
         loads: true
+      - pin: vllm-stable@v0.24.0
+        loads: true
+      - pin: vllm-nightly-clean@bf610c2f56764e1b30bc6065f4ceace3d6e59036
+        loads: false
       - pin: vllm-nightly-mtp@01d4d1ad375dc5854779c593eee093bcebb0cada
         loads: false
         reason: "Production Genesis path waits for a post-vllm#42521 re-anchor."
@@ -58,20 +66,18 @@ arches:
   - arch: Gemma4ForConditionalGeneration
     family: gemma4-swa-dense
     engine_pin:
-      - pin: vllm-nightly-clean@bf610c2f56764e1b30bc6065f4ceace3d6e59036
+      - pin: vllm-gemma-stable@v0.22.0
         loads: true
-      - pin: vllm-nightly-full@e47c98ef7a38792996e452ef53914e21e41928e9
+        enables: [mtp, int8-per-token-head]
+      - pin: vllm-gemma-stable@v0.21.0
         loads: true
-        enables: [int8-per-token-head, dflash-int8]
-      - pin: vllm-nightly-dflash@e47c98ef7a38792996e452ef53914e21e41928e9
-        loads: true
-        enables: [dflash]
+        enables: [mtp, int8-per-token-head]
     required_patches:
+      # v0.22.0 ships only the #40391 per-head-KV overlay (live-validated boot
+      # 2026-05-31). The tool-parser (#42006) + truncate (#41800) overlays were
+      # dropped: #41800/#41991 are in stock v0.22.0; #42006 dropped by maintainer
+      # call (bf16-mtp runs prod without it) — see docs/UPSTREAM.md.
       - gemma-vllm-pr40391-rebased
-      - gemma-vllm-gemma4-tool-parser-fixes
-      - gemma-vllm-gemma4-dflash
-      - gemma-vllm-gemma4-dflash-int8
-      - gemma-vllm-pr41800-truncate-prompt-tokens
     valid_tp:
       tp_divisors: [1, 2, 4, 8, 16]
       marlin_alignment_required: false
@@ -88,14 +94,15 @@ arches:
   - arch: Gemma4ForCausalLM
     family: gemma4-swa-dense
     engine_pin:
-      - pin: vllm-nightly-clean@bf610c2f56764e1b30bc6065f4ceace3d6e59036
+      - pin: vllm-gemma-stable@v0.22.0
         loads: true
-      - pin: vllm-nightly-full@e47c98ef7a38792996e452ef53914e21e41928e9
+        enables: [mtp, int8-per-token-head]
+      - pin: vllm-gemma-stable@v0.21.0
         loads: true
-        enables: [int8-per-token-head, dflash-int8]
+        enables: [mtp, int8-per-token-head]
     required_patches:
+      # See Gemma4ForConditionalGeneration above — v0.22.0 ships only #40391.
       - gemma-vllm-pr40391-rebased
-      - gemma-vllm-gemma4-tool-parser-fixes
     valid_tp:
       tp_divisors: [1, 2, 4, 8, 16]
       marlin_alignment_required: false
@@ -111,10 +118,14 @@ arches:
   - arch: Gemma4ForConditionalGenerationMoE
     family: gemma4-swa-moe
     engine_pin:
-      - pin: vllm-nightly-clean@bf610c2f56764e1b30bc6065f4ceace3d6e59036
+      - pin: vllm-stable@v0.22.0
         loads: true
-    required_patches:
-      - gemma-a4b-vllm-pr40886-awq-moe-keys
+      - pin: vllm-stable@v0.24.0
+        loads: true
+      - pin: vllm-nightly-clean@bf610c2f56764e1b30bc6065f4ceace3d6e59036
+        loads: false
+        reason: "Engine DEPRECATED 2026-06-06 (#326): purged nightly; AWQ compressed-tensors MoE serves on stock vllm-stable@v0.22.0 (Marlin WNA16 MoE). AutoRound int4-mixed stays Ampere-dead either way."
+    required_patches: []
     valid_tp:
       tp_divisors: [1, 2]
       marlin_alignment_required: true
@@ -131,10 +142,14 @@ arches:
   - arch: LlamaForCausalLM
     family: dense
     engine_pin:
-      - pin: vllm-stable@0.20.2
+      - pin: vllm-stable@v0.22.0
+        loads: true
+      - pin: vllm-stable@v0.24.0
+        loads: true
+      - pin: vllm-pip-baseline@0.20.2
         loads: true
       - pin: vllm-nightly-clean@bf610c2f56764e1b30bc6065f4ceace3d6e59036
-        loads: true
+        loads: false
     required_patches: []
     valid_tp:
       tp_divisors: [1, 2]
@@ -151,10 +166,14 @@ arches:
   - arch: MistralForCausalLM
     family: dense
     engine_pin:
-      - pin: vllm-stable@0.20.2
+      - pin: vllm-stable@v0.22.0
+        loads: true
+      - pin: vllm-stable@v0.24.0
+        loads: true
+      - pin: vllm-pip-baseline@0.20.2
         loads: true
       - pin: vllm-nightly-clean@bf610c2f56764e1b30bc6065f4ceace3d6e59036
-        loads: true
+        loads: false
     required_patches: []
     valid_tp:
       tp_divisors: [1, 2]
@@ -171,10 +190,14 @@ arches:
   - arch: Qwen2ForCausalLM
     family: dense
     engine_pin:
-      - pin: vllm-stable@0.20.2
+      - pin: vllm-stable@v0.22.0
+        loads: true
+      - pin: vllm-stable@v0.24.0
+        loads: true
+      - pin: vllm-pip-baseline@0.20.2
         loads: true
       - pin: vllm-nightly-clean@bf610c2f56764e1b30bc6065f4ceace3d6e59036
-        loads: true
+        loads: false
     required_patches: []
     valid_tp:
       tp_divisors: [1, 2]
@@ -191,10 +214,14 @@ arches:
   - arch: Qwen3ForCausalLM
     family: dense
     engine_pin:
+      - pin: vllm-stable@v0.22.0
+        loads: true
+      - pin: vllm-stable@v0.24.0
+        loads: true
       - pin: vllm-stable-next@>=0.21.0rc0,<0.21.0
         loads: true
       - pin: vllm-nightly-clean@bf610c2f56764e1b30bc6065f4ceace3d6e59036
-        loads: true
+        loads: false
     required_patches: []
     valid_tp:
       tp_divisors: [1, 2]
@@ -211,10 +238,14 @@ arches:
   - arch: Phi3ForCausalLM
     family: dense
     engine_pin:
-      - pin: vllm-stable@0.20.2
+      - pin: vllm-stable@v0.22.0
+        loads: true
+      - pin: vllm-stable@v0.24.0
+        loads: true
+      - pin: vllm-pip-baseline@0.20.2
         loads: true
       - pin: vllm-nightly-clean@bf610c2f56764e1b30bc6065f4ceace3d6e59036
-        loads: true
+        loads: false
     required_patches: []
     valid_tp:
       tp_divisors: [1]
@@ -231,10 +262,14 @@ arches:
   - arch: Gemma2ForCausalLM
     family: dense
     engine_pin:
-      - pin: vllm-stable@0.20.2
+      - pin: vllm-stable@v0.22.0
+        loads: true
+      - pin: vllm-stable@v0.24.0
+        loads: true
+      - pin: vllm-pip-baseline@0.20.2
         loads: true
       - pin: vllm-nightly-clean@bf610c2f56764e1b30bc6065f4ceace3d6e59036
-        loads: true
+        loads: false
     required_patches: []
     valid_tp:
       tp_divisors: [1, 2]
@@ -302,10 +337,14 @@ arches:
   - arch: PhiForCausalLM
     family: dense
     engine_pin:
-      - pin: vllm-stable@0.20.2
+      - pin: vllm-stable@v0.22.0
+        loads: true
+      - pin: vllm-stable@v0.24.0
+        loads: true
+      - pin: vllm-pip-baseline@0.20.2
         loads: true
       - pin: vllm-nightly-clean@bf610c2f56764e1b30bc6065f4ceace3d6e59036
-        loads: true
+        loads: false
     required_patches: []
     valid_tp:
       tp_divisors: [1, 2]
@@ -322,10 +361,14 @@ arches:
   - arch: Phi3SmallForCausalLM
     family: dense
     engine_pin:
-      - pin: vllm-stable@0.20.2
+      - pin: vllm-stable@v0.22.0
+        loads: true
+      - pin: vllm-stable@v0.24.0
+        loads: true
+      - pin: vllm-pip-baseline@0.20.2
         loads: true
       - pin: vllm-nightly-clean@bf610c2f56764e1b30bc6065f4ceace3d6e59036
-        loads: true
+        loads: false
     required_patches: []
     valid_tp:
       tp_divisors: [1, 2]
@@ -342,10 +385,14 @@ arches:
   - arch: GemmaForCausalLM
     family: dense
     engine_pin:
-      - pin: vllm-stable@0.20.2
+      - pin: vllm-stable@v0.22.0
+        loads: true
+      - pin: vllm-stable@v0.24.0
+        loads: true
+      - pin: vllm-pip-baseline@0.20.2
         loads: true
       - pin: vllm-nightly-clean@bf610c2f56764e1b30bc6065f4ceace3d6e59036
-        loads: true
+        loads: false
     required_patches: []
     valid_tp:
       tp_divisors: [1, 2]
@@ -362,10 +409,14 @@ arches:
   - arch: Gemma3ForCausalLM
     family: dense
     engine_pin:
-      - pin: vllm-stable@0.20.2
+      - pin: vllm-stable@v0.22.0
+        loads: true
+      - pin: vllm-stable@v0.24.0
+        loads: true
+      - pin: vllm-pip-baseline@0.20.2
         loads: true
       - pin: vllm-nightly-clean@bf610c2f56764e1b30bc6065f4ceace3d6e59036
-        loads: true
+        loads: false
     required_patches: []
     valid_tp:
       tp_divisors: [1, 2]
@@ -383,10 +434,14 @@ arches:
   - arch: Gemma3ForConditionalGeneration
     family: dense
     engine_pin:
-      - pin: vllm-stable@0.20.2
+      - pin: vllm-stable@v0.22.0
+        loads: true
+      - pin: vllm-stable@v0.24.0
+        loads: true
+      - pin: vllm-pip-baseline@0.20.2
         loads: true
       - pin: vllm-nightly-clean@bf610c2f56764e1b30bc6065f4ceace3d6e59036
-        loads: true
+        loads: false
     required_patches: []
     valid_tp:
       tp_divisors: [1, 2]
@@ -404,10 +459,14 @@ arches:
   - arch: Starcoder2ForCausalLM
     family: dense
     engine_pin:
-      - pin: vllm-stable@0.20.2
+      - pin: vllm-stable@v0.22.0
+        loads: true
+      - pin: vllm-stable@v0.24.0
+        loads: true
+      - pin: vllm-pip-baseline@0.20.2
         loads: true
       - pin: vllm-nightly-clean@bf610c2f56764e1b30bc6065f4ceace3d6e59036
-        loads: true
+        loads: false
     required_patches: []
     valid_tp:
       tp_divisors: [1, 2]
@@ -424,10 +483,14 @@ arches:
   - arch: CohereForCausalLM
     family: dense
     engine_pin:
-      - pin: vllm-stable@0.20.2
+      - pin: vllm-stable@v0.22.0
+        loads: true
+      - pin: vllm-stable@v0.24.0
+        loads: true
+      - pin: vllm-pip-baseline@0.20.2
         loads: true
       - pin: vllm-nightly-clean@bf610c2f56764e1b30bc6065f4ceace3d6e59036
-        loads: true
+        loads: false
     required_patches: []
     valid_tp:
       tp_divisors: [1, 2]
@@ -444,10 +507,14 @@ arches:
   - arch: InternLM2ForCausalLM
     family: dense
     engine_pin:
-      - pin: vllm-stable@0.20.2
+      - pin: vllm-stable@v0.22.0
+        loads: true
+      - pin: vllm-stable@v0.24.0
+        loads: true
+      - pin: vllm-pip-baseline@0.20.2
         loads: true
       - pin: vllm-nightly-clean@bf610c2f56764e1b30bc6065f4ceace3d6e59036
-        loads: true
+        loads: false
     required_patches: []
     valid_tp:
       tp_divisors: [1, 2]
@@ -464,10 +531,10 @@ arches:
   - arch: MixtralForCausalLM
     family: moe
     engine_pin:
-      - pin: vllm-stable@0.20.2
+      - pin: vllm-pip-baseline@0.20.2
         loads: true
       - pin: vllm-nightly-clean@bf610c2f56764e1b30bc6065f4ceace3d6e59036
-        loads: true
+        loads: false
     required_patches: []
     valid_tp:
       tp_divisors: [1, 2]
@@ -484,10 +551,10 @@ arches:
   - arch: Qwen2MoeForCausalLM
     family: moe
     engine_pin:
-      - pin: vllm-stable@0.20.2
+      - pin: vllm-pip-baseline@0.20.2
         loads: true
       - pin: vllm-nightly-clean@bf610c2f56764e1b30bc6065f4ceace3d6e59036
-        loads: true
+        loads: false
     required_patches: []
     valid_tp:
       tp_divisors: [1, 2]
@@ -504,10 +571,10 @@ arches:
   - arch: Qwen3MoeForCausalLM
     family: moe
     engine_pin:
-      - pin: vllm-stable@0.20.2
+      - pin: vllm-pip-baseline@0.20.2
         loads: true
       - pin: vllm-nightly-clean@bf610c2f56764e1b30bc6065f4ceace3d6e59036
-        loads: true
+        loads: false
     required_patches: []
     valid_tp:
       tp_divisors: [1, 2]
@@ -524,10 +591,14 @@ arches:
   - arch: Qwen2VLForConditionalGeneration
     family: dense
     engine_pin:
-      - pin: vllm-stable@0.20.2
+      - pin: vllm-stable@v0.22.0
+        loads: true
+      - pin: vllm-stable@v0.24.0
+        loads: true
+      - pin: vllm-pip-baseline@0.20.2
         loads: true
       - pin: vllm-nightly-clean@bf610c2f56764e1b30bc6065f4ceace3d6e59036
-        loads: true
+        loads: false
     required_patches: []
     valid_tp:
       tp_divisors: [1, 2]

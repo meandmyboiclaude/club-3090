@@ -93,19 +93,52 @@ def _weight_size(model, variant):
 def _load_model_specs_from_yaml(profiles):
     qwen, gemma = profiles.models["qwen3.6-27b"], profiles.models["gemma-4-31b"]
     qwen_moe, gemma_moe = profiles.models["qwen3.6-35b-a3b"], profiles.models["gemma-4-26b-a4b"]
+    gemma12 = profiles.models["gemma-4-12b"]
     q_fields = ("hidden_size", "num_hidden_layers", "num_gdn_layers", "num_attn_layers", "num_attn_heads", "num_kv_heads", "head_dim_attn", "linear_num_v_heads", "linear_num_k_heads", "linear_v_head_dim", "linear_k_head_dim", "linear_conv_kernel_dim", "max_ctx_supported", "attention_k_eq_v")
     g_fields = ("hidden_size", "intermediate_size", "num_hidden_layers", "num_full_attn_layers", "num_sliding_attn_layers", "num_attn_heads", "num_kv_heads", "head_dim_sliding", "global_head_dim", "sliding_window", "max_ctx_supported", "attention_k_eq_v")
     gm_fields = (*g_fields, "num_global_kv_heads", "num_experts", "num_experts_per_tok", "moe_intermediate_size", "active_params_b", "mtp_num_hidden_layers")
     qm_fields = (*q_fields, "num_experts", "num_experts_per_tok", "moe_intermediate_size", "shared_expert_intermediate_size", "active_params_b", "mtp_num_hidden_layers")
-    qspec = {"model_id": qwen.id, "model_family": qwen.family, **{k: getattr(qwen, k) for k in q_fields}, "valid_tp": list(qwen.valid_tp), "weights_total_gb": _weight_size(qwen, qwen.default_weight_variant), "mamba_state_bytes": 4, "chunk_size": 256, "mtp_n_default": profiles.drafters["qwen-mtp-builtin"].n_default}
-    qmspec = {"model_id": qwen_moe.id, "model_family": qwen_moe.family, **{k: getattr(qwen_moe, k) for k in qm_fields}, "valid_tp": list(qwen_moe.valid_tp), "weights_total_gb": _weight_size(qwen_moe, qwen_moe.default_weight_variant), "weights_gptq_gb": _weight_size(qwen_moe, "gptq_int4"), "mamba_state_bytes": 4, "chunk_size": 256, "mtp_n_default": profiles.drafters["qwen-mtp-builtin"].n_default}
+    qspec = {"model_id": qwen.id, "model_family": qwen.family, **{k: getattr(qwen, k) for k in q_fields}, "valid_tp": list(qwen.valid_tp), "weights_total_gb": _weight_size(qwen, qwen.default_weight_variant), "weights_nvfp4_gb": _weight_size(qwen, "nvfp4"), "mamba_state_bytes": 4, "chunk_size": 256, "mtp_n_default": profiles.drafters["qwen-mtp-builtin"].n_default}
+    qmspec = {"model_id": qwen_moe.id, "model_family": qwen_moe.family, **{k: getattr(qwen_moe, k) for k in qm_fields}, "valid_tp": list(qwen_moe.valid_tp), "weights_total_gb": _weight_size(qwen_moe, qwen_moe.default_weight_variant), "weights_gptq_gb": _weight_size(qwen_moe, "gptq_int4"), "weights_nvfp4_gb": _weight_size(qwen_moe, "nvfp4"), "mamba_state_bytes": 4, "chunk_size": 256, "mtp_n_default": profiles.drafters["qwen-mtp-builtin"].n_default}
     gspec = {"model_id": gemma.id, "model_family": gemma.family, **{k: getattr(gemma, k) for k in g_fields}, "valid_tp": list(gemma.valid_tp), "weights_int4_gb": _weight_size(gemma, "autoround-int4"), "weights_awq_gb": _weight_size(gemma, "awq"), "weights_bf16_gb": _weight_size(gemma, "bf16"), "drafter_mtp_gb": float(profiles.drafters["gemma-it-assistant"].vram_footprint_gb), "drafter_dflash_gb": float(profiles.drafters["gemma-dflash"].vram_footprint_gb), "mtp_n_default": profiles.drafters["gemma-it-assistant"].n_default}
     gmspec = {"model_id": gemma_moe.id, "model_family": gemma_moe.family, **{k: getattr(gemma_moe, k) for k in gm_fields}, "valid_tp": list(gemma_moe.valid_tp), "weights_int4_gb": _weight_size(gemma_moe, "autoround-int4-mixed"), "weights_awq_gb": _weight_size(gemma_moe, "awq"), "drafter_mtp_gb": float(profiles.drafters["gemma-26b-it-assistant"].vram_footprint_gb), "mtp_n_default": profiles.drafters["gemma-26b-it-assistant"].n_default}
+    # Gemma-4-12B (gemma4_unified arch). Its TEXT backbone is gemma4-swa-dense
+    # shaped (same SWA KV math family as gemma-4-31b), so it rides the SAME
+    # "gemma4-swa-dense" prediction path — we set model_family to that internal
+    # KV-family tag (NOT its ModelProfile family "gemma4-unified", which is the
+    # vLLM arch name). It ships bf16 weights + an Intel AutoRound INT8 variant
+    # (~13 GB, W8A16) + an unsloth QAT W4A16 int4 variant (~9.6 GB,
+    # compressed-tensors) + a small assistant drafter. weights_int4_gb/weights_awq_gb
+    # carry the REAL int4 (qat-w4a16) footprint; weights_int8_gb the INT8 footprint
+    # (vllm/gemma-12b-single-int8-mtp path). NOTE: int4/awq FORMERLY pointed at the
+    # bf16 blob (23.9 GB) as a placeholder when no int4 variant existed — that
+    # over-priced the int4 SINGLE-card path by ~14 GB (false-FAIL'd
+    # vllm/gemma-12b-qat-w4a16-single at 27.9 GB vs the ~22.6 GB it actually boots
+    # at; the dual path hid it via /tp). Shared activation/overhead + the measured
+    # `measured_kv_growing_bpt_tp1` term are UNCHANGED — this is a weight-SIZE fix only.
+    # Activation/overhead constants stay the SHARED Gemma dense constants (NOT
+    # re-tuned). The ONE measured calibration is the growing KV per-token —
+    # `measured_kv_growing_bpt_tp1` (see kv_pool_per_card_bytes): gemma4_unified's
+    # global-layer KV measured 1.44x LOWER than the 31B-derived global-only
+    # formula predicts, so we ride the measurement for the 12B only.
+    g12_bf16 = _weight_size(gemma12, "bf16")
+    g12_int8 = _weight_size(gemma12, "autoround-int8")
+    g12_int4 = _weight_size(gemma12, "qat-w4a16")
+    g12spec = {"model_id": gemma12.id, "model_family": "gemma4-swa-dense", **{k: getattr(gemma12, k) for k in g_fields}, "valid_tp": list(gemma12.valid_tp), "weights_int4_gb": g12_int4, "weights_awq_gb": g12_int4, "weights_bf16_gb": g12_bf16, "weights_int8_gb": g12_int8, "drafter_mtp_gb": float(profiles.drafters["gemma-12b-it-assistant"].vram_footprint_gb), "measured_kv_growing_bpt_tp1": 45632, "mtp_n_default": profiles.drafters["gemma-12b-it-assistant"].n_default}
+    # Agents-A1 (InternScience 35B agentic MoE): geometry verified byte-identical
+    # to qwen3.6-35b-a3b (same Qwen3-Next MoE arch class) — rides the SAME
+    # qwen3-next-moe KV math. Own weights footprint (FP8-dynamic 36 GB, Marlin
+    # weight-only on Ampere). No MTP head in the checkpoint (safetensors header
+    # scan 2026-07-03: 0 mtp tensors) — mtp_n_default is inert (drafter=None).
+    a1 = profiles.models["agents-a1"]
+    a1spec = {"model_id": a1.id, "model_family": a1.family, **{k: getattr(a1, k) for k in qm_fields}, "valid_tp": list(a1.valid_tp), "weights_total_gb": _weight_size(a1, a1.default_weight_variant), "mamba_state_bytes": 4, "chunk_size": 256, "mtp_n_default": profiles.drafters["qwen-mtp-builtin"].n_default}
     return {
         "qwen3.6-27b": qspec,
         "qwen3.6-35b-a3b": qmspec,
+        "agents-a1": a1spec,
         "gemma-4-31b": gspec,
         "gemma-4-26b-a4b": gmspec,
+        "gemma-4-12b": g12spec,
     }
 
 
@@ -114,6 +147,7 @@ QWEN36_27B = MODEL_SPECS["qwen3.6-27b"]
 QWEN36_35B_A3B = MODEL_SPECS["qwen3.6-35b-a3b"]
 GEMMA4_31B = MODEL_SPECS["gemma-4-31b"]
 GEMMA4_26B_A4B = MODEL_SPECS["gemma-4-26b-a4b"]
+GEMMA4_12B = MODEL_SPECS["gemma-4-12b"]
 
 
 # =============================================================================
@@ -133,6 +167,9 @@ KV_FORMAT_BYTES = {
     "q4_0":                  0.5 + 0.0625, # 4-bit + per-group scale
     "k8v4":                  0.75,         # avg of K=int8 V=int4
     "turboquant_3bit_nc":    0.375 + 0.05, # 3 bits + small QJL overhead
+    "nvfp4":                 0.5 + 0.0625, # 4-bit elements + fp8 block scale per 16
+                                           # (PROJECTED — Blackwell-only, no measured
+                                           # boot on this stack yet; #246 A/B arm 3)
 }
 
 INDEXER_FORMAT_BYTES = {
@@ -163,14 +200,18 @@ QWEN_GDN_ACTIVATION_COEF = {
     "q4_0":               155,
     "k8v4":               155,
     "turboquant_3bit_nc": 165,
+    "nvfp4":              130,  # PROJECTED — mirror fp8 until a Blackwell boot calibrates it (#246)
 }
 
 # ---- Qwen MoE activation + built-in MTP workspace ----
 # Path-B low-anchor fit from the two v0.7.3 preview rows. The per-token GDN
 # coefficient follows the dense-Qwen shape; the small constant captures MoE
-# expert dispatch/router buffers. Current vLLM TP preview effectively keeps
-# the quantized MoE weights resident per card, so weights are not divided by TP
-# for qwen3-next-moe in _weights_per_card_gb().
+# expert dispatch/router buffers. NOTE: vLLM shards both attention and MoE
+# expert weights across TP ranks, so weights ARE divided by TP for
+# qwen3-next-moe in _weights_per_card_gb() (fixed in #260). The ≈budget peak
+# on the live rows is the elastic KV pool filling spare VRAM, not resident
+# full-quant weights — the old no-/tp assumption over-predicted long-ctx
+# configs (e.g. 262K) into a false FAIL.
 QWEN_MOE_ACTIVATION_COEF = {
     "fp16":               110,
     "bf16":               110,
@@ -180,6 +221,7 @@ QWEN_MOE_ACTIVATION_COEF = {
     "q4_0":               130,
     "k8v4":               130,
     "turboquant_3bit_nc": 140,
+    "nvfp4":              105,  # PROJECTED — mirror fp8 until a Blackwell boot calibrates it (#246)
 }
 QWEN_MOE_EXPERT_DISPATCH_GB = 0.20
 QWEN_MOE_BUILTIN_MTP_WORKSPACE_GB = 0.10
@@ -224,10 +266,16 @@ GENERIC_DENSE_ACTIVATION_FLOOR_GB = 1.5         # ≥ Gemma dense constant activ
 # Compose presets (per-model)
 # =============================================================================
 COMPOSE_ALIAS_TEXT = {
-    "qwen3.6-27b": "minimal=vllm/minimal long-text=vllm/long-text long-text-no-mtp=vllm/long-text-no-mtp long-vision=vllm/long-vision bounded-thinking=vllm/bounded-thinking tools-text=vllm/tools-text dual=vllm/dual dual-turbo=vllm/dual-turbo dual-dflash=vllm/dual-dflash dual-dflash-noviz=vllm/dual-dflash-noviz dual4=vllm/dual4 dual4-dflash=vllm/dual4-dflash",
-    "qwen3.6-35b-a3b": "qwen-a3b-preview-single=vllm/qwen-a3b-preview-single qwen-a3b-preview=vllm/qwen-a3b-preview qwen-a3b-preview-mtp=vllm/qwen-a3b-preview-mtp",
-    "gemma-4-31b": "gemma-dual=vllm/gemma-mtp gemma-dual-int8=vllm/gemma-int8 gemma-dual-int8-262k=vllm/gemma-int8-262k gemma-dual-bf16=vllm/gemma-bf16 gemma-dual-int8-tq3=vllm/gemma-int8-tq3 gemma-dual-dflash=vllm/gemma-dflash gemma-dual-dflash-int8=vllm/gemma-dflash-int8 gemma-dual-awq=vllm/gemma-awq gemma-single=vllm/gemma-mtp-tp1",
-    "gemma-4-26b-a4b": "gemma-a4b-single=vllm/gemma-a4b-single gemma-a4b=vllm/gemma-a4b gemma-a4b-awq=vllm/gemma-a4b-awq gemma-a4b-awq-mtp=vllm/gemma-a4b-awq-mtp",
+    "qwen3.6-27b": "minimal=vllm/minimal dual=vllm/dual nvfp4-single=vllm/qwen-27b-single-nvfp4 nvfp4-dual=vllm/qwen-27b-dual-nvfp4",
+    "qwen3.6-35b-a3b": "qwen-a3b-preview-single=vllm/qwen-a3b-preview-single qwen-35b-a3b-dual=vllm/qwen-35b-a3b-dual nvfp4-single=vllm/qwen-35b-a3b-single-nvfp4 nvfp4-dual=vllm/qwen-35b-a3b-dual-nvfp4",
+    "agents-a1": "agents-a1-dual=vllm/agents-a1-dual",
+    "gemma-4-31b": "gemma-dual=vllm/gemma-bf16-mtp gemma-dual-int8=vllm/gemma-int8-mtp gemma-single=vllm/gemma-mtp-tp1",
+    # gemma-4-12b legacy alias namespace is keyed by model id, so reusing the
+    # bare `gemma-dual` string here is harmless — compat + the CLI always pass
+    # an explicit --model, and the reverse map is keyed by (unique) registry
+    # slug. `gemma-dual` → the MTP dual; `gemma-no-mtp` → the no-drafter dual.
+    "gemma-4-12b": "gemma-dual=vllm/gemma-12b-dual-bf16-mtp gemma-single-int8-mtp=vllm/gemma-12b-single-int8-mtp",
+    "gemma-4-26b-a4b": "gemma-26ba4b-single=vllm/gemma-26ba4b-single gemma-26ba4b-dual=vllm/gemma-26ba4b-dual",
 }
 COMPOSE_ALIASES = {model: tuple(part.split("=", 1) for part in text.split()) for model, text in COMPOSE_ALIAS_TEXT.items()}
 
@@ -240,9 +288,6 @@ REGISTRY_TO_LEGACY_COMPOSE = {
 COMPOSE_COMPAT_OVERRIDES = {
     ("qwen3.6-27b", "minimal"): {"max_num_seqs": 4, "mem_util": 0.90},
     ("qwen3.6-27b", "dual"): {"mem_util": 0.95},
-    ("qwen3.6-27b", "dual-turbo"): {"mem_util": 0.95},
-    ("qwen3.6-27b", "dual-dflash-noviz"): {"max_num_seqs": 2},
-    ("qwen3.6-27b", "dual4"): {"mem_util": 0.95},
     ("gemma-4-31b", "gemma-single"): {"kv_format": "fp8_e5m2"},
 }
 
@@ -256,16 +301,20 @@ def _compose_cfg_from_registry(profiles, model_id, legacy_name, registry_name):
         cfg.update({"mtp": False, "dflash_draft_gb": float(drafter.vram_footprint_gb)})
     if drafter is not None:
         cfg["mtp_n"] = int(drafter.n_default)
-    if model_id == "gemma-4-31b" and drafter is not None:
+    # gemma-4-12b rides the shared Gemma dense path (model_family
+    # gemma4-swa-dense in MODEL_SPECS); treat its drafter + weights the same way.
+    if model_id in ("gemma-4-31b", "gemma-4-12b") and drafter is not None:
         cfg["drafter_gb"] = float(drafter.vram_footprint_gb)
-    if model_id == "gemma-4-31b":
-        cfg["weights_variant"] = {"awq": "awq", "bf16": "bf16"}.get(entry["weights_variant"], "int4")
+    if model_id in ("gemma-4-31b", "gemma-4-12b"):
+        cfg["weights_variant"] = {"awq": "awq", "bf16": "bf16", "autoround-int8": "int8"}.get(entry["weights_variant"], "int4")
     if model_id == "gemma-4-26b-a4b":
         cfg["weights_variant"] = "awq" if entry["weights_variant"] == "awq" else "int4"
         if drafter is not None:
             cfg["drafter_gb"] = float(drafter.vram_footprint_gb)
     if model_id == "qwen3.6-35b-a3b":
-        cfg["weights_variant"] = "gptq" if entry["weights_variant"] == "gptq_int4" else "default"
+        cfg["weights_variant"] = {"gptq_int4": "gptq", "nvfp4": "nvfp4"}.get(entry["weights_variant"], "default")
+    if model_id == "qwen3.6-27b":
+        cfg["weights_variant"] = "nvfp4" if entry["weights_variant"] == "nvfp4" else "default"
     cfg.update(COMPOSE_COMPAT_OVERRIDES.get((model_id, legacy_name), {}))
     return cfg
 
@@ -330,23 +379,41 @@ class CacheBreakdown:
 def _weights_per_card_gb(spec, tp, weights_variant="default"):
     """Return per-card weights footprint in GB after TP split."""
     if spec["model_family"] == "qwen3-next-hybrid":
+        # nvfp4 (nvidia modelopt, 21.9 GB) vs the default AutoRound INT4 —
+        # the community Hopper/Blackwell slugs (vllm/qwen-27b-*-nvfp4).
+        if weights_variant == "nvfp4":
+            return spec["weights_nvfp4_gb"] / tp
         return spec["weights_total_gb"] / tp
     elif spec["model_family"] == "qwen3-next-moe":
-        # Current vLLM MoE preview keeps expert weights effectively resident
-        # per TP rank; live 16K rows calibrate to full quant weight per card.
+        # vLLM shards attention + MoE expert weights across TP ranks, so
+        # per-card weights are /tp (#260). The old no-/tp assumption was
+        # mis-inferred from the live ≈budget peak — but that peak is the
+        # elastic KV pool filling spare VRAM (vLLM allocates all available
+        # KV memory as blocks), not resident full-quant weights. Not dividing
+        # over-predicted the fixed footprint and turned long-ctx configs
+        # (e.g. 262K dual, which fits) into a false FAIL.
         if weights_variant == "gptq":
-            return spec["weights_gptq_gb"]
-        return spec["weights_total_gb"]
+            return spec["weights_gptq_gb"] / tp
+        if weights_variant == "nvfp4":
+            return spec["weights_nvfp4_gb"] / tp
+        return spec["weights_total_gb"] / tp
     elif spec["model_family"] == "gemma4-swa-dense":
         if weights_variant == "awq":
             return spec["weights_awq_gb"] / tp
         elif weights_variant == "bf16":
             return spec["weights_bf16_gb"] / tp
+        elif weights_variant == "int8":
+            return spec["weights_int8_gb"] / tp
         else:  # int4 default
             return spec["weights_int4_gb"] / tp
     elif spec["model_family"] == "gemma4-swa-moe":
-        # Same MoE-residency assumption as Qwen A3B; validated by the
-        # v0.7.3 AWQ rows where TP=2 still peaks near a full AWQ shard/card.
+        # NOT /tp'd (unlike qwen3-next-moe, fixed in #260) — deliberately left
+        # pending its own re-calibration. The v0.7.3 AWQ rows peak at 23.45–
+        # 23.50 GB/card (TP=2, ~0.95 GB above the 22.08 budget), so the current
+        # no-/tp footprint produces a *protective* TIGHT verdict there. Dividing
+        # by TP without a measured fixed-footprint anchor would relax that to
+        # PASS for a config that genuinely runs at 23.5/24. Re-do with a proper
+        # boot-log anchor (KV-pool tokens → fixed = peak − pool) before /tp'ing.
         if weights_variant == "int4":
             return spec["weights_int4_gb"]
         return spec["weights_awq_gb"]
@@ -371,11 +438,13 @@ def kv_pool_per_card_bytes(spec, kv_format, max_ctx, max_num_seqs, tp, mtp_n=0):
       K and V stored independently → ×2 factor.
 
     For Gemma 4 (SWA + dense MLP):
-      Only the 10 full_attention layers grow KV (at global_head_dim=512).
-      The 50 sliding_attention layers hold a FIXED window of 1024 tokens
-      (constant in ctx, contributes a separate small term).
-      K==V tying IS exploited by vLLM's allocator → ×1 factor (calibrated
-      against BENCHMARKS data; see docs/KV_MATH.md).
+      Only the full_attention layers grow KV (at global_head_dim); the count is
+      read from the spec, not hardcoded — 10/50 full/sliding on the 31B, 8/40 on
+      the 12B. The sliding_attention layers hold a FIXED window (constant in ctx,
+      separate small term). K==V tying IS exploited by vLLM's allocator → ×1
+      factor (calibrated against BENCHMARKS data; see docs/KV_MATH.md).
+      gemma4_unified (12B) overrides the growing per-token with a MEASURED
+      constant (`measured_kv_growing_bpt_tp1`) — see the branch below.
     """
     bpe = KV_FORMAT_BYTES[kv_format]
 
@@ -418,13 +487,28 @@ def kv_pool_per_card_bytes(spec, kv_format, max_ctx, max_num_seqs, tp, mtp_n=0):
 
     elif spec["model_family"] == "gemma4-swa-dense":
         # K==V tied → ×1 storage
-        per_token_growing = (
-            spec["num_full_attn_layers"]
-            * spec["num_kv_heads"]
-            * spec["global_head_dim"]
-            * 1  # K==V tied; vLLM stores once
-            * bpe
-        )
+        measured_bpt_tp1 = spec.get("measured_kv_growing_bpt_tp1")
+        if measured_bpt_tp1 is not None:
+            # gemma4_unified (gemma-4-12b) MEASURED calibration. The 31B-derived
+            # global-only formula (below) predicts 65,536 B/tok TP1 for the 12B
+            # (8 full x 8 kv x 512 global_head_dim x bpe2), but the LIVE
+            # gemma4_unified pool measured 22,816 B/tok/card = 45,632 TP1
+            # (8.16 GiB available KV / 384,019 tokens @ 131K / TP2 / mem-util
+            # 0.90, MTP, 2026-06-04) — 1.44x LOWER. Cause: gemma4_unified's
+            # unified-KV global layers + vLLM's hybrid-SWA pool accounting differ
+            # from the 31B's gemma4-swa-dense. bf16 baseline; scale by bpe for
+            # quantized KV. Single-anchor measured calibration; the precise arch
+            # decomposition is a TODO (needs vLLM kv_cache_utils source or >1
+            # anchor). Set ONLY on the 12B spec, so the 31B keeps the formula.
+            per_token_growing = measured_bpt_tp1 * (bpe / 2.0)
+        else:
+            per_token_growing = (
+                spec["num_full_attn_layers"]
+                * spec["num_kv_heads"]
+                * spec["global_head_dim"]
+                * 1  # K==V tied; vLLM stores once
+                * bpe
+            )
         # No MTP draft-token bump on Gemma — drafter is a separate model
         growing = (per_token_growing / tp) * max_ctx * max_num_seqs
 
@@ -795,16 +879,29 @@ def predict(
     #            concurrency reduced (BOOT OK, but `--max-num-seqs` may not be
     #            honored at full max_ctx).
     #   - PASS: requested KV fits with room to spare.
-    # The Qwen A3B preview is KV-light enough that the live 16K rows boot with
-    # <0.1 GB requested growing KV. Keep the older 1 GB guard for dense/long-KV
-    # models, but avoid false FAILs on this MoE family.
-    MIN_KV_GB = 0.05 if spec["model_family"] == "qwen3-next-moe" else 1.0
+    # vLLM's boot pre-check is token-capacity based, NOT an absolute byte floor:
+    # the (capped) growing KV pool must hold at least ONE max_model_len sequence.
+    # Growing KV scales linearly with max_num_seqs, so one sequence's growing KV
+    # is kv_pool_requested_gb / max_num_seqs. KV-light families (gemma4 SWA, Qwen3
+    # -Next MoE) legitimately boot with a sub-GB growing pool — the old flat 1.0 GB
+    # floor false-FAILed them (e.g. gemma-26ba4b-single: 0.78 GB pool holds 17,490
+    # tok ≥ 16,384 max_ctx, boots+serves live, #326). So lower the floor to the
+    # per-sequence requirement — which also generalizes the old qwen3-next-moe 0.05
+    # special-case. CAP it at the legacy 1.0 GB though: for dense/long-KV configs a
+    # single sequence needs many GB, and a hard per-seq threshold would false-FAIL
+    # measured-working configs sitting inside the estimator's ±1.5 GB band (e.g.
+    # gemma-dual-int8 @262K: 10.71 GB avail vs 10.84 GB/seq, 1.2% short but boots).
+    # Result: relax the floor for KV-light models, leave dense on its prior ≥1 GB
+    # behavior. Still FAILs when even one (small) sequence won't fit / fixed alone
+    # exceeds budget (available_for_kv → 0).
+    per_sequence_kv_gb = kv_pool_requested_gb / max(max_num_seqs, 1)
+    MIN_KV_GB = max(0.01, min(1.0, per_sequence_kv_gb))
     if available_for_kv < MIN_KV_GB:
         verdict = "FAIL"
         notes.append(
-            f"fixed components ({fixed_gb:.1f} GB) leave only {available_for_kv:.1f} GB for KV pool "
-            f"(need ≥{MIN_KV_GB:.1f} GB minimum); vLLM pre-check will refuse — "
-            f"lower max_ctx, drop a drafter, or raise mem_util"
+            f"fixed components ({fixed_gb:.1f} GB) leave only {available_for_kv:.2f} GB for KV — "
+            f"below the {MIN_KV_GB:.2f} GB that one max_ctx={max_ctx:,} sequence needs; vLLM "
+            f"pre-check will refuse to boot — lower max_ctx, drop a drafter, or raise mem_util"
         )
     elif kv_pool_requested_gb > available_for_kv * 1.05:
         verdict = "TIGHT"
@@ -827,6 +924,17 @@ def predict(
         notes.append("⚠ Gemma 4 31B TP=1 needs ≥32 GB VRAM; 24 GB Ampere boot-OOMs (model weights + drafter + min KV)")
     if spec["model_family"] in {"qwen3-next-moe", "gemma4-swa-moe"}:
         notes.append("MoE projection uses low-anchor calibration; add max_ctx/max_num_seqs A/B rows before treating this as production-grade.")
+    if (
+        spec["model_family"] == "qwen3-next-moe"
+        and kv_pool_requested_gb > 0
+        and available_for_kv > kv_pool_requested_gb * 1.5
+    ):
+        notes.append(
+            f"DeltaNet-hybrid KV is cheap — one max_ctx={max_ctx:,} seq needs only "
+            f"{kv_pool_requested_gb:.2f} GB, but vLLM fills the ~{available_for_kv:.1f} GB available pool "
+            f"to budget (≈{available_for_kv / kv_pool_requested_gb:.1f}× concurrency headroom). The sub-budget "
+            f"'predicted total' is the single-seq floor, not spare VRAM you can repurpose."
+        )
     if tp > 4:
         notes.append("TP > 4 predictions are extrapolated; report deltas via scripts/report.sh --bench")
 
@@ -1191,6 +1299,284 @@ def solve_max_ctx(spec, kv_format, max_num_seqs, tp, mem_util, vram_gb,
 
 
 # =============================================================================
+# --fit — structured verdict for a registry slug or bare model on a given card
+# =============================================================================
+#
+# Strictly-additive wrapper. REUSES the SAME pricing the pull.sh gate relies
+# on (predict() / solve_max_ctx() / _RAW_VERDICT_MAP via raw_verdict()), the
+# SAME registry→predict()-kwargs conversion the calibration path uses
+# (_compose_cfg_from_registry), and the SAME default-slug resolver the
+# launchers use (compose_registry.curated_default_target). No new math.
+
+# Known per-card VRAM (GB) for the `--card` flag. A bare numeric string is
+# also accepted (e.g. `--card 48`) so this never blocks an uncatalogued card.
+CARD_VRAM_GB = {
+    "rtx3090": 24.0,
+    "3090": 24.0,
+    "rtx4090": 24.0,
+    "4090": 24.0,
+    "rtx3090ti": 24.0,
+    "a6000": 48.0,
+    "rtxa6000": 48.0,
+    "a100-40": 40.0,
+    "a100-80": 80.0,
+    "a100": 80.0,
+    "h100": 80.0,
+    "l40s": 48.0,
+    "l40": 48.0,
+    "rtx5090": 32.0,
+    "5090": 32.0,
+    "rtx3080": 10.0,
+    "rtx3060": 12.0,
+    # Canonical hyphenated hardware-profile ids — the exact form switch.sh
+    # --explain (explain_detect_card) and the rest of the stack emit. Values
+    # mirror scripts/lib/profiles/hardware/*.yml.
+    "rtx-3090": 24.0,
+    "rtx-3090-ti": 24.0,
+    "rtx-4090": 24.0,
+    "rtx-5090": 32.0,
+    "rtx-a5000": 24.0,
+    "a5000": 24.0,
+    "a100-40gb": 40.0,
+    "h100-80gb": 80.0,
+    "rtx-3060-12gb": 12.0,
+    "rtx-6000-pro-blackwell": 96.0,
+}
+
+# Documented estimator error band (the file states "±1.5 GB error band" in
+# run_calibration() + the solver epilogue). Surfaced verbatim so consumers
+# can compare vram_est to budget with the same tolerance the gate uses.
+FIT_BAND_GB = 1.5
+
+# Per-card SM (compute capability) for the required_sm gate — derived from the
+# hardware profiles (the SAME source compat.py's C3 floor uses), keyed like
+# CARD_VRAM_GB (canonical hyphenated id + dehyphenated alias). A bare-number
+# --card describes VRAM only, so it has no SM → the gate is skipped
+# (permissive by design: an uncatalogued card is not assumed incompatible).
+CARD_SM = {}
+for _hid, _h in PROFILES.hardware.items():
+    CARD_SM[_hid] = float(_h.sm)
+    CARD_SM[_hid.replace("-", "")] = float(_h.sm)
+
+
+def _resolve_card_sm(card: Optional[str]) -> Optional[float]:
+    if card is None:
+        return None
+    raw = str(card).strip()
+    try:
+        float(raw)
+        return None  # bare VRAM number — carries no arch info
+    except ValueError:
+        pass
+    key = raw.lower().replace(" ", "").replace("_", "").replace("/", "-")
+    return CARD_SM.get(key) or CARD_SM.get(key.replace("-", ""))
+
+
+def _resolve_card_vram_gb(card: Optional[str]) -> Optional[float]:
+    """Map a `--card` value to per-card VRAM in GB. Accepts a known card key
+    (case/sep-insensitive) or a bare positive number. Returns None when the
+    value is neither — the caller emits an `unknown` verdict, never crashes."""
+    if card is None:
+        return None
+    raw = str(card).strip()
+    try:
+        v = float(raw)
+        return v if v > 0 else None
+    except ValueError:
+        pass
+    key = raw.lower().replace(" ", "").replace("_", "").replace("/", "-")
+    # Try the normalized key, then a hyphen-stripped variant, so a hyphenated
+    # profile-id ('rtx-3090') also matches the de-hyphenated keys ('rtx3090').
+    return CARD_VRAM_GB.get(key) or CARD_VRAM_GB.get(key.replace("-", ""))
+
+
+def _resolve_fit_slug(target: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Resolve a `--fit` argument to a priceable vLLM registry slug.
+
+    Accepts either a registry slug (e.g. `vllm/dual`) or a bare model id
+    (e.g. `qwen3.6-27b` → its curated default, preferring dual then single).
+
+    Returns (slug, model_id, error). On success error is None; on failure
+    slug/model_id are None and error explains why (so the caller emits an
+    `unknown` verdict rather than raising)."""
+    from scripts.lib.profiles.compose_registry import (
+        COMPOSE_REGISTRY,
+        curated_default_target,
+        model_of_slug,
+        model_set,
+    )
+
+    if target in COMPOSE_REGISTRY:
+        slug = target
+        model_id = model_of_slug(slug)
+    elif target in model_set():
+        # Bare model → its curated default slug. Prefer a priceable (vLLM)
+        # topology: dual first, then single.
+        slug = None
+        for topo in ("dual", "single"):
+            cand = curated_default_target(target, topo)
+            if cand and COMPOSE_REGISTRY.get(cand, {}).get("kvcalc_key") not in (None, "SKIP"):
+                slug = cand
+                break
+        if slug is None:
+            # Fall back to ANY priceable vLLM slug for this model.
+            for s, e in COMPOSE_REGISTRY.items():
+                if e.get("model") == target and s.startswith("vllm/") and e.get("kvcalc_key") not in (None, "SKIP"):
+                    slug = s
+                    break
+        if slug is None:
+            return None, target, f"no vLLM (kv-calc priceable) compose for model {target!r}"
+        model_id = target
+    else:
+        return None, None, f"unknown slug/model {target!r} (not a registry slug or catalogued model)"
+
+    entry = COMPOSE_REGISTRY[slug]
+    if entry.get("kvcalc_key") in (None, "SKIP"):
+        return None, model_id, f"slug {slug!r} is not vLLM (kv-calc prices vLLM only; engine sets kvcalc_key=SKIP)"
+    if model_id not in MODEL_SPECS:
+        return None, model_id, f"model {model_id!r} has no calibrated kv-calc spec (not in MODEL_SPECS)"
+    return slug, model_id, None
+
+
+def fit_verdict(target: str, card: Optional[str], vram_default: float) -> dict:
+    """Structured fit verdict for `--fit <slug|model> --card <gpu>`.
+
+    Wraps the EXISTING predict()/solve_max_ctx() pricing — does NOT
+    reimplement the math. Returns a dict shaped:
+      {"verdict": "fits-clean"|"fits-constrained"|"wont-fit",
+       "vram_est_gb": float, "band_gb": float, "max_ctx": int}
+    or {"verdict": "unknown", "error": "..."} when an input can't be resolved.
+    """
+    vram = _resolve_card_vram_gb(card)
+    if card is not None and vram is None:
+        return {"verdict": "unknown", "error": f"unrecognized --card {card!r} (pass a known card name or a GB number)"}
+    if vram is None:
+        vram = float(vram_default)
+
+    try:
+        slug, model_id, err = _resolve_fit_slug(target)
+    except Exception as exc:  # registry import / lookup robustness
+        return {"verdict": "unknown", "error": f"could not resolve {target!r}: {exc}"}
+    if err is not None:
+        return {"verdict": "unknown", "error": err}
+
+    # required_sm gate (compat C3's arch floor, surfaced in the FIT verdict so
+    # the cockpit can hide/warn hardware-incompatible slugs — e.g. NVFP4 on
+    # Ampere: the VRAM would "fit" but the NATIVE kernels don't exist below
+    # sm 9.0). Since v0.24 some formats have a weight-only FALLBACK kernel
+    # below required_sm (registry `fallback_sm` — NVFP4 -> Marlin W4A16,
+    # floor sm 7.5; live-confirmed on 2x3090 2026-07-11). In the band
+    # [fallback_sm, required_sm) we PRICE the fit normally and attach an
+    # `hw_fallback` annotation instead of hiding — the cockpit badges it.
+    _entry_reg = COMPOSE_REGISTRY[slug]
+    _req_sm = _entry_reg.get("required_sm")
+    _fb_sm = _entry_reg.get("fallback_sm")
+    _card_sm = _resolve_card_sm(card)
+    _hw_fallback = None
+    if _req_sm is not None and _card_sm is not None and _card_sm < float(_req_sm):
+        if _fb_sm is not None and _card_sm >= float(_fb_sm):
+            _hw_fallback = {
+                "required_sm": float(_req_sm),
+                "card_sm": _card_sm,
+                "note": (
+                    f"no native kernels below sm {float(_req_sm):g} — runs via "
+                    f"weight-only fallback (Marlin); works, no speed edge vs "
+                    f"native 4-bit quants on this card"
+                ),
+            }
+        else:
+            return {
+                "verdict": "incompatible-hw",
+                "required_sm": float(_req_sm),
+                "card_sm": _card_sm,
+                "error": f"requires sm >= {float(_req_sm):g} (this card is sm_{_card_sm:g})",
+            }
+
+    try:
+        spec = MODEL_SPECS[model_id]
+        cfg = _compose_cfg_from_registry(PROFILES, model_id, "__fit__", slug)
+        predict_kwargs = dict(
+            spec=spec,
+            kv_format=cfg["kv_format"],
+            max_ctx=cfg["max_ctx"],
+            max_num_seqs=cfg["max_num_seqs"],
+            tp=cfg["tp"],
+            mem_util=cfg["mem_util"],
+            vram_gb=vram,
+            mtp=cfg.get("mtp", False),
+            weights_variant=cfg.get("weights_variant", "default"),
+            drafter_gb=cfg.get("drafter_gb", 0.0),
+            dflash_draft_gb=cfg.get("dflash_draft_gb", 0.0),
+        )
+        pred = predict(**predict_kwargs)
+        solver_kwargs = {k: v for k, v in predict_kwargs.items() if k != "max_ctx"}
+        max_ctx_fit = solve_max_ctx(**solver_kwargs)
+    except Exception as exc:  # any pricing-path failure → honest unknown
+        return {"verdict": "unknown", "error": f"pricing {slug!r} failed: {exc}"}
+
+    res = {
+        "verdict": _RAW_VERDICT_MAP[pred.verdict],
+        "vram_est_gb": round(pred.total_gb, 4),
+        "band_gb": FIT_BAND_GB,
+        "max_ctx": int(max_ctx_fit),
+    }
+    if _hw_fallback is not None:
+        res["hw_fallback"] = _hw_fallback
+    return res
+
+
+def fit_all_verdicts(card: Optional[str], vram_default: float) -> dict:
+    """Batch fit verdicts for EVERY registry slug on one card, in a SINGLE
+    process — one registry/profile load instead of N subprocesses.
+
+    Mirrors `--fit` per slug (same verdict shape); non-vLLM slugs
+    (kvcalc_key SKIP) get ``{"verdict": "skip"}``. Shaped:
+      {"card": <str|None>, "card_vram_gb": <float>,
+       "variants": {<slug>: <fit_verdict dict>, ...}}
+    The cockpit catalog consumes this instead of fanning out N `--fit` calls.
+    """
+    from scripts.lib.profiles.compose_registry import COMPOSE_REGISTRY
+
+    vram = _resolve_card_vram_gb(card)
+    if card is not None and vram is None:
+        return {
+            "card": card,
+            "error": f"unrecognized --card {card!r} (pass a known card name or a GB number)",
+            "variants": {},
+        }
+    if vram is None:
+        vram = float(vram_default)
+
+    variants: dict = {}
+    _card_sm = _resolve_card_sm(card)
+    for slug, entry in COMPOSE_REGISTRY.items():
+        # required_sm gate first — applies to SKIP (non-vLLM) slugs too, and
+        # short-circuits the pricing for slugs whose kernels can't exist here.
+        # Slugs with a `fallback_sm` at/below this card fall THROUGH to normal
+        # pricing (fit_verdict re-checks and attaches the hw_fallback note).
+        _req_sm = entry.get("required_sm")
+        _fb_sm = entry.get("fallback_sm")
+        if (
+            _req_sm is not None
+            and _card_sm is not None
+            and _card_sm < float(_req_sm)
+            and not (_fb_sm is not None and _card_sm >= float(_fb_sm))
+        ):
+            variants[slug] = {
+                "verdict": "incompatible-hw",
+                "required_sm": float(_req_sm),
+                "card_sm": _card_sm,
+                "error": f"requires sm >= {float(_req_sm):g} (this card is sm_{_card_sm:g})",
+            }
+            continue
+        if entry.get("kvcalc_key") in (None, "SKIP"):
+            variants[slug] = {"verdict": "skip"}
+            continue
+        variants[slug] = fit_verdict(slug, card, vram_default)
+    return {"card": card, "card_vram_gb": round(float(vram), 4), "variants": variants}
+
+
+# =============================================================================
 # CLI
 # =============================================================================
 
@@ -1236,9 +1622,19 @@ def main():
                    help="Drafter model size in GB (MTP / DFlash). 0 if not using a drafter.")
     p.add_argument("--dflash-draft-gb", type=float, default=None,
                    help="(deprecated alias for --drafter-gb)")
-    p.add_argument("--weights-variant", choices=["default", "int4", "awq", "bf16"], default=None,
+    p.add_argument("--weights-variant", choices=["default", "int4", "awq", "bf16", "int8", "nvfp4"], default=None,
                    help="Gemma 4 only: which weight quant variant. Default: from --compose, or int4.")
     p.add_argument("--calibration", action="store_true", help="Print predicted vs measured for all calibrated models.")
+    p.add_argument("--fit", metavar="SLUG|MODEL",
+                   help="Structured fit verdict for a registry compose slug (e.g. vllm/dual) or a bare "
+                        "catalogued model (resolved to its curated vLLM default). Use with --card and --json.")
+    p.add_argument("--fit-all", action="store_true",
+                   help="Batch --fit for EVERY registry slug on --card, as one JSON object "
+                        "{card, card_vram_gb, variants:{slug: verdict}}. One process, no per-slug fan-out "
+                        "(the cockpit catalog's fit column). Always emits JSON.")
+    p.add_argument("--card", metavar="GPU",
+                   help="Per-card GPU for --fit: a known card name (e.g. rtx3090, a6000) or a GB number. "
+                        "Default: --vram.")
     p.add_argument("--solve-max-ctx", action="store_true", help="Binary-search for the largest max_ctx that fits.")
     p.add_argument("--json", action="store_true", help="Output prediction as JSON.")
     p.add_argument("--kv-breakdown", action="store_true",
@@ -1274,6 +1670,26 @@ def main():
     if args.calibration:
         run_calibration()
         return 0
+
+    if args.fit is not None:
+        result = fit_verdict(args.fit, args.card, args.vram)
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            print(f"Fit verdict — {args.fit}"
+                  + (f" on {args.card}" if args.card is not None else f" on {args.vram} GB/card"))
+            if result["verdict"] == "unknown":
+                print(f"  Verdict:      unknown ({result['error']})")
+            else:
+                print(f"  Verdict:      {result['verdict']}")
+                print(f"  VRAM est:     {result['vram_est_gb']:.2f} GB / card (±{result['band_gb']:.1f} GB band)")
+                print(f"  Max ctx fit:  {result['max_ctx']:,} tokens")
+        return 0 if result["verdict"] != "unknown" else 2
+
+    if args.fit_all:
+        result = fit_all_verdicts(args.card, args.vram)
+        print(json.dumps(result, indent=2))
+        return 0 if "error" not in result else 2
 
     # Resolve model: explicit --model > inferred from --compose > qwen3.6-27b
     model_key = _resolve_compose_model(args.compose, args.model) if args.compose else (args.model or "qwen3.6-27b")

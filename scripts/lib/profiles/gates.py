@@ -68,14 +68,34 @@ from typing import Any, Callable, Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
-# Arch-kernel SM rule (locked design [C0] / brief): these KV formats require
-# an SM-9.0-class kernel and are NOT loadable on Ampere sm_86 (RTX 3090).
-# (fp8_e4m3 native compute + Gemma-TQ3 are the §1 confidently-wrong-on-3090
-# risks Codex-r5 High-1 closes; mirrors compose_registry required_sm:9.0 +
-# arch_patches Gemma kernel_constraints "fp8_e4m3 is not supported on sm_86".)
+# Arch-kernel SM rule (locked design [C0] / brief): per-KV-format SM floors —
+# none loadable on Ampere sm_86 (RTX 3090). Floors are the vLLM kernel truth:
+#   fp8_e4m3            8.9  — vLLM "FP8 KV cache … requires SM89+" (Ada+;
+#                              was 9.0 here — corrected for #246, since the
+#                              launcher now injects e4m3 on 4090s. The gemma
+#                              fp8 slug keeps its explicit required_sm 9.0.)
+#   turboquant_3bit_nc  9.0  — MAINLINE TQ3 kernels (Genesis-Ampere TQ3 is a
+#                              different path; mirrors arch_patches Gemma
+#                              kernel_constraints)
+#   nvfp4               family-gated (see _ARCH_KERNEL_SM_FAMILY) — NOT a floor
 _ARCH_KERNEL_SM = {
-    "fp8_e4m3": 9.0,
+    "fp8_e4m3": 8.9,
     "turboquant_3bit_nc": 9.0,
+}
+
+# KV formats whose kernel is gated to a SPECIFIC SM FAMILY, not a "≥ floor".
+# A numeric floor is WRONG here: consumer Blackwell (sm_120/121, RTX 5090 /
+# PRO 6000 Blackwell) is a HIGHER compute-capability number than datacenter
+# Blackwell (sm_100/103) but a DIFFERENT family that lacks the kernel.
+#   nvfp4  KV forces vLLM's trtllm-gen FP4 FMHA (fused attention), which is
+#          built ONLY for datacenter Blackwell sm_100/sm_103 (B100/B200/GB200).
+#          No sm_120/121 build exists → nvfp4 KV crashes on consumer 5090s
+#          despite their FP4 hardware (nvfp4 *weights* are fine — different
+#          path). Re-test when TRT-LLM #10241 / vLLM #43562 add the sm_120
+#          FMHA. Consumer-Blackwell KV answer is fp8_e4m3. (Empirically hit on
+#          two 5090s via the #246 A/B, disc #571, 2026-07-05.)
+_ARCH_KERNEL_SM_FAMILY = {
+    "nvfp4": {10.0, 10.3},
 }
 
 
@@ -303,15 +323,19 @@ def _resolve_arch_row(gc, root, runtime, arches, model_slug: str):
 
 
 def _required_sm(engine: dict, entry: dict, kv_format: str) -> float:
-    """hardware SM ≥ max(engine.min_sm, registry required_sm,
+    """hardware SM ≥ max(engine.min_sm, registry SM floor,
     arch-kernel SM rule for the requested runtime).
 
     - engine.min_sm        : engines/<id>.yml `min_sm`
-    - registry required_sm : compose_registry `required_sm` (9.0 rows)
+    - registry SM floor    : compose_registry `fallback_sm` when present
+                             (the weight-only-fallback floor — e.g. NVFP4 →
+                             Marlin W4A16, sm 7.5; live-confirmed on sm_86
+                             2026-07-11), else `required_sm` (the native
+                             floor, hard gate when no fallback exists)
     - arch-kernel SM rule  : _ARCH_KERNEL_SM[kv_format] (fp8_e4m3 / Gemma-TQ3)
     """
     eng_sm = float(engine.get("min_sm") or 0.0)
-    reg_sm = float(entry.get("required_sm") or 0.0)
+    reg_sm = float(entry.get("fallback_sm") or entry.get("required_sm") or 0.0)
     arch_sm = float(_ARCH_KERNEL_SM.get(kv_format, 0.0))
     return max(eng_sm, reg_sm, arch_sm)
 
@@ -382,7 +406,19 @@ def c0_engine_support(
         arch_row = next(
             (r for r in arches if r.get("arch") == arch_from_config), None
         )
-        arch_name = arch_from_config if arch_row is not None else arch_name
+        if arch_row is not None:
+            arch_name = arch_from_config
+        else:
+            # Resolve the config-reported OUTER wrapper arch to its canonical
+            # matrix arch via arch_model_xref config_architectures (e.g.
+            # Qwen3_5ForConditionalGeneration -> Qwen3NextForCausalLM), so an
+            # uncurated derive (abliterated / fine-tune) of an already-supported
+            # arch is not false-aborted with NO_ARCH_ROW.
+            canon, arch_row = gc.resolve_arch_from_config(
+                runtime, arches, arch_from_config
+            )
+            if arch_row is not None:
+                arch_name = canon
 
     has_auto_map = bool(profile.get("auto_map"))
 
@@ -459,7 +495,29 @@ def c0_engine_support(
             f"supported_kv_formats {engine.get('supported_kv_formats')}"
         )
 
-    # 3d. hardware SM ≥ max(engine.min_sm, registry required_sm, arch-kernel)
+    # 3c-bis. weight ARTIFACT vs engine — the GGUF axis (structural & mutually
+    # exclusive). GGUF-serving engines (llama.cpp / ik-llama / beellama) and
+    # safetensors-serving engines (vLLM / SGLang) cannot load each other's
+    # artifact. The deriver already rejects GGUF on the --profile-like *derive*
+    # path (safetensors-only header probe), but the curated registry / the
+    # curated-swap path (clone a vLLM compose, point --model at your weights)
+    # have no such probe — so enforce it here too, off the engine's declared
+    # `supported_weight_formats`. Match the unambiguous `gguf` token only (NOT
+    # full membership: the dtype-derived weight_format is raw-spelled
+    # "bfloat16"/"float16", which a naive `in` test would false-reject).
+    weight_format = str(profile.get("weight_format") or "").lower()
+    _eng_wfmts = [
+        str(f).lower() for f in (engine.get("supported_weight_formats") or [])
+    ]
+    if weight_format == "gguf" and "gguf" not in _eng_wfmts:
+        return _incompat(
+            f"weight_format 'gguf' not loadable by engine {engine_id} "
+            f"(safetensors-only; supported_weight_formats="
+            f"{engine.get('supported_weight_formats')}) — serve GGUF with a "
+            f"llama.cpp / ik-llama / beellama compose, not a vLLM one"
+        )
+
+    # 3d. hardware SM ≥ max(engine.min_sm, registry required_sm, arch-kernel floor)
     need_sm = _required_sm(engine, entry, kv_format)
     if float(hardware_sm) < need_sm:
         return _incompat(
@@ -468,7 +526,20 @@ def c0_engine_support(
             f"registry.required_sm={entry.get('required_sm')}, "
             f"arch-kernel[{kv_format}]="
             f"{_ARCH_KERNEL_SM.get(kv_format, 0.0):g}); "
-            f"e.g. fp8_e4m3 / Gemma-TQ3 need SM 9.0 — NOT loadable on sm_86"
+            f"e.g. fp8_e4m3 needs SM 8.9+, Gemma-TQ3 SM 9.0+ — NOT loadable on sm_86"
+        )
+
+    # 3d-bis. family-specific kernels — a numeric floor can't express these.
+    # nvfp4 KV needs the trtllm-gen FP4 FMHA, built only for datacenter Blackwell
+    # sm_100/sm_103; consumer sm_120/121 is a HIGHER number but has no build.
+    allowed_family = _ARCH_KERNEL_SM_FAMILY.get(kv_format)
+    if allowed_family is not None and float(hardware_sm) not in allowed_family:
+        fam = "/".join(f"sm_{s:g}" for s in sorted(allowed_family))
+        return _incompat(
+            f"kv_format '{kv_format}' needs a family-specific kernel available "
+            f"only on {fam} (datacenter Blackwell); sm_{float(hardware_sm):g} has "
+            f"no build. nvfp4 KV's trtllm-gen FP4 FMHA has no consumer-Blackwell "
+            f"(sm_120/121) kernel (vLLM #43562 / TRT-LLM #10241) — use fp8_e4m3 KV"
         )
 
     # --- 4. supported -----------------------------------------------------

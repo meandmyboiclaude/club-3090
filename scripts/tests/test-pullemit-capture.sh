@@ -89,7 +89,7 @@ COMPOSE_TEXT = (
 def mk_einput(slug, *, der, terminal="proceed"):
     return EInput(
         slug=slug, terminal=terminal, is_override_accepted=False, der=der,
-        runtime={"engine": "vllm-nightly-clean", "kv_format": "bf16",
+        runtime={"engine": "vllm-stable", "kv_format": "bf16",
                  "tp": 1, "max_ctx": 131072, "default_port": 8071},
         selected_files=[], hf_home=Path("/data/hf"), c2a=None,
         hardware_sm=8.6, visible_gpu_count=1, per_gpu_vram_mib=[24576],
@@ -375,7 +375,7 @@ dl = DownloadResult(ok=True, files=["model.safetensors", "config.json"],
 compose_meta = {
     "resolved_image": "vllm/vllm-openai:nightly-deadbeef",
     "max_model_len": 131072, "kv_format": "bf16",
-    "engine": "vllm-nightly-clean",
+    "engine": "vllm-stable",
 }
 
 with tempfile.TemporaryDirectory() as td:
@@ -383,7 +383,7 @@ with tempfile.TemporaryDirectory() as td:
         ei,
         confidence=SimpleNamespace(name="ESTIMATED_LOWER_BOUND"),
         raw_verdict="fits-clean",
-        profile_like="vllm/gemma-a4b-single",
+        profile_like="vllm/gemma-26ba4b-single",
         download_result=dl,
         boot_result=res,
         smoke_result=sm,
@@ -402,7 +402,7 @@ with tempfile.TemporaryDirectory() as td:
     check(pt1 == {
         "schema": 1, "point": "gate", "slug": "org/My-Model",
         "confidence": "ESTIMATED_LOWER_BOUND", "raw_verdict": "fits-clean",
-        "terminal": "proceed", "profile_like": "vllm/gemma-a4b-single",
+        "terminal": "proceed", "profile_like": "vllm/gemma-26ba4b-single",
         "hardware_sm": 8.6, "predicted_b_breakdown": None,
     }, f"pt1 gate EXACT CONTRACT-4 schema/keys + additive "
        f"predicted_b_breakdown (got {sorted(pt1)})")

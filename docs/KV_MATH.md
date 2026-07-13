@@ -107,8 +107,9 @@ For hybrid architectures (DeltaNet, SWA), only the **growing** attention layers 
 | `k8v4` | 0.75 | Mixed precision |
 | `q4_0` | ~0.56 | Includes packed-quant overhead |
 | `turboquant_3bit_nc` (TQ3) | ~0.425 | Genesis-supplied; cheapest KV format on this stack |
+| `nvfp4` | ~0.56 (**projected**) | 4-bit elements + fp8 block scale per 16 (9/16 B). **DATACENTER Blackwell only (sm_100/103)** — the trtllm-gen FP4 FMHA has no consumer (sm_120/121) build, so it crashes on 5090s ([vLLM #43562](https://github.com/vllm-project/vllm/issues/43562)). No measured boot on this stack. kv-calc carries mirrored-fp8 coefs until a datacenter-Blackwell boot calibrates them |
 
-**Note on Ampere**: `fp8_e4m3` is NOT supported by the Triton kernel on sm_86 (3090/3090-Ti/A5000). Use `fp8_e5m2` (engine-level fallback) or `int8_per_token_head` (vendored via PR #42102). See [DTYPE_MATRIX.md](DTYPE_MATRIX.md).
+**Note on Ampere**: `fp8_e4m3` is NOT supported by the Triton kernel on sm_86 (3090/3090-Ti/A5000). Use `fp8_e5m2` (engine-level fallback) or `int8_per_token_head` (vendored via PR #42102). On sm_89+ the launchers inject `fp8_e4m3` automatically for the #246 pilot slugs. See [DTYPE_MATRIX.md](DTYPE_MATRIX.md).
 
 ### Per-card budget composition (all models)
 
@@ -770,7 +771,7 @@ Run `bash tools/kv-calc.py --calibration` to see predicted vs measured for all s
 | Qwen 3.6 35B-A3B | not on stack | Pending download + first calibration |
 | Gemma 4 26B-A4B | not on stack | Pending download + first calibration |
 
-Overall on calibrated models: **18/18 (100%)** as of 2026-05-14.
+Overall on calibrated models: **17/17 (100%)** as of 2026-05-30.
 
 ## When to trust the calculator vs vLLM's boot log
 

@@ -139,19 +139,32 @@ def infer_compose_path(container_name: str, served: str, tp: str) -> str:
 
 
 def compose_display(compose_path: str, served: str) -> str:
-    path = compose_path.replace("\\", "/")
+    path = rel(compose_path).replace("\\", "/")
+    try:
+        sys.path.insert(0, str(ROOT))
+        from scripts.lib.profiles.compose_registry import COMPOSE_REGISTRY, DEFAULTS
+
+        by_path = {entry["compose_path"]: (key, entry) for key, entry in COMPOSE_REGISTRY.items()}
+        hit = by_path.get(path)
+        if hit is not None:
+            _key, entry = hit
+            parts = Path(path).parts
+            topology = parts[parts.index("compose") + 1]
+            engine_dir = parts[parts.index(entry["model"]) + 1]
+            default_key = DEFAULTS.get((entry["model"], engine_dir, topology))
+            if default_key and COMPOSE_REGISTRY[default_key]["compose_path"] == path:
+                return f"{engine_dir}/default" if topology == "single" else f"{engine_dir}/{topology}/default"
+            quant = parts[parts.index("compose") + 2]
+            base = Path(path).stem
+            if quant == entry.get("weights_variant") == "autoround-int4":
+                return f"{topology}-{base}"
+            return f"{topology}-{quant}-{base}"
+    except Exception:
+        pass
+
     parts = path.split("/")
     base = parts[-1] if parts else path
     parent = parts[-2] if len(parts) >= 2 else ""
-    is_gemma = "gemma" in served or "gemma-4-31b" in path
-
-    if base == "docker-compose.yml":
-        if parent == "dual":
-            return "dual.yml"
-        if parent == "multi4":
-            return "dual4.yml"
-        if parent == "single":
-            return "vllm/gemma-mtp-tp1" if is_gemma else "vllm/default"
     if parent in {"dual", "multi4"} and not base.startswith(f"{parent}-"):
         return f"{parent}-{base}"
     return base

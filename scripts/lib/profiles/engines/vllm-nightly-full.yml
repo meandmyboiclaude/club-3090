@@ -2,7 +2,7 @@ schema_version: 1
 id: vllm-nightly-full
 display_name: vLLM nightly plus all overlays
 type: vllm
-stability: experimental
+stability: deprecated
 install:
   method: docker_image
   spec: vllm/vllm-openai:nightly-e47c98ef7a38792996e452ef53914e21e41928e9
@@ -54,7 +54,8 @@ vendored_overlays:
     upstream_status: filed
     upstream_merged_in_version: null
     local_status: vendored
-    purpose: "DFlash and quantized target KV coexistence."
+    image_baked: true   # int8-PTH/DFlash coexistence is in the pinned nightly image; not a mountable file overlay
+    purpose: "DFlash and quantized target KV coexistence (provided by the pinned nightly image; no on-disk overlay to mount)."
   - id: vllm-pr35936-qwen3coder-tool-parser
     pr_url: https://github.com/vllm-project/vllm/pull/35936
     upstream_status: filed
@@ -63,4 +64,4 @@ vendored_overlays:
     purpose: "Respect configured Qwen3 Coder tool parser for required tool choice."
 required_genesis: true
 genesis_pin: v7.72.2
-notes: "Full experimental overlay surface for Gemma INT8 PTH and Qwen tool-parser experiments. Launch exports this SHA as VLLM_NIGHTLY_SHA; VLLM_IMAGE can override the full image ref."
+notes: "DEPRECATED 2026-06-05 (#254): purged nightly — e47c98ef is 404 on Docker Hub; its only registry user (vllm/dual-int8) was archived to compose/_archive/ + deregistered (zero registry users). required_genesis:true + vendored overlays (already non-derivable). Retained (not deleted) for revival. ORIGINAL: Full experimental overlay surface for Gemma INT8 PTH and Qwen tool-parser experiments. Launch exports this SHA as VLLM_NIGHTLY_SHA; VLLM_IMAGE can override the full image ref."

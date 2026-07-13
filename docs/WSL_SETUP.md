@@ -166,8 +166,38 @@ Sanity-check the endpoint (the launcher prints this curl too):
 ```bash
 curl -sf http://localhost:8020/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"qwen3.6-27b-autoround","messages":[{"role":"user","content":"Capital of France?"}],"max_tokens":200}'
+  -d '{"model":"qwen3.6-27b","messages":[{"role":"user","content":"Capital of France?"}],"max_tokens":200}'
 ```
+
+---
+
+## 11. Expose the API to your local network (LAN)
+
+By default the endpoint is only reachable **on the machine running WSL2** — even after you set `BIND_HOST=0.0.0.0`. Two things to know:
+
+- **`launch.sh` printing `http://localhost:8020` is cosmetic** (a fixed display string), not the actual bind. Docker already publishes the port on `0.0.0.0`, so the server *is* listening on all interfaces **inside the WSL2 VM** — `BIND_HOST` doesn't change reachability here.
+- **The real blocker is WSL2's NAT.** WSL2 runs in a VM with its own IP (`172.x.x.x`); the Windows host's LAN IP does **not** forward to it, so other machines can't reach `172.x.x.x`. Fix it on the **Windows side**, one of two ways:
+
+**Option A — mirrored networking (cleanest; Windows 11 22H2+).** Edit `C:\Users\<you>\.wslconfig`:
+
+```ini
+[wsl2]
+networkingMode=mirrored
+```
+
+Then `wsl --shutdown` (PowerShell) and restart. WSL2 now shares the Windows host's network, so the `0.0.0.0` bind is directly reachable on the host's LAN IP. Allow the port if Windows Firewall prompts.
+
+**Option B — `netsh portproxy` (any Windows version; NAT mode).** In an **admin** PowerShell:
+
+```powershell
+wsl hostname -I                 # the WSL2 IP, e.g. 172.20.x.x
+netsh interface portproxy add v4tov4 listenport=8020 listenaddress=0.0.0.0 connectport=8020 connectaddress=<WSL2-IP>
+New-NetFirewallRule -DisplayName "club3090-8020" -Direction Inbound -LocalPort 8020 -Protocol TCP -Action Allow
+```
+
+LAN clients then hit `http://<WINDOWS-host-LAN-IP>:8020/`. ⚠️ In NAT mode the WSL2 IP **changes on reboot** — re-run the `portproxy add` line (or script it). Option A avoids this entirely.
+
+**Verify** from another machine: `curl http://<windows-lan-ip>:8020/v1/models` should list the model. (The `.env` `URL=` is the *client/bench* target — point it at the reachable address; it does **not** affect the server bind.)
 
 ---
 
@@ -182,7 +212,7 @@ You still do steps **1–3** (WSL + driver/passthrough + `.wslconfig` RAM) and *
    git clone https://github.com/ggml-org/llama.cpp && cd llama.cpp
    cmake -B build -DGGML_CUDA=ON && cmake --build build --config Release -j
    ```
-   …or grab a prebuilt CUDA binary. To match the MTP / spec-decode support the Docker image ships, track a recent build — the composes pin `ghcr.io/ggml-org/llama.cpp:server-cuda-b9246` (or newer).
+   …or grab a prebuilt CUDA binary. To match the MTP / spec-decode support the Docker image ships, track a recent build — the composes pin `ghcr.io/ggml-org/llama.cpp:server-cuda-b9967` (or newer).
 
 2. **Run `llama-server` with the flags the compose uses.** The compose is the source of truth — lift them from [`models/qwen3.6-27b/llama-cpp/compose/single/unsloth-q4km/mtp.yml`](../models/qwen3.6-27b/llama-cpp/compose/single/unsloth-q4km/mtp.yml). The equivalent native invocation:
    ```bash

@@ -4,6 +4,10 @@
 
 If you have one or two RTX 3090s and want to run modern LLMs at home, in a homelab, or as a dev backend — this repo collects the working configs, patches, and benchmarks.
 
+> 🎯 **4090 or 5090 owner?** The composes run cross-rig — contributors have benched both with measured numbers: **[Can I use a 4090? →](docs/FAQ.md#can-i-use-a-4090-instead-of-a-3090)** · **[Can I use a 5090? →](docs/FAQ.md#can-i-use-a-5090)**. The tooling is calibrated for 3090s but the configs are class-aware; per-class gotchas (4090's tighter idle VRAM, 5090's 32 GB envelope) + cross-rig benchmark rows live in the FAQ.
+
+> 🎨 **Want image generation too?** The **[Image Studio bundle](docs/ai-studio/image.md)** runs Ideogram-4 image gen + a chat model + Open WebUI together on two GPUs — one command: `bash scripts/setup-image-studio.sh`.
+
 ---
 
 ## Quick start
@@ -28,21 +32,28 @@ bash scripts/setup.sh
 
 # 3. Pick a config + boot it (interactive wizard: asks model → GPUs → projects VRAM budget)
 bash scripts/launch.sh
-#    Or skip the wizard:
-#      bash scripts/launch.sh --variant llamacpp/default    # single-card chat (recommended) — cliff-immune, 200K @ -ub 512, ~51/60 TPS
-#      bash scripts/launch.sh --variant ik-llama/iq4ks-mtp  # single-card FASTEST — ~60/69 TPS, leanest VRAM (ik_llama IQK quant)
+#    Or let the resolver pick for your model + hardware (.env pin ‖ curated default):
+#      bash scripts/launch.sh --variant qwen3.6-27b/default # YOUR default for this model
+#    Or skip the wizard with an explicit config:
+#      bash scripts/launch.sh --variant beellama/dflash     # single-card BLESSED default — code-fast (~100 code / 50 narr TPS), DFlash spec-dec (⚠️ unofficial multi-arch image; sm_89/120 unvalidated — see docs/INFERENCE_ENGINES.md)
+#      bash scripts/launch.sh --variant ik-llama/iq4ks-mtp  # single-card BALANCED alt — ~63/69 TPS, 200K ctx + vision, leanest VRAM (ik_llama IQK quant)
+#      bash scripts/launch.sh --variant llamacpp/default    # single-card cliff-immune ALT — 200K @ -ub 512, ~51/60 TPS
 #      bash scripts/launch.sh --variant llamacpp/mtp-vision # single-card 49K + MTP + vision
 #      bash scripts/launch.sh --variant vllm/dual           # dual-card 262K + vision (vLLM single-card paths blocked on #167)
 #    Or partial flags (wizard fills the rest):
 #      bash scripts/launch.sh --model qwen3.6-27b --gpus 0,1
 #      bash scripts/launch.sh --tp 2 --pp 1               # override vLLM parallelism
-#    See all variants:
-#      bash scripts/switch.sh --list
+#    See the variants this machine can run + the per-model defaults view
+#    (hardware-filtered by GPU count; add --all to see every variant):
+#      bash scripts/switch.sh --list          # runnable here
+#      bash scripts/switch.sh --list --all    # everything
+#    Pin your own default so bare `launch.sh` goes straight there:
+#      bash scripts/switch.sh --set-default ik-llama/iq4ks-mtp   # e.g. prefer the balanced ik-llama path over the beellama default; clear: --clear-default qwen3.6-27b
 
 # 4. Sanity test (launcher already printed this curl)
 curl -sf http://localhost:8020/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"qwen3.6-27b-autoround","messages":[{"role":"user","content":"Capital of France?"}],"max_tokens":200}'
+  -d '{"model":"qwen3.6-27b","messages":[{"role":"user","content":"Capital of France?"}],"max_tokens":200}'
 
 # 5. Run the canonical benchmark
 bash scripts/bench.sh
@@ -56,6 +67,20 @@ bash scripts/update.sh
 ```
 
 `launch.sh` calls `switch.sh` (down old, up new) and then `verify-full.sh` so you know it's serving cleanly before you point a client at it. See [`scripts/`](scripts/) for all helpers.
+
+### Prefer a screen to the CLI? — the serve cockpit (`c3`)
+
+**`c3`** is a lazydocker-style terminal UI that wraps the same flow — **discover → serve → operate → validate** — in one keyboard-driven cockpit: browse the catalog and serve a variant with `⏎`, watch live GPU / scenes / containers, run Doctor health checks, and (producer lane) walk the add-a-model pipeline.
+
+```bash
+# Install from the checkout (the cockpit + its in-repo core package):
+uv pip install -e tools/serve-cockpit          # with uv (recommended — one command)
+#   …or plain pip:  pip install -e tools/tui-core && pip install -e tools/serve-cockpit
+
+c3                                              # launch  (also: python -m club3090_cockpit)
+```
+
+**First run:** press **`S`** → set your **Model Dir** (where weights download) + **HuggingFace token** → **`Ctrl+S`** to save; then **`r`** to browse the catalog and serve one. **`c3 --lean`** (or **`[C]`** in-app) hides the producer lane for a consumer-only view. After a `git pull`, re-run the install to pick up new deps + UI changes. Full keybindings + details → [`tools/serve-cockpit/`](tools/serve-cockpit/).
 
 > ⚠️ **Single-card long-context note:** Cliff 2 (GDN prefill OOM at >~50K single-prompt) is **open** on 24 GB single-card vLLM. Genesis v7.72.2 PN59 was intended as the fix but doesn't engage on chunked-prefill. **Workarounds:** [`vllm/dual`](docs/DUAL_CARD.md) (TP=2 escapes it) or [`llamacpp/default`](docs/SINGLE_CARD.md#bulletproof-no-cliffs) (different engine, no cliff). Full diagnosis at [`docs/CLIFFS.md`](docs/CLIFFS.md).
 
@@ -100,11 +125,13 @@ Each hardware page lists every supported model with the working composes for tha
 | Model | Status | Card counts | Engines | Highlights |
 |---|---|---|---|---|
 | **[Qwen3.6-27B](models/qwen3.6-27b/)** | Production-ready ⭐ | 1× / 2× 3090 | vLLM ✅ · llama.cpp ✅ · ik_llama ✅ | Vision · tools · MTP n=3 · up to 262K ctx · vLLM dual = 89/127 TPS · llama.cpp single = 200K max-safe, no prefill cliffs · ik_llama IQ4_KS = ~60/69 TPS (fastest single-card) |
-| **[Gemma 4 31B](models/gemma-4-31b/)** | Production-ready (dual-card only on Ampere 24 GB) | 2× 3090 only ¹ | vLLM ✅ · llama.cpp ❌ | Vision · tools · MTP n=3 (Google official drafter) **OR** DFlash n=7 (z-lab drafter) · up to 262K ctx via INT8 PTH KV (PR [#40391](https://github.com/vllm-project/vllm/pull/40391) vendored) · MTP dual = 106/141 TPS at 32K, 95/126 at 262K · DFlash dual = 105/177 TPS at 32K (code-optimal) |
-| **[Qwen3.6 35B-A3B](models/qwen3.6-35b-a3b/)** ⭐ NEW v0.7.3 | Preview (production-track blocked on Genesis v7.73.x) | 2× 3090 | vLLM ✅ (preview) · llama.cpp ❌ | **MoE (256 experts × 8 active, ~3 B active params)** · vision · tools · upstream native loader via [vLLM PR #42521](https://github.com/vllm-project/vllm/pull/42521) · preview dual = **182/177 TPS at 16K** (no MTP, no TQ3, no Genesis) |
-| **[Gemma 4 26B-A4B](models/gemma-4-26b-a4b/)** ⭐ NEW v0.7.3 | Production via AWQ (Intel AutoRound INT4 blocked on Ampere) | 2× 3090 | vLLM ✅ (AWQ overlay) · llama.cpp ❌ | **MoE (128 experts × 8 active, ~4 B active params)** · vision · tools · AWQ dual = **139/139 TPS at 32K**, CV 0.2% / 0.0% |
+| **[Gemma 4 31B](models/gemma-4-31b/)** | Production-ready | 1× ¹ / 2× 3090 | vLLM ✅ (dual) · llama.cpp ⚠️ (community fork; mainline blocked on FA hdim=512) | Vision · tools · MTP n=3 (Google official drafter) **OR** DFlash n=7 (z-lab drafter) · up to 262K ctx via INT8 PTH KV (PR [#40391](https://github.com/vllm-project/vllm/pull/40391) vendored) · MTP dual = 106/141 TPS at 32K, 95/126 at 262K · DFlash dual = 105/177 TPS at 32K (code-optimal) · **beellama.cpp = single-card default** ⭐ 47/88 TPS, 131–200K ctx, 109–114/150 8-pack ([discussion #239](https://github.com/noonghunna/club-3090/discussions/239)) |
+| **[Qwen3.6 35B-A3B](models/qwen3.6-35b-a3b/)** | Production-ready (ik-llama single-card · vLLM dual) | 1× / 2× 3090 | vLLM ✅ · ik_llama ✅ · llama.cpp ✅ (mainline runs it — see `docs/HARDWARE.md`; ik_llama is the shipped single-card path) | **MoE (256 experts × 8 active, ~3 B active params)** · vision · tools · **ik_llama `fit-mtp.yml` single-card (Mudler APEX I-Compact)** = 103/149 TPS at 196K, hermes 11/20 + aider 12/30 + cli 12/40 ([PR #243](https://github.com/noonghunna/club-3090/pull/243)) · ik_llama `byteshape-iq4xs` single-card = 113/129 TPS at full 262K, 110/150 8-pack ([PR #293](https://github.com/noonghunna/club-3090/pull/293)) · vLLM dual = 178/174 TPS at 262K + vision (v0.22.0 stable; MTP net-negative on this MoE at TP=2) |
+| **[Gemma 4 26B-A4B](models/gemma-4-26b-a4b/)** | Production via AWQ (Intel AutoRound INT4 blocked on Ampere) | 2× 3090 ² | vLLM ✅ (AWQ overlay) · llama.cpp ❌ | **MoE (128 experts × 8 active, ~4 B active params)** · vision · tools · AWQ dual = **139/139 TPS at 32K**, CV 0.2% / 0.0% |
 
-¹ Single-card boot OOMs on Ampere 24 GB regardless of KV format. Single-card Gemma 4 is feasible on 32 GB+ GPUs (validated on RTX 5090 32 GB by [@apnar](https://github.com/noonghunna/club-3090/discussions/67#discussioncomment-16832042)).
+¹ Single-card Gemma 4 on Ampere 24 GB: vLLM + mainline llama.cpp are blocked (head_dim=512 FA wall, no Ampere FA kernel yet). The community **beellama.cpp** fork builds with `FA_ALL_QUANTS=ON` and runs cleanly on a single 3090 — 47/88 TPS, 100–150K ctx, 109/114 8-pack (validated 2026-05-27). 32 GB+ GPUs run the standard vLLM path (validated on RTX 5090 32 GB by [@apnar](https://github.com/noonghunna/club-3090/discussions/67#discussioncomment-16832042)).
+
+² Gemma 4 26B-A4B single-card not yet tested on Ampere; should fit on a 24 GB 3090 at modest context but the configs are dual-card-only today.
 
 More models coming — they go under `models/<name>/` with the same internal pattern.
 
@@ -192,7 +219,7 @@ bash scripts/switch.sh --force llamacpp/default
 #    Set MODEL_DIR to wherever your weights live; -f points at the compose.
 #    Layout: models/<model>/<engine>/compose/<topology>/<quant>/<serving>.yml
 
-# single-card llama.cpp (recommended default) — serves on :8020
+# single-card llama.cpp (cliff-immune fallback; no nightly/Genesis dependency) — serves on :8020
 MODEL_DIR=/path/to/models docker compose \
   -f models/qwen3.6-27b/llama-cpp/compose/single/unsloth-q4km/mtp.yml up -d
 
@@ -209,7 +236,7 @@ curl -s http://localhost:8020/v1/models | jq .
 docker compose -f <the-same-compose-file> down
 ```
 
-`MODEL_DIR` is the only env var you must set — it's mounted as `/models`, and defaults to the in-repo `models-cache/` if your weights live there. Everything else has a sane default baked in; each compose **header** documents its own overrides (`GGUF_FILE`, `CTX_SIZE`, `UBATCH_SIZE`, …) and the exact `docker compose` line. `bash scripts/switch.sh --list` lists every variant, and a successful `switch.sh` run prints the compose path it used — so you can always recover the `-f` target.
+`MODEL_DIR` is the only env var you must set — it's mounted as `/models`, and defaults to the in-repo `models-cache/` if your weights live there. Everything else has a sane default baked in; each compose **header** documents its own overrides (`GGUF_FILE`, `CTX_SIZE`, `UBATCH_SIZE`, …) and the exact `docker compose` line. `bash scripts/switch.sh --list` lists the variants runnable on this machine (hardware-filtered by GPU count; `--all` shows every variant), and a successful `switch.sh` run prints the compose path it used — so you can always recover the `-f` target.
 
 > ⚠ Launching directly skips the preflight that catches under-VRAM / wrong-GPU-count mistakes. If the container exits, check `docker logs <container> 2>&1 | tail -50`.
 
@@ -311,7 +338,7 @@ This separation keeps the stack maintainable as it grows. We don't want a model-
 
 ## Community
 
-- 💬 **[Discord](https://discord.gg/3t6UKFGhKw)** — casual chat, hardware questions, share what you're running. Use for synchronous Q&A.
+- 💬 **[Discord](https://discord.gg/gzdfjhj5yN)** — casual chat, hardware questions, share what you're running. Use for synchronous Q&A.
 - 📋 **[GitHub Discussions](https://github.com/noonghunna/club-3090/discussions)** — async, searchable. Best for cross-rig benchmark drops, "should I tune X" type threads, and anything you want others to find via search.
 - 🐛 **[GitHub Issues](https://github.com/noonghunna/club-3090/issues)** — bug reports, regression repros, concrete asks. Triage ladder in [FAQ](docs/FAQ.md#before-symptom-matching--boot-the-simplest-stack-first) before filing.
 

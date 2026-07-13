@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
-# rebench-full.sh — canonical 5-step rebench against the currently-running
-# model. Built to eliminate the recurring mistakes from manual runs:
+# rebench-full.sh — canonical rebench against the currently-running model
+# (a fail-fast verify-full preflight + 5 measured steps). Built to eliminate
+# the recurring mistakes from manual runs:
 #
 #   - Wrong cwd (`scripts/X.sh: No such file or directory`)
 #   - Forgot `--save-json` on benchlocal-cli direct invocations
@@ -11,21 +12,40 @@
 #   - No idempotent resume — every interrupt redoes the whole matrix
 #
 # Order matches docs/QUALITY_TEST.md "test pipeline":
+#   0. verify-full.sh          — functional preflight, FAIL-FAST (~2 min)
 #   1. bench.sh                — TPS narrative + code (~5 min)
 #   2. verify-stress.sh        — long-context + boundary (~10-15 min)
-#   3. quality-test.sh --full  — 8 packs, 150 scenarios (~45-60 min)
+#   3. 8-pack quality          — OPT-IN, skipped by default (#338). Enable with
+#      --with-8pack-thinking[=off|on|both]:
+#        =off  → quality-test.sh --full --no-thinking      (8 packs /150, reasoning OFF, ~45-60 min)
+#        =on   → quality-test.sh --full --enable-thinking   (8 packs /150, reasoning ON,  ~60-90 min)
+#        =both → both passes (the production-promotion gate)
 #   4. soak-test.sh fresh-mode — stability over 50 turns (~15-20 min)
-#   5. quality-test.sh --pack aider-polyglot-30  (~20-45 min)
 #
-# Total per leg: ~1.75-2 hr.
+# DEFAULT (no --with-8pack-thinking) = fast structural gates only (verify +
+# bench + stress + soak, ~35-45 min). The long 8-pack is opt-in: new-model
+# promotion passes --with-8pack-thinking=both; a quick "does it boot / serve /
+# recall / soak" re-check needs no flag.
+#
+# verify-full is a HARD GATE: if the endpoint isn't functional we abort before
+# the run rather than benching a broken server. Bypass with --skip verify-full
+# (e.g. you just ran it while tuning); --resume skips it too.
+# NOTE: =off forces --no-thinking (all 8 packs think-OFF) for a clean
+# with/without-reasoning A/B — not the pack-default mixed mode. The =on / =both
+# leg only scores correctly if the server PARSES reasoning — boot the compose
+# with --reasoning on (REASONING=on) so <think> goes to reasoning_content, not
+# the graded answer.
 #
 # All artifacts land in results/rebench/<tag>/. Run twice on different models
 # (e.g. one Qwen leg, one Gemma leg) to assemble a matched-config head-to-head.
 #
 # Usage:
-#   bash scripts/rebench-full.sh                      # auto-tag from MODEL
+#   bash scripts/rebench-full.sh                      # fast structural gates only (no 8-pack)
+#   bash scripts/rebench-full.sh --with-8pack-thinking=both  # + full 8-pack off+on (promotion gate)
+#   bash scripts/rebench-full.sh --with-8pack-thinking=off   # + 8-pack, reasoning OFF only
+#   bash scripts/rebench-full.sh --with-8pack-thinking=on    # + 8-pack, reasoning ON only
 #   bash scripts/rebench-full.sh --tag qwen-int8      # explicit tag
-#   bash scripts/rebench-full.sh --skip soak,aider    # skip phases (CSV)
+#   bash scripts/rebench-full.sh --skip soak          # skip phases (CSV)
 #   bash scripts/rebench-full.sh --resume             # skip steps that have
 #                                                       artifacts already
 #
@@ -51,11 +71,6 @@
 #                       canonical stability matrix when validating new
 #                       compose paths.)
 #   SOAK_TURNS          passed through to soak-test.sh (default: 5)
-#   AIDER_TIMEOUT_PER_CASE
-#                       Per-case timeout (seconds) for aider-polyglot-30
-#                       (default: 3600 — bumped from benchlocal-cli's
-#                       default to avoid mid-batch kills on slower /
-#                       power-capped / single-card rigs).
 #   SAMPLING_FROM_SERVER
 #                       Set to 1 to inherit sampling from the serving config
 #                       instead of the pack's default temp=0. Passed through
@@ -64,11 +79,18 @@
 #                       (e.g. Qwopus temp=0.8). Tags runs as non-canonical.
 #   ENABLE_THINKING
 #                       Set to 1 to pass request-level enable_thinking=true
-#                       through bench.sh and both quality-test.sh invocations.
-#                       Required to measure reasoning-on models honestly.
+#                       through bench.sh. (The 8-pack quality passes are now
+#                       controlled by --with-8pack-thinking — =off forces
+#                       --no-thinking, =on forces --enable-thinking — not by
+#                       this env var. #338.)
 #   THINKING_MAX_TOKENS
-#                       Optional thinking budget forwarded to quality-test.sh
-#                       when ENABLE_THINKING=1.
+#                       Optional thinking budget forwarded to the 8-pack
+#                       reasoning-ON pass (--with-8pack-thinking=on|both).
+#   MAX_TOKENS          Optional completion budget forwarded to BOTH 8-pack
+#                       passes (off + on) as quality-test.sh --max-tokens —
+#                       overrides the per-pack ~1024 default. Raise for verbose
+#                       models that self-truncate the deterministic packs
+#                       (finish_reason=length before the final answer).
 #
 
 set -euo pipefail
@@ -80,6 +102,56 @@ set -euo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+# --- usage / help -----------------------------------------------------------
+# Self-contained heredoc (NOT `sed "$0"`, which breaks after the cd above when
+# invoked via a relative path from another cwd, and truncated the env section).
+usage() {
+  cat <<'EOF'
+rebench-full.sh — canonical full-eval orchestrator for the running model.
+
+Fail-fast verify-full preflight + measured steps in docs/QUALITY_TEST.md pipeline
+order, with the recurring manual-run mistakes guarded (cwd, MODEL= 404, hermes
+localhost env, port, --resume idempotency). Artifacts land in results/rebench/<tag>/.
+
+PIPELINE
+  0. verify-full     functional preflight, FAIL-FAST                      (~2 min)
+  1. bench           narrative + code TPS                                 (~5 min)
+  2. verify-stress   long-context NIAH ladder + boundary                  (~10-15 min)
+  3. 8-pack quality  OPT-IN via --with-8pack-thinking (needs benchlocal)  (~45-90 min/pass)
+  4. soak            multi-turn VRAM stability                            (~15-20 min)
+  -> REPORT.md + REPORT-discuss.md synthesized at the end.
+
+USAGE
+  bash scripts/rebench-full.sh [OPTIONS]
+
+OPTIONS
+  --with-8pack-thinking[=off|on|both]
+                  Add the behavioral 8-pack (/150). off=reasoning-OFF,
+                  on=reasoning-ON, both=both passes (production-promotion gate).
+                  Omit to run structural gates only (~35-45 min). Requires
+                  benchlocal-cli + sandbox images (see docs/QUALITY_TEST.md).
+  --tag NAME      Output-dir basename (default: <model>-YYYYMMDD-HHMM).
+  --skip CSV      Skip phases (comma-sep): verify-full,bench,verify-stress,soak.
+  --resume        Skip steps that already have artifacts (idempotent).
+  --url URL       Target any OpenAI-compatible endpoint; skips container
+                  autodetect and runs host-only (CONTAINER=none).
+  --model NAME    Served-model-name (default: GET /v1/models).
+  --engine KIND   vllm|llama-cpp|sglang|other (use with --url).
+  -h, --help      Show this help and exit.
+
+ENV OVERRIDES (rarely needed — preflight autodetects our composes)
+  URL MODEL TAG OUT_DIR · SOAK_SESSIONS (10) · SOAK_TURNS (5)
+  MAX_TOKENS (both 8-pack passes) · THINKING_MAX_TOKENS (reasoning-ON pass)
+  SAMPLING_FROM_SERVER (inherit serving sampling; tags runs non-canonical)
+
+EXAMPLES
+  bash scripts/rebench-full.sh                             # structural gates only
+  bash scripts/rebench-full.sh --with-8pack-thinking=both  # + full 8-pack off+on
+  bash scripts/rebench-full.sh --url http://localhost:8020 --model tess-4-27b --engine llama-cpp
+  bash scripts/rebench-full.sh --resume                    # continue an interrupted run
+EOF
+}
+
 # --- args -------------------------------------------------------------------
 SKIP_CSV=""
 RESUME=0
@@ -87,6 +159,7 @@ TAG_OVERRIDE=""
 URL_FLAG=""
 MODEL_FLAG=""
 ENGINE_FLAG=""
+WITH_8PACK=""   # #338: 8-pack quality opt-in — "" (omit)=skip | off | on | both
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --skip)     SKIP_CSV="$2"; shift 2 ;;
@@ -95,8 +168,10 @@ while [[ $# -gt 0 ]]; do
     --url)      URL_FLAG="$2"; shift 2 ;;
     --model)    MODEL_FLAG="$2"; shift 2 ;;
     --engine)   ENGINE_FLAG="$2"; shift 2 ;;
+    --with-8pack-thinking)    WITH_8PACK="off"; shift ;;
+    --with-8pack-thinking=*)  WITH_8PACK="${1#*=}"; shift ;;
     -h|--help)
-      sed -n '2,55p' "$0"
+      usage
       exit 0
       ;;
     *)
@@ -124,6 +199,18 @@ skip_step() {
   for s in "${SKIPS[@]}"; do [[ "$s" == "$1" ]] && return 0; done
   return 1
 }
+
+# --- #338: 8-pack quality is opt-in via --with-8pack-thinking[=off|on|both] -
+# Default (flag omitted) = skip both quality passes (fast structural gates only).
+RUN_8PACK_OFF=0
+RUN_8PACK_ON=0
+case "${WITH_8PACK}" in
+  "")    ;;                                  # omitted → skip the 8-pack entirely
+  off)   RUN_8PACK_OFF=1 ;;
+  on)    RUN_8PACK_ON=1 ;;
+  both)  RUN_8PACK_OFF=1; RUN_8PACK_ON=1 ;;
+  *) echo "✗ --with-8pack-thinking must be off|on|both (got: '${WITH_8PACK}')" >&2; exit 2 ;;
+esac
 
 # --- endpoint + model auto-detect ------------------------------------------
 # Source preflight if available; it sets URL + CONTAINER from running compose.
@@ -182,6 +269,7 @@ echo "  model:       $MODEL"
 echo "  out dir:     $OUT_DIR"
 echo "  resume:      $RESUME"
 echo "  skips:       ${SKIP_CSV:-(none)}"
+echo "  8-pack:      ${WITH_8PACK:-(skipped — opt-in via --with-8pack-thinking=off|on|both)}"
 echo "  hermes env:  BENCHLOCAL_HERMES_RESOLVE_LOCALHOST=${BENCHLOCAL_HERMES_RESOLVE_LOCALHOST:-0}"
 echo "  thinking:    ${ENABLE_THINKING:-0}${THINKING_MAX_TOKENS:+ (max_tokens=$THINKING_MAX_TOKENS)}"
 echo "==============================================================="
@@ -247,13 +335,14 @@ run_step() {
   fi
   echo "[$name] running…"
   local t0=$(date +%s)
-  if "$@" > "$OUT_DIR/$name.log" 2>&1; then
-    local dt=$(( $(date +%s) - t0 ))
-    record_timing "$name" "$dt"
+  # tee: stream live to console (so benchlocal-cli [N/M] progress is visible)
+  # AND capture to the per-step log. rc from PIPESTATUS[0], not tee's exit.
+  "$@" 2>&1 | tee "$OUT_DIR/$name.log"
+  local rc=${PIPESTATUS[0]} dt=$(( $(date +%s) - t0 ))
+  record_timing "$name" "$dt"
+  if [[ $rc -eq 0 ]]; then
     echo "[$name] ✓ ${dt}s — log: $OUT_DIR/$name.log"
   else
-    local rc=$? dt=$(( $(date +%s) - t0 ))
-    record_timing "$name" "$dt"
     echo "[$name] ✗ ${dt}s — failed (rc=$rc) — log: $OUT_DIR/$name.log" >&2
     return $rc
   fi
@@ -270,8 +359,24 @@ snapshot_quality_json() {
   fi
 }
 
+# --- step 0: verify-full (fail-fast functional preflight) -------------------
+# ~2 min smoke (boots / serves / tool-calls / streams / coherent output). If the
+# endpoint isn't functional there's no point spending hours on bench → soak, so
+# we ABORT here. Skipped cleanly by --skip verify-full or --resume (run_step
+# returns 0 in both cases → no abort); only a real run-and-fail aborts.
+if ! URL="$URL" MODEL="$MODEL" \
+     run_step verify-full "$OUT_DIR/verify-full.log" \
+       bash "$ROOT_DIR/scripts/verify-full.sh"; then
+  echo "[rebench] ✗ verify-full failed — endpoint not functional; aborting before the multi-hour run." >&2
+  echo "          Fix the server, or re-run with --skip verify-full to bypass the preflight." >&2
+  exit 1
+fi
+
 # --- step 1: bench ----------------------------------------------------------
-URL="$URL" MODEL="$MODEL" RUNS="${RUNS:-3}" WARMUPS="${WARMUPS:-1}" \
+# Defaults match bench.sh's protocol (5 measured / 3 warm). The old
+# RUNS:-3 / WARMUPS:-1 overrides here silently under-ran the protocol on
+# every orchestrated gate (the A1 "n=3 env leak" was actually this line).
+URL="$URL" MODEL="$MODEL" RUNS="${RUNS:-5}" WARMUPS="${WARMUPS:-3}" \
   ENABLE_THINKING="${ENABLE_THINKING:-0}" \
   run_step bench "$OUT_DIR/bench.log" \
     bash "$ROOT_DIR/scripts/bench.sh" || true
@@ -281,16 +386,39 @@ URL="$URL" MODEL="$MODEL" \
   run_step verify-stress "$OUT_DIR/verify-stress.log" \
     bash "$ROOT_DIR/scripts/verify-stress.sh" || true
 
-# --- step 3: quality-test --full --------------------------------------------
-URL="$URL" MODEL="$MODEL" \
-  SAMPLING_FROM_SERVER="${SAMPLING_FROM_SERVER:-0}" \
-  ENABLE_THINKING="${ENABLE_THINKING:-0}" \
-  THINKING_MAX_TOKENS="${THINKING_MAX_TOKENS:-}" \
-  run_step quality-full "$OUT_DIR/quality-full.log" \
-    bash "$ROOT_DIR/scripts/quality-test.sh" --full --sandbox-log-dir "$OUT_DIR"
-snapshot_quality_json "$OUT_DIR/quality-full.json"
+# --- step 3: 8-pack quality, reasoning OFF (opt-in: --with-8pack-thinking=off|both) --
+# Forces --no-thinking (all 8 packs think-OFF) for a clean with/without-reasoning
+# A/B against step 4 — NOT the pack-default mixed mode. Skipped unless opted in. #338.
+if [[ "$RUN_8PACK_OFF" == "1" ]]; then
+  URL="$URL" MODEL="$MODEL" \
+    SAMPLING_FROM_SERVER="${SAMPLING_FROM_SERVER:-0}" \
+    MAX_TOKENS="${MAX_TOKENS:-}" \
+    NO_THINKING=1 \
+    run_step quality-full "$OUT_DIR/quality-full.log" \
+      bash "$ROOT_DIR/scripts/quality-test.sh" --full --no-thinking --sandbox-log-dir "$OUT_DIR"
+  snapshot_quality_json "$OUT_DIR/quality-full.json"
+else
+  echo "[quality-full] skipped — 8-pack is opt-in (pass --with-8pack-thinking=off|both)"
+fi
 
-# --- step 4: soak-test ------------------------------------------------------
+# --- step 4: 8-pack quality, reasoning ON (opt-in: --with-8pack-thinking=on|both) --
+# enable_thinking is sent per-request via benchlocal --enable-thinking. Scores
+# correctly only if the server PARSES reasoning (boot --reasoning on), else
+# <think> leaks into the graded answer. Skipped unless opted in. #338.
+if [[ "$RUN_8PACK_ON" == "1" ]]; then
+  URL="$URL" MODEL="$MODEL" \
+    SAMPLING_FROM_SERVER="${SAMPLING_FROM_SERVER:-0}" \
+    THINKING_MAX_TOKENS="${THINKING_MAX_TOKENS:-}" \
+    MAX_TOKENS="${MAX_TOKENS:-}" \
+    ENABLE_THINKING=1 \
+    run_step quality-thinking "$OUT_DIR/quality-full-thinking.log" \
+      bash "$ROOT_DIR/scripts/quality-test.sh" --full --enable-thinking --sandbox-log-dir "$OUT_DIR"
+  snapshot_quality_json "$OUT_DIR/quality-full-thinking.json"
+else
+  echo "[quality-thinking] skipped — 8-pack is opt-in (pass --with-8pack-thinking=on|both)"
+fi
+
+# --- step 5: soak-test ------------------------------------------------------
 URL="$URL" MODEL="$MODEL" \
   SOAK_MODE="${SOAK_MODE:-fresh}" \
   SOAK_OUTPUT="$OUT_DIR/soak-artifacts" \
@@ -298,27 +426,6 @@ URL="$URL" MODEL="$MODEL" \
   TURNS="${SOAK_TURNS:-5}" \
   run_step soak "$OUT_DIR/soak.log" \
     bash "$ROOT_DIR/scripts/soak-test.sh"
-
-# --- step 5: aider-polyglot-30 ----------------------------------------------
-# Default to 3600s per-case for aider on slower/single-card rigs. The 30
-# multi-turn coding exercises can run > 45 min on power-capped or single-card
-# setups; benchlocal-cli will kill mid-batch if its internal default fires.
-# Override via env: AIDER_TIMEOUT_PER_CASE=7200 bash scripts/rebench-full.sh
-AIDER_TIMEOUT_PER_CASE="${AIDER_TIMEOUT_PER_CASE:-3600}"
-# ik_llama reports its model id as the full GGUF path (leading + embedded
-# slashes); litellm inside the aider sandbox can't route a slash-laden model
-# id (#15/#16 family) → every exercise errors before the model → 0/30.
-# Mainline llama.cpp already reports a basename. Strip to basename for the
-# aider/litellm path — the server accepts any id (serves the one loaded model).
-AIDER_MODEL="${MODEL##*/}"
-URL="$URL" MODEL="$AIDER_MODEL" \
-  SAMPLING_FROM_SERVER="${SAMPLING_FROM_SERVER:-0}" \
-  ENABLE_THINKING="${ENABLE_THINKING:-0}" \
-  THINKING_MAX_TOKENS="${THINKING_MAX_TOKENS:-}" \
-  run_step aider-polyglot "$OUT_DIR/aider-polyglot.log" \
-    bash "$ROOT_DIR/scripts/quality-test.sh" --pack aider-polyglot-30 \
-      --timeout-per-case "$AIDER_TIMEOUT_PER_CASE" --sandbox-log-dir "$OUT_DIR"
-snapshot_quality_json "$OUT_DIR/aider-polyglot.json"
 
 # --- final GPU state snapshot ----------------------------------------------
 nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu \
@@ -348,9 +455,144 @@ echo
 echo "Headline pulls (grep through the logs):"
 echo "  TPS:           grep -E 'mean=|decode_TPS' $OUT_DIR/bench.log"
 echo "  verify-stress: tail -5 $OUT_DIR/verify-stress.log"
-echo "  quality:       grep '^Quality:' $OUT_DIR/quality-full.log"
+[[ -f "$OUT_DIR/quality-full.log" ]] && \
+  echo "  quality(off):  grep 'TOTAL' $OUT_DIR/quality-full.log"
+[[ -f "$OUT_DIR/quality-full-thinking.log" ]] && \
+  echo "  quality(on):   grep 'TOTAL' $OUT_DIR/quality-full-thinking.log"
+[[ "$RUN_8PACK_OFF$RUN_8PACK_ON" == "00" ]] && \
+  echo "  8-pack:        skipped (opt-in: re-run with --with-8pack-thinking=off|on|both)"
 echo "  soak:          grep -E 'verdict|silent_empty|p50_decode' $OUT_DIR/soak.log"
-echo "  aider:         grep 'aider-polyglot-30' $OUT_DIR/aider-polyglot.log"
 echo
 echo "To submit your numbers (review then PR):"
 echo "  bash scripts/submit-bench.sh --tag $TAG"
+
+# --- measurement record + baseline-induction prompt (catalog-baselines slice 2) ---
+# Auto-emit the #249 measurement record into the per-rig corpus when the served
+# container EXACT-matches a registry slug (identity semantics — a port/substring
+# match is a shape guess and must not stamp another slug's record; see the c3
+# detect layer). BYO/swap serves have no registry identity → skipped with a note.
+if [[ -f "$OUT_DIR/bench.log" ]] && command -v python3 >/dev/null 2>&1; then
+  OUT_DIR="$OUT_DIR" TAG="$TAG" python3 - <<'PY_RECORD' || true
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(__file__).resolve().parent if "__file__" in dir() else Path.cwd()
+sys.path.insert(0, str(Path.cwd()))
+try:
+    from scripts.lib.profiles.compose_registry import COMPOSE_REGISTRY
+    from scripts.lib.profiles.measurement_record import (
+        build_record, parse_bench_output, write_record,
+    )
+except Exception as exc:  # pragma: no cover - env without the profiles tree
+    print(f"  record:      skipped (profiles unavailable: {exc})")
+    raise SystemExit(0)
+
+out_dir = Path(os.environ["OUT_DIR"])
+tag = os.environ["TAG"]
+
+# EXACT container -> slug (never port/substring).
+slug = None
+try:
+    names = subprocess.run(
+        ["docker", "ps", "--format", "{{.Names}}"],
+        capture_output=True, text=True, timeout=10,
+    ).stdout.split()
+    norm = {n.replace("_", "-") for n in names}
+    for s, e in COMPOSE_REGISTRY.items():
+        # container name = the compose's container_name default
+        try:
+            txt = Path(e["compose_path"]).read_text(errors="replace")
+        except OSError:
+            continue
+        m = re.search(r'container_name:\s*"?(?:\$\{[^:}]*:-)?([A-Za-z0-9._-]+)\}?"?', txt)
+        if m and m.group(1).replace("_", "-") in norm:
+            slug = s
+            break
+except Exception:
+    pass
+
+if not slug:
+    print("  record:      skipped — no running container exact-matches a registry slug")
+    raise SystemExit(0)
+
+
+def _quality(path: Path):
+    try:
+        q = json.loads(path.read_text())
+        p = sum(int(x.get("passed") or 0) for x in q.get("packs") or [])
+        t = sum(int(x.get("total") or 0) for x in q.get("packs") or [])
+        return f"{p}/{t}" if t else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+# Fingerprint enrichment — the cohort keys the corpus joins/staleness rely on.
+engine_pin = None
+try:
+    from scripts.lib.profiles.compat import load_profiles
+    from scripts.lib.profiles.launch_compat import ProfileError, resolve_variant_pin
+
+    exports = resolve_variant_pin(load_profiles(), slug)
+    if "VLLM_NIGHTLY_SHA" not in exports:
+        engine_pin = next(iter(exports.values()))
+except Exception:
+    pass
+if not engine_pin:
+    try:
+        txt = Path(COMPOSE_REGISTRY[slug]["compose_path"]).read_text(errors="replace")
+        m = re.search(r'^\s*image:\s*["\x27]?(?:\$\{[A-Z_0-9]+:-)?([^\s}"\x27]+)\}?', txt, re.M)
+        engine_pin = m.group(1) if m else None
+    except OSError:
+        pass
+
+hardware = None
+power_cap = None
+try:
+    rows = subprocess.run(
+        ["nvidia-smi", "--query-gpu=name,power.limit", "--format=csv,noheader,nounits"],
+        capture_output=True, text=True, timeout=10,
+    ).stdout.strip().splitlines()
+    if rows:
+        name = rows[0].split(",")[0].strip()
+        m = re.search(r"RTX\s*(\d{4})", name)
+        hardware = f"rtx-{m.group(1)}" if m else None
+        power_cap = round(float(rows[0].split(",")[1]))
+except Exception:
+    pass
+
+try:
+    metrics = parse_bench_output((out_dir / "bench.log").read_text(errors="replace"))
+    soak = "not-run"
+    soak_log = out_dir / "soak.log"
+    if soak_log.is_file():
+        soak = "pass" if re.search(r"verdict\s+PASS", soak_log.read_text(errors="replace")) else "fail"
+    rec = build_record(
+        tag=slug, bench_metrics=metrics,
+        hardware=hardware, engine_pin=engine_pin, power_cap_w=power_cap,
+        smoke_status="pass",   # rebench aborts at step 0 unless verify-full passed
+        soak_status=soak,
+    )
+    q_off = _quality(out_dir / "quality-full.json")
+    q_on = _quality(out_dir / "quality-full-thinking.json")
+    if q_off:
+        rec["measured_extensions"]["quality_8pk"] = q_off
+    if q_on:
+        rec["measured_extensions"]["quality_8pk_think_on"] = q_on
+    rec["_rebench_tag"] = tag
+    from datetime import datetime, timezone
+    rec["_recorded_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    path = write_record(rec)
+    print(f"  record:      corpus record appended -> {path}  (slug {slug})")
+except Exception as exc:
+    print(f"  record:      skipped ({exc})")
+    raise SystemExit(0)
+
+print()
+print("To induct these numbers as the slug's SHIPPED baseline (review then PR):")
+print(f"  bash scripts/catalog-baseline.sh {slug} --from-tag {tag}")
+PY_RECORD
+fi

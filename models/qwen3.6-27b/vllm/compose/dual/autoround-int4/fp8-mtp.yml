@@ -8,8 +8,11 @@
 #   Max ctx:   262K (237K single-prompt verified)
 #   Genesis:   none — intentionally Genesis-free (isolation control + fallback)
 #   Status:    ✅ Production
-#   Quality:   129/150 (86%) — det 56/75 (75%) · sandbox 73/75 (97%, v0.4 shape-check) (--full, 2026-05-09)
-#                TC 67% · IF 87% · SO 87% · DE 100% · RM 33% · BF 93% · HA 100% · CLI 98%
+#   Quality:   109/150 (det 64/75 · sandbox 45/75) (--full, current harness 2026-06-07).
+#                In the 3-way fast/balanced/max A/B (same harness, same day): fast 109 ·
+#                balanced 105 · max 110 — a TIE (the 8-pack doesn't separate the quants).
+#                ⚠️ Earlier 129/150 (--full, 2026-05-09 harness) is NOT comparable — benchlocal-cli
+#                verifier fixes since then tightened scoring (mostly the agentic HA/CLI packs).
 #   Best for:  General-purpose dual-card vision + tools + long-ctx default ⭐
 # ---------------------------------------------------------------------------
 # Dual RTX 3090 — DEFAULT for 2× cards. Qwen3.6-27B + MTP n=3 + fp8 KV + vision.
@@ -29,21 +32,22 @@
 #
 # Dependencies:
 #   - 2× RTX 3090 (Ampere SM 8.6), PCIe-only (no NVLink — works fine)
-#   - vLLM STABLE v0.21.0 image (pulled from Docker Hub) — no source overlays
+#   - vLLM STABLE image (v0.24.0, from the `vllm-stable` engine profile — version in install.spec, #254) — no source overlays
 #     required (validated 2026-05-25: marlin-pad / PR-35936 / PR-41800 all
 #     unnecessary on a current vLLM; AutoRound INT4 TP=2 + MTP + vision boot clean).
 #
-# All dual-card variants in this dir:
+# Qwen3.6-27b vLLM dual/multi configs (post-2026-05-31 prune — settled on one
+# dual config; the A/B variants were deprecated):
 #
-#   File                                Ctx    Streams   Narr/Code TPS   KV       Vision  Topology
-#   dual/docker-compose.yml (this)      262K   2         69 / 89          fp8      ✅      2× PCIe
-#   multi4/docker-compose.yml            262K   4         63 / 76          fp8      ✅      4× PCIe
-#   multi4/dflash.yml     262K   2         64 / 104         FP16     ✅      4× PCIe
-#   dual/turbo.yml       262K   4         54 / 73          TQ3      ✅      2× PCIe
-#   dual/dflash.yml      185K   1         82 / 125         FP16     ✅
-#   dual/dflash-noviz.yml 200K   1         78 / 127         FP16     ❌      2× PCIe
-#   dual/nvlink-dflash.yml   185K   1         (community)      FP16     ✅      2× NVLink
-#   dual/nvlink-dflash-noviz.yml 188K   1         (community)      FP16     ❌      2× NVLink
+#   Slug               Ctx    Streams  KV    Vision  Topology   Notes
+#   vllm/dual (this)   262K   2        fp8   ✅      2× PCIe    THE dual default ⭐
+#   vllm/dual4         262K   4        fp8   ✅      4× PCIe    4-card
+#   vllm/dual4-dflash  262K   2        FP16  ✅      4× PCIe    4-card, peak code TPS
+#   (deprecated 2026-05-31, recover from git if needed: dual-dflash, dual-dflash-noviz,
+#    dual-tq3-nomtp, dual-bf16, dual-int8 — A/B leftovers superseded by vllm/dual.
+#    dual-turbo / dual-tq3-mtp* were already deprecated.)
+#   (NVLink rigs: any dual compose auto-detects NVLink at boot — no separate
+#    nvlink-* variant. NVLINK_MODE=force_on forces it if auto-detect misses.)
 #
 # Run:
 #   cd <repo>/models/qwen3.6-27b/vllm/compose
@@ -51,7 +55,7 @@
 # ===========================================================================
 # Hardware metadata (parsed by scripts/preflight.sh):
 # Requires-min-vram-gb: 24
-# Engine-profile: vllm-nightly-clean
+# Engine-profile: vllm-stable
 # Requires-min-gpu-count: 2
 # Tensor-parallel: 2
 services:
@@ -61,9 +65,9 @@ services:
     # means no patch overlays are anchored here, so we ride stable releases.
     # Bump the tag to a newer stable after a verify-stress + soak gate.
     # Override with VLLM_IMAGE=... if you need a specific build.
-    image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.21.0}
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.24.0}
     container_name: "${ESTATE_CONTAINER:-vllm-qwen36-27b-dual}"
-    restart: "no"
+    restart: ${CLUB3090_RESTART:-unless-stopped}
     ports:
       - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8010}}:8000"
     volumes:
@@ -88,7 +92,15 @@ services:
       - ../../../../../../scripts/detect_nvlink.sh:/etc/club3090/detect_nvlink.sh:ro
     environment:
       - NVIDIA_VISIBLE_DEVICES=${ESTATE_GPUS:-${NVIDIA_VISIBLE_DEVICES:-all}}
+      # CUDA-level GPU mask — the runtime-agnostic half of GPU selection
+      # (#610): launch.sh --gpus exports GPU UUIDs here. CDI runtimes (NixOS,
+      # nvidia-ctk cdi) IGNORE NVIDIA_VISIBLE_DEVICES, so this mask is what
+      # actually pins cards there; on the classic runtime the UUID form is
+      # renumbering-proof. Unset → absent (no masking).
+      - CUDA_VISIBLE_DEVICES
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-${OFFLINE:-0}}
+      - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-${OFFLINE:-0}}
       - VLLM_WORKER_MULTIPROC_METHOD=spawn
       - NVLINK_MODE=${NVLINK_MODE:-auto}
       - NCCL_CUMEM_ENABLE=0
@@ -119,16 +131,17 @@ services:
         # stability. See docs/HARDWARE.md "Note for WSL2 / Windows users".
         # NVLink auto-detection (sets NCCL env vars, _NVLINK_ENABLED).
         source /etc/club3090/detect_nvlink.sh
-        if [ "${_NVLINK_ENABLED:-0}" = "1" ]; then
-          exec vllm serve ${VLLM_ENFORCE_EAGER:+--enforce-eager} "$@"
+        if [ "$${_NVLINK_ENABLED:-0}" = "1" ]; then
+          exec vllm serve $${VLLM_ENFORCE_EAGER:+--enforce-eager} "$$@"
         else
-          exec vllm serve ${VLLM_ENFORCE_EAGER:+--enforce-eager} --disable-custom-all-reduce "$@"
+          exec vllm serve $${VLLM_ENFORCE_EAGER:+--enforce-eager} --disable-custom-all-reduce "$$@"
         fi
       - --
     command:
       - --model
       - /root/.cache/huggingface/qwen3.6-27b-autoround-int4
       - --served-model-name
+      - qwen3.6-27b
       - qwen3.6-27b-autoround
       - --quantization
       - auto_round
@@ -143,7 +156,7 @@ services:
       - --gpu-memory-utilization
       - "${GPU_MEMORY_UTILIZATION:-0.92}"
       - --max-num-seqs
-      - "2"
+      - "${MAX_NUM_SEQS:-2}"
       - --max-num-batched-tokens
       - "8192"
       - --kv-cache-dtype

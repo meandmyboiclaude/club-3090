@@ -12,7 +12,9 @@
 #   bash scripts/report.sh --stress          # adds verify-stress.sh 7/7 output (~5-10 min)
 #   bash scripts/report.sh --soak            # adds SOAK_MODE=continuous summary (~25 min) — catches Cliff 2b
 #   bash scripts/report.sh --bench           # adds bench.sh output (~3 min)
-#   bash scripts/report.sh --full            # ALL four: verify + stress + soak + bench (~35 min, the canonical "everything" pass for cross-rig contributions)
+#   bash scripts/report.sh --agentic         # adds bench-agentic.sh curve-shape output (~8 min estimate)
+#   bash scripts/report.sh --full            # ALL five: verify + stress + soak + bench + agentic (~43 min estimate, the canonical "everything" pass for cross-rig contributions)
+#   bash scripts/report.sh --studio          # adds AI Studio container log tails (ComfyUI + director + …) — for image/video/audio generation bugs (~2 sec)
 #   bash scripts/report.sh --no-redact       # disable path/host/user redaction
 #   bash scripts/report.sh --container NAME  # override container auto-detection
 #   bash scripts/report.sh --full-calibration  # kv-calc matrix for ALL models (default: only the running model; skipped on llama.cpp/ik_llama)
@@ -33,6 +35,8 @@ DO_VERIFY=0
 DO_STRESS=0
 DO_SOAK=0
 DO_BENCH=0
+DO_AGENTIC=0
+DO_STUDIO=0
 REDACT=1
 CONTAINER=""
 # KV-calc calibration is scoped to the running model by default (#168). Set to 1
@@ -49,7 +53,9 @@ while [[ $# -gt 0 ]]; do
     --stress) DO_STRESS=1; shift ;;
     --soak) DO_SOAK=1; shift ;;
     --bench) DO_BENCH=1; shift ;;
-    --full) DO_VERIFY=1; DO_STRESS=1; DO_SOAK=1; DO_BENCH=1; shift ;;
+    --agentic) DO_AGENTIC=1; shift ;;
+    --studio) DO_STUDIO=1; shift ;;
+    --full) DO_VERIFY=1; DO_STRESS=1; DO_SOAK=1; DO_BENCH=1; DO_AGENTIC=1; shift ;;
     --no-redact) REDACT=0; shift ;;
     --container) CONTAINER="${2:-}"; shift 2 ;;
     --full-calibration) FULL_CALIBRATION=1; shift ;;
@@ -67,6 +73,8 @@ cd "$REPO_ROOT"
 
 # KV-calc calibration helpers (engine/model detection + per-model filter, #168).
 source "$REPO_ROOT/scripts/lib/report_calib.sh"
+# shellcheck source=lib/p2p-state.sh
+source "$REPO_ROOT/scripts/lib/p2p-state.sh"
 
 # Pick up a saved MODEL_DIR (and other config) from the repo .env — same as
 # launch.sh / switch.sh, and what setup.sh writes there. An explicit exported
@@ -141,6 +149,30 @@ section "System"
   fi
   echo "- **OS:** $os_name"
   echo "- **Kernel:** $(uname -r)"
+
+  # Motherboard / BIOS — from sysfs DMI (readable WITHOUT root; serials/UUIDs
+  # are root-only in sysfs so they are never exposed here). #690.
+  _dmi() {
+    local v; v="$(cat "/sys/class/dmi/id/$1" 2>/dev/null)"
+    v="${v//$'\n'/ }"; v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
+    # drop common OEM placeholder junk so it degrades to "(not exposed)"
+    case "$v" in
+      "To Be Filled By O.E.M."|"To be filled by O.E.M."|"Default string"|      "System manufacturer"|"System Product Name"|"System Version"|      "Not Applicable"|"None"|"N/A"|"Unknown"|"0.0.0"|"") v="" ;;
+    esac
+    printf '%s' "$v"
+  }
+  _mb_vendor="$(_dmi board_vendor)"; _mb_name="$(_dmi board_name)"
+  _mb_product="$(_dmi product_name)"; _mb_bios="$(_dmi bios_version)"; _mb_biosdate="$(_dmi bios_date)"
+  _mb="$_mb_vendor${_mb_vendor:+${_mb_name:+ }}$_mb_name"
+  if [[ -n "$_mb" ]]; then
+    [[ -n "$_mb_product" && "$_mb_product" != "$_mb" ]] && _mb="$_mb  (system: $_mb_product)"
+    echo "- **Motherboard:** $_mb"
+  elif [[ -n "$_mb_product" ]]; then
+    echo "- **Motherboard:** (board DMI not exposed; system: $_mb_product)"
+  else
+    echo "- **Motherboard:** (not exposed)"
+  fi
+  [[ -n "$_mb_bios" ]] && echo "- **BIOS:** ${_mb_bios}${_mb_biosdate:+ ($_mb_biosdate)}"
 
   # Environment detection
   env_kind="bare metal"
@@ -385,7 +417,7 @@ section "Display / desktop state"
     # NB: top-level (not in a function) — plain assignment, not `local`.
     our_container=""
     if have docker && docker info >/dev/null 2>&1; then
-      our_container=$(docker ps --format '{{.Names}}' --filter 'name=vllm-' --filter 'name=llama-cpp-' --filter 'name=club3090-' --filter 'name=ik-llama-' 2>/dev/null | head -1)
+      our_container=$(docker ps --format '{{.Names}}' --filter 'name=vllm-' --filter 'name=llama-cpp-' --filter 'name=beellama-' --filter 'name=club3090-' --filter 'name=ik-llama-' 2>/dev/null | head -1)
     fi
     nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits 2>/dev/null \
       | while IFS=, read -r idx used; do
@@ -502,7 +534,7 @@ fi
 # then map it to a kv-calc engine family + model id via scripts/lib/report_calib.sh.
 _calib_container="${CONTAINER:-}"
 if [[ -z "$_calib_container" ]] && have docker && docker info >/dev/null 2>&1; then
-  _calib_container=$(docker ps --format '{{.Names}}' --filter 'name=vllm-' --filter 'name=llama-cpp-' --filter 'name=club3090-' --filter 'name=ik-llama-' 2>/dev/null | head -1)
+  _calib_container=$(docker ps --format '{{.Names}}' --filter 'name=vllm-' --filter 'name=llama-cpp-' --filter 'name=beellama-' --filter 'name=club3090-' --filter 'name=ik-llama-' 2>/dev/null | head -1)
 fi
 CALIB_ENGINE_KIND="${ENGINE_KIND:-$(calib_engine_for_container "$_calib_container")}"
 CALIB_MODEL_ID="$(calib_model_for_container "$_calib_container")"
@@ -548,6 +580,83 @@ if have python3 && [[ -f tools/kv-calc.py ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Quality tooling (benchlocal-cli + sandboxes)
+# ---------------------------------------------------------------------------
+# Triage for "my quality run skipped packs / scored weird": is benchlocal-cli
+# installed, how fresh, are the sandbox images built, and do they PREDATE the
+# CLI (the rebuilt-CLI-stale-sandboxes incident class)? All best-effort — a
+# rig without any of this still produces a report.
+
+section "Quality tooling (benchlocal-cli + sandboxes)"
+{
+  bl_bin=$(command -v benchlocal-cli 2>/dev/null || true)
+  if [[ -z "$bl_bin" ]]; then
+    echo "- **benchlocal-cli:** not installed (quality-test.sh needs it — \`pip install git+https://github.com/noonghunna/benchlocal-cli.git\`)"
+  else
+    bl_mtime=$(stat -c %Y "$bl_bin" 2>/dev/null || echo 0)
+    bl_when=$([[ "$bl_mtime" -gt 0 ]] && date -d "@${bl_mtime}" +%F 2>/dev/null || echo "unknown")
+    # Version via the CLI's own interpreter (works for pip-from-git AND
+    # editable-checkout installs; console-script shebang points at the env).
+    bl_py=$(head -1 "$bl_bin" 2>/dev/null | sed 's/^#!//')
+    bl_ver=$([[ -x "$bl_py" ]] && "$bl_py" -c 'import importlib.metadata as m; print(m.version("benchlocal-cli"))' 2>/dev/null || true)
+    # PRECISE source — the metadata version is frozen at install time and
+    # fixes are pushed without bumping it, so it alone can't identify the
+    # code. pip records the truth in direct_url.json: a git install carries
+    # the exact commit; an editable install carries the checkout dir → git
+    # describe (path itself withheld from the public report).
+    bl_src=$([[ -x "$bl_py" ]] && "$bl_py" - <<'PYEOF' 2>/dev/null
+import importlib.metadata as m, json, subprocess
+try:
+    raw = m.distribution("benchlocal-cli").read_text("direct_url.json") or ""
+    d = json.loads(raw)
+except Exception:
+    d = {}
+vcs = (d.get("vcs_info") or {}).get("commit_id")
+if vcs:
+    print(f"git@{vcs[:9]}")
+elif (d.get("dir_info") or {}).get("editable") and str(d.get("url", "")).startswith("file://"):
+    path = d["url"][7:]
+    try:
+        desc = subprocess.run(["git", "-C", path, "describe", "--tags", "--always", "--dirty"],
+                              capture_output=True, text=True, timeout=5).stdout.strip()
+        print(f"{desc} (editable checkout)" if desc else "editable checkout")
+    except Exception:
+        print("editable checkout")
+PYEOF
+    )
+    echo "- **benchlocal-cli:** \`${bl_bin}\` (version: \`${bl_ver:-unknown}\`${bl_src:+, source: \`${bl_src}\`}, installed/updated: ${bl_when})"
+    if have docker && docker info >/dev/null 2>&1; then
+      stale_any=0
+      echo "- **Sandbox images** (needed by the --full sandboxed packs):"
+      for img in benchlocal-sandbox-bugfind benchlocal-sandbox-cli benchlocal-sandbox-hermes benchlocal-sandbox-aider-polyglot; do
+        created=$(docker image inspect "${img}:latest" --format '{{.Created}}' 2>/dev/null || true)
+        if [[ -z "$created" ]]; then
+          echo "  - \`${img}\`: ✗ not built"
+          continue
+        fi
+        cdate=$(date -d "$created" +%F 2>/dev/null || echo "$created")
+        cepoch=$(date -d "$created" +%s 2>/dev/null || echo 0)
+        mark=""
+        if [[ "$cepoch" -gt 0 && "$bl_mtime" -gt 0 && "$cepoch" -lt "$bl_mtime" ]]; then
+          mark="  ⚠ OLDER than the installed CLI — rebuild if the update touched sandbox sources"
+          stale_any=1
+        fi
+        echo "  - \`${img}\`: built ${cdate}${mark}"
+      done
+      [[ "$stale_any" == "1" ]] && echo "- **Rebuild:** \`bash <benchlocal-cli-checkout>/tools/build-sandboxes.sh\` (heuristic — an unrelated reinstall also trips it)"
+    else
+      echo "- **Sandbox images:** docker unavailable — cannot inspect (sandboxed packs need Docker)"
+    fi
+  fi
+  latest_q=$(ls -t results/quality/quality-*.json 2>/dev/null | head -1)
+  if [[ -n "$latest_q" ]]; then
+    echo "- **Latest quality result:** \`${latest_q}\` ($(date -d "@$(stat -c %Y "$latest_q")" +%F 2>/dev/null || echo '?'))"
+  else
+    echo "- **Latest quality result:** none found under results/quality/"
+  fi
+} | redact
+
+# ---------------------------------------------------------------------------
 # Active container
 # ---------------------------------------------------------------------------
 
@@ -560,6 +669,7 @@ if [[ -z "$CONTAINER" ]] && have docker && docker info >/dev/null 2>&1; then
   CONTAINER=$(docker ps --format '{{.Names}}' --filter 'name=vllm-qwen36' 2>/dev/null | head -1)
   [[ -z "$CONTAINER" ]] && CONTAINER=$(docker ps --format '{{.Names}}' --filter 'name=vllm-' 2>/dev/null | head -1)
   [[ -z "$CONTAINER" ]] && CONTAINER=$(docker ps --format '{{.Names}}' --filter 'name=llama-cpp-' 2>/dev/null | head -1)
+  [[ -z "$CONTAINER" ]] && CONTAINER=$(docker ps --format '{{.Names}}' --filter 'name=beellama-' 2>/dev/null | head -1)
   [[ -z "$CONTAINER" ]] && CONTAINER=$(docker ps --format '{{.Names}}' --filter 'name=club3090-' 2>/dev/null | head -1)
 fi
 
@@ -690,6 +800,44 @@ else
 
   subsection "Boot log highlights"
   {
+    # Interconnect / P2P ENGAGEMENT — the runtime truth. The GPU "Topology" /
+    # "PCIe / P2P detail" sections above report P2P *capability* (can it?); this
+    # reports whether P2P is actually ON for the running serving container.
+    # detect_nvlink.sh emits an [nvlink] decision trail at boot stating the
+    # resolved NCCL_P2P_LEVEL + custom-all-reduce state. Grep the WHOLE log (not
+    # head -200) so a late line on a 3-4 GPU boot isn't missed, and fall back to
+    # the live container env. ALWAYS prints something so a reviewer never has to
+    # guess whether P2P was engaged (the gap that forced asks on #446 / #488).
+    nvlink_boot=$(docker logs "$CONTAINER" 2>&1 | grep -E '\[nvlink\]' | head -8)
+    p2p_env=$(docker exec "$CONTAINER" env 2>/dev/null | grep -E '^(NCCL_P2P|NVLINK_MODE|NCCL_CUMEM)=' | sort)
+    echo "**Interconnect / P2P engagement:**"
+    if [[ -n "$nvlink_boot" || -n "$p2p_env" ]]; then
+      echo '```'
+      [[ -n "$nvlink_boot" ]] && echo "$nvlink_boot"
+      [[ -n "$p2p_env" ]] && { echo "# resolved container env:"; echo "$p2p_env"; }
+      echo '```'
+    else
+      echo "_No \`[nvlink]\` boot line or NCCL_P2P/NVLINK_MODE env found — P2P engagement undetermined (single-GPU, a non-NCCL engine like llama.cpp, or an entrypoint predating detect_nvlink.sh)._"
+    fi
+    # Cross-referenced VERDICT (capability x engagement — the #488/#158 matrix).
+    # Silent on single-GPU / no-capability rigs so the OK/WARN/INFO line is
+    # always signal, never boilerplate.
+    _p2p_verdict_line="$(p2p_verdict "$(p2p_gpu_count)" "$(p2p_host_capability)" \
+      "$(printf '%s\n%s' "$nvlink_boot" "$p2p_env" | p2p_classify_engagement)")"
+    [[ -n "$_p2p_verdict_line" ]] && { echo; echo "**Interconnect verdict:** ${_p2p_verdict_line}"; }
+    # Kernel-module flavor — the WHY behind a P2P result on GeForce cards. A
+    # proprietary (closed) module refuses P2P; the open modules can grant it, with
+    # `topo -p2p rw` above the functional proof. Only meaningful multi-GPU.
+    # We report open-vs-proprietary (detectable); we do NOT claim to fingerprint
+    # the aikitoria patch — it's metadata-identical to stock nvidia-open.
+    if [[ "$(p2p_gpu_count)" -ge 2 ]]; then
+      case "$(p2p_driver_flavor)" in
+        proprietary) echo; echo "**NVIDIA kernel module:** proprietary (closed) — refuses P2P on GeForce; the open kernel modules (\`nvidia-open\`, or a patched fork) are what enable it. A \`CNS\` in \`topo -p2p rw\` above is this. See docs/PCIE_P2P.md." ;;
+        open)        echo; echo "**NVIDIA kernel module:** open (\`Dual MIT/GPL\`) — P2P-capable on GeForce; whether it's granted is the \`topo -p2p rw\` result above (\`OK\` = engaged, \`CNS\` = board/layout still refusing). Metadata can't tell stock \`nvidia-open\` from a patched fork — the topo result is the proof." ;;
+      esac
+    fi
+    echo
+
     genesis_results=$(docker logs "$CONTAINER" 2>&1 | grep -E '\[INFO:genesis\.apply_all\] (Genesis|✅) Results' | tail -1)
     if [[ -n "$genesis_results" ]]; then
       echo "**Genesis patches applied:**"
@@ -897,6 +1045,39 @@ if [[ $DO_BENCH -eq 1 && $DO_SOAK -eq 0 ]]; then
 EOF
 fi
 
+if [[ $DO_AGENTIC -eq 1 ]]; then
+  section "bench-agentic.sh output"
+  if [[ -f scripts/bench-agentic.sh ]]; then
+    SESSIONS=1 bash scripts/bench-agentic.sh 2>&1 | redact | details "bench-agentic output (1 session x 12 default turns, curve-shape estimate; ~8 min estimate)"
+  else
+    echo "_scripts/bench-agentic.sh not found_"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# AI Studio container logs (--studio) — opt-in: the ComfyUI / director / orchestrator
+# log tails that diagnose an image/video/audio GENERATION failure (e.g. a "ComfyUI
+# generation error" in a lane). Off by default — verbose + only relevant for studio bugs.
+# ---------------------------------------------------------------------------
+if [[ $DO_STUDIO -eq 1 ]]; then
+  section "AI Studio logs (--studio)"
+  echo "_Container log tails for image/video/audio generation bugs. ComfyUI carries the workflow"
+  echo "execution trace (the actual generation error). Redacted; pass \`--no-redact\` for full paths._"
+  _studio_found=0
+  # ComfyUI first (the generation engine — longest tail), then the studio sidecars.
+  for c in comfyui studio-director studio-orchestrator studio-image-shim studio-tts studio-step-voice studio-gallery; do
+    if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$c"; then
+      _studio_found=1
+      _tail=200; [[ "$c" == comfyui ]] && _tail=400
+      _running=$(docker ps --filter "name=^${c}$" --format '{{.Status}}' 2>/dev/null | head -1)
+      # strip ANSI colour codes (ComfyUI logs are coloured) so the pasted block reads cleanly
+      docker logs --tail "$_tail" "$c" 2>&1 | sed -E 's/\x1b\[[0-9;]*[mK]//g' | redact \
+        | details "$c — ${_running:-not running} (last $_tail lines)"
+    fi
+  done
+  [[ $_studio_found -eq 0 ]] && echo "_No AI Studio containers found. Bring the studio up (\`gpu-mode ai-studio\` or \`bash scripts/setup-ai-studio.sh\`), reproduce the failure, then re-run with \`--studio\`._"
+fi
+
 # ---------------------------------------------------------------------------
 # Footer
 # ---------------------------------------------------------------------------
@@ -905,5 +1086,5 @@ cat <<'EOF'
 
 ---
 
-_Generated by `bash scripts/report.sh`. Flags: `--verify` (verify-full), `--stress` (verify-stress 7/7 incl. Cliff 2 needles), `--soak` (SOAK_MODE=continuous, catches Cliff 2b), `--bench` (canonical TPS), `--full` (all four, ~35 min). Use `--no-redact` to disable redaction (internal sharing only)._
+_Generated by `bash scripts/report.sh`. Flags: `--verify` (verify-full), `--stress` (verify-stress 7/7 incl. Cliff 2 needles), `--soak` (SOAK_MODE=continuous, catches Cliff 2b), `--bench` (canonical TPS), `--agentic` (multi-turn TTFT/decode curve-shape, ~8 min estimate), `--studio` (AI Studio / ComfyUI container log tails — for generation bugs), `--full` (all five, ~43 min estimate). Use `--no-redact` to disable redaction (internal sharing only)._
 EOF

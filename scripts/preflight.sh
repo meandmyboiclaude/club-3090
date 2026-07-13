@@ -70,6 +70,53 @@ preflight_gpu() {
   fi
   echo "[preflight] gpu:     ${gpu_count}× detected"
   echo "$gpu_lines" | sed 's/^/[preflight]            /'
+  # GPU arch class (display-only, #246). The launchers inject arch-aware env
+  # (KV dtype) from the hardware profiles; this banner just names the class.
+  local _cap _arch_class
+  _cap="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d '[:space:]')"
+  if [[ -n "$_cap" ]]; then
+    case "$_cap" in
+      8.6|8.7)      _arch_class="ampere" ;;
+      8.9)          _arch_class="ada" ;;
+      9.*)          _arch_class="hopper" ;;
+      1[0-9].*)     _arch_class="blackwell" ;;
+      *)            _arch_class="unknown" ;;
+    esac
+    if [[ "$_arch_class" == "ampere" || "$_arch_class" == "unknown" ]]; then
+      echo "[preflight] arch:    ${_arch_class} (sm_${_cap}) — compose defaults apply (no arch-aware override)"
+    else
+      echo "[preflight] arch:    ${_arch_class} (sm_${_cap}) — arch-aware KV defaults active for pilot slugs (#246)"
+    fi
+  fi
+  # Interconnect capability (display-only; the engagement VERDICT lives in
+  # report.sh — pre-boot there is no container to audit). Silent on
+  # single-GPU / stock-PCIe rigs so the line is always signal.
+  if [[ "$gpu_count" -ge 2 ]]; then
+    local _p2p_cap=""
+    # shellcheck source=lib/p2p-state.sh
+    source "$(dirname "${BASH_SOURCE[0]}")/lib/p2p-state.sh" 2>/dev/null && \
+      _p2p_cap="$(p2p_host_capability "$gpu_count")"
+    case "$_p2p_cap" in
+      nvlink)
+        if [[ "${NVLINK_MODE:-auto}" == "force_off" ]]; then
+          echo "[preflight] p2p:     NVLink bridge detected but NVLINK_MODE=force_off — the bridge will sit idle this boot (~15% decode, BENCHMARKS #77)"
+        else
+          echo "[preflight] p2p:     NVLink bridge detected — launcher auto-engages it (NVLINK_MODE=${NVLINK_MODE:-auto})"
+        fi ;;
+      pcie_p2p)
+        echo "[preflight] p2p:     driver reports PCIe P2P available — launcher auto-engages it (patched-driver path, NVLINK_MODE=${NVLINK_MODE:-auto}; docs/PCIE_P2P.md)" ;;
+    esac
+  fi
+  # Cross-rig friendliness: surface a hint when 4090 / 5090 cards are
+  # detected. Composes run cross-rig but per-class gotchas (ctx derate,
+  # VRAM envelope, SM-gated kernels) live in the FAQ — easier to catch
+  # the hint here than for a user to discover it after a confusing run.
+  if echo "$gpu_lines" | grep -qE "RTX 4090"; then
+    echo "[preflight] note:    4090 detected → docs/FAQ.md#can-i-use-a-4090-instead-of-a-3090 (ctx ceiling ~15–20% lower than headless 3090)"
+  fi
+  if echo "$gpu_lines" | grep -qE "RTX 5090"; then
+    echo "[preflight] note:    5090 detected → docs/FAQ.md#can-i-use-a-5090 (32 GB envelope unlocks single-card configs)"
+  fi
   # nvidia-container-toolkit check — needed for docker GPU access.
   if ! docker info 2>/dev/null | grep -qi 'Runtimes:.*nvidia'; then
     echo "[preflight] WARN:  Docker doesn't list the 'nvidia' runtime. If 'docker compose up' fails" >&2
@@ -92,14 +139,39 @@ _preflight_csv_token() {
   printf '%s' "$value"
 }
 
+# UUID→index normalization (#610): launch.sh --gpus exports GPU UUIDs (the
+# runtime-agnostic form — CDI ignores NVIDIA_VISIBLE_DEVICES, and indices
+# renumber inside classic-runtime containers). Preflight's checks are all
+# host-index-based, so translate any GPU-xxxx token back to its host index
+# here — ONE choke point for every selector consumer. Unknown tokens pass
+# through untouched (they fail the match downstream with the existing error).
+_preflight_selector_normalize() {
+  local selector="$1" token out="" idx
+  [[ "$selector" != *GPU-* ]] && { printf '%s' "$selector"; return 0; }
+  local uuid_map
+  uuid_map="$(nvidia-smi --query-gpu=index,uuid --format=csv,noheader,nounits 2>/dev/null || true)"
+  IFS=',' read -ra _pf_norm_tokens <<< "$selector"
+  for token in "${_pf_norm_tokens[@]}"; do
+    token="$(_preflight_trim "$token")"
+    if [[ "$token" == GPU-* && -n "$uuid_map" ]]; then
+      idx="$(awk -F', *' -v u="$token" '$2 == u {print $1; exit}' <<< "$uuid_map")"
+      [[ -n "$idx" ]] && token="$idx"
+    fi
+    out="${out:+${out},}${token}"
+  done
+  printf '%s' "$out"
+}
+
 _preflight_selector() {
+  local raw=""
   if [[ -n "${CLUB3090_GPU:-}" ]]; then
-    printf '%s' "${CLUB3090_GPU}"
+    raw="${CLUB3090_GPU}"
   elif [[ -n "${NVIDIA_VISIBLE_DEVICES:-}" && "${NVIDIA_VISIBLE_DEVICES}" != "all" && "${NVIDIA_VISIBLE_DEVICES}" != "void" ]]; then
-    printf '%s' "${NVIDIA_VISIBLE_DEVICES}"
+    raw="${NVIDIA_VISIBLE_DEVICES}"
   elif [[ -n "${CUDA_VISIBLE_DEVICES:-}" && "${CUDA_VISIBLE_DEVICES}" != "all" && "${CUDA_VISIBLE_DEVICES}" != "void" ]]; then
-    printf '%s' "${CUDA_VISIBLE_DEVICES}"
+    raw="${CUDA_VISIBLE_DEVICES}"
   fi
+  [[ -n "$raw" ]] && _preflight_selector_normalize "$raw"
 }
 
 _preflight_selector_is_specific() {
@@ -180,9 +252,11 @@ _preflight_hardware_suggestions() {
   echo "[preflight] Suggested next steps:" >&2
   echo "[preflight]   - Pick a compose that matches the detected GPU VRAM/topology." >&2
   if [[ "$variant" == vllm/gemma-mtp-tp1 ]]; then
-    echo "[preflight]   - On 2x 24 GB cards, use:  bash scripts/switch.sh vllm/gemma-mtp" >&2
+    echo "[preflight]   - vllm/gemma-mtp-tp1 is DEPRECATED (no fp8 KV path for Gemma 4 on Ampere sm_86)." >&2
+    echo "[preflight]   - Single 24 GB card, use:  bash scripts/switch.sh beellama/gemma-dflash" >&2
+    echo "[preflight]   - On 2x 24 GB cards, use:  bash scripts/switch.sh vllm/gemma-31b-dual" >&2
   fi
-  echo "[preflight]   - On a single 24 GB card, start with:  bash scripts/switch.sh vllm/default" >&2
+  echo "[preflight]   - On a single 24 GB card, start with:  bash scripts/switch.sh beellama/dflash  (single-card default)" >&2
   echo "[preflight]   - For maximum compatibility, use:  bash scripts/switch.sh llamacpp/default" >&2
   echo "[preflight]   - Explicit bypass:  bash scripts/switch.sh --force ${variant:-<variant>}" >&2
 }
@@ -374,6 +448,80 @@ preflight_compose_hardware() {
   return 0
 }
 
+# preflight_lmcache_ram <compose_file>
+# Guards LMCache composes against over-allocating CPU RAM for the L1 KV cache.
+# Runs REGARDLESS of --force — host-choke prevention is NOT optional: an over-sized
+# --l1-size-gb (100 GB on a 94 GB rig) once exhausted RAM and forced a server reboot
+# (club-3090 #133). No-op for composes without an
+# `LMCache-l1-gb` metadata header, so it's safe to call on every launch.
+preflight_lmcache_ram() {
+  local compose_file="$1"
+  [[ -f "$compose_file" ]] || return 0
+  declare -F compose_meta_get >/dev/null 2>&1 || return 0
+
+  local l1_hdr
+  l1_hdr="$(compose_meta_get "$compose_file" lmcache-l1-gb || true)"
+  [[ -z "$l1_hdr" ]] && return 0   # not an LMCache compose
+
+  # Env override (LMCACHE_L1_GB) wins over the header default — the guard must track
+  # what the container will actually request.
+  local l1="${LMCACHE_L1_GB:-$l1_hdr}"
+  if ! [[ "$l1" =~ ^[0-9]+$ ]]; then
+    echo "[preflight] WARN:  LMCACHE_L1_GB='${l1}' is not an integer; skipping LMCache RAM check." >&2
+    return 0
+  fi
+
+  local reserve=28   # GB headroom for the vLLM process (27B @262K TP=2) + OS
+  local need=$(( l1 + reserve ))
+
+  if [[ ! -r /proc/meminfo ]]; then
+    echo "[preflight] WARN:  cannot read /proc/meminfo; skipping LMCache RAM check." >&2
+    return 0
+  fi
+  local kb avail_gb
+  kb="$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)"
+  avail_gb=$(( kb / 1024 / 1024 ))
+
+  if (( avail_gb < need )); then
+    local suggest=$(( avail_gb > reserve ? avail_gb - reserve : 8 ))
+    echo "[preflight] ERROR: LMCache --l1-size-gb=${l1} needs ~${need} GB RAM (l1 ${l1} + ~${reserve} GB vLLM+OS), but only ${avail_gb} GB is available." >&2
+    echo "            (Guard against the l1-too-large host-OOM: a 100 GB cache on this 94 GB rig forced a reboot.)" >&2
+    echo "            Fix: lower the cache — LMCACHE_L1_GB=${suggest} bash scripts/switch.sh ... — or free RAM." >&2
+    return 1
+  fi
+
+  # Soft: SHM must be >= l1 or LMCache silently falls back to slow pickle serialization.
+  local shm_gb
+  shm_gb="$(grep -oE 'shm_size:[[:space:]]*"?[0-9]+' "$compose_file" | grep -oE '[0-9]+' | head -1 || true)"
+  if [[ -n "$shm_gb" ]] && (( shm_gb < l1 )); then
+    echo "[preflight] WARN:  shm_size (${shm_gb}g) < LMCACHE_L1_GB (${l1}) — LMCache SHM will fall back to slow pickle." >&2
+    echo "            Fix: raise shm_size in the compose to >= ${l1}g." >&2
+  fi
+
+  echo "[preflight] lmcache: RAM ok — l1=${l1} GB needs ~${need} GB, ${avail_gb} GB available"
+
+  # L2 disk tier (optional) — soft-warn on low free space at the L2 host dir. L2 is OFF unless
+  # LMCACHE_L2=1 or LMCACHE_L2_ADAPTER is set; it grows ~33 GB per full 262K session (~131 KB/token,
+  # measured) and is unbounded, so a small disk can fill. Warn, don't fail — the user opted in.
+  if [[ -n "${LMCACHE_L2_ADAPTER:-}" || "${LMCACHE_L2:-0}" == "1" ]]; then
+    local l2dir="${LMCACHE_KV_DIR:-}"
+    if [[ -z "$l2dir" ]]; then
+      # default host dir = repo-root lmcache-kv/ (this compose sits 6 levels below the repo root)
+      l2dir="$(cd "$(dirname "$compose_file")/../../../../../.." 2>/dev/null && pwd)/lmcache-kv"
+    fi
+    local chkdir="$l2dir"; [[ -d "$chkdir" ]] || chkdir="$(dirname "$l2dir")"
+    local l2_avail_gb
+    l2_avail_gb="$(df -BG "$chkdir" 2>/dev/null | awk 'NR==2{gsub(/G/,"",$4); print $4}')"
+    if [[ -n "$l2_avail_gb" ]] && (( l2_avail_gb < 50 )); then
+      echo "[preflight] WARN:  LMCache L2 enabled, only ${l2_avail_gb} GB free at ${l2dir}." >&2
+      echo "            L2 is unbounded and grows ~33 GB per full 262K session — free space or point LMCACHE_L2_ADAPTER at a larger SSD." >&2
+    elif [[ -n "$l2_avail_gb" ]]; then
+      echo "[preflight] lmcache: L2 disk ok — ${l2_avail_gb} GB free at ${l2dir}"
+    fi
+  fi
+  return 0
+}
+
 preflight_disk() {
   local path="$1"
   local need_gb="$2"
@@ -418,6 +566,66 @@ preflight_gpu_idle() {
     echo "[preflight]        Boot may OOM. Free VRAM with 'nvidia-smi' / 'docker stop ...' first." >&2
   fi
   return 0
+}
+
+# preflight_compose_gpu_fit <compose_file> <force>
+#   HARD-fail (unless force=1) when the GPUs lack enough FREE VRAM for the compose's
+#   gpu_memory_utilization. vLLM aborts at boot if `free < util × total`; with
+#   restart:unless-stopped it then restart-loops, so `switch.sh` waits the full
+#   READY_TIMEOUT (600s) for an endpoint that never comes. This converts that silent
+#   timeout into an instant, actionable error — the failure @stage-chuk hit switching
+#   ai-studio → gemma on a desktop rig (club-3090 #535): GNOME on the GPUs (~1.3 GiB/card)
+#   leaves < the 0.95 budget free. We mirror vLLM's own check (util × total × 0.98 ≈ its
+#   mem_get_info total, i.e. nvidia-smi total minus ~2% driver-reserved) and briefly retry,
+#   because `docker compose down` returns before CUDA actually releases a torn-down scene.
+preflight_compose_gpu_fit() {
+  local compose="$1" force="${2:-0}"
+  command -v nvidia-smi >/dev/null 2>&1 || return 0
+  [[ -f "$compose" ]] || return 0
+
+  # Effective util: an env GPU_MEMORY_UTILIZATION override wins over the compose default
+  # (`${GPU_MEMORY_UTILIZATION:-<X>}`), so the gate matches what vLLM will actually use.
+  local util_default util
+  util_default=$(grep -oE 'GPU_MEMORY_UTILIZATION:-[0-9.]+' "$compose" | head -1 | sed 's/.*-//')
+  util="${GPU_MEMORY_UTILIZATION:-$util_default}"
+  case "$util" in ''|*[!0-9.]*) return 0 ;; esac   # unknown / non-numeric → can't gate
+
+  # Cards this compose uses (TP / min-gpu-count header; default 1).
+  local need_cards
+  need_cards=$(grep -oiE '#[[:space:]]*(Tensor-parallel|Requires-min-gpu-count):[[:space:]]*[0-9]+' "$compose" \
+               | grep -oE '[0-9]+' | sort -rn | head -1)
+  [[ -z "$need_cards" ]] && need_cards=1
+
+  # Settle window (~10s): a just-`down`ed scene's VRAM lags docker's return.
+  local attempt result idx fg ng fits
+  for attempt in 1 2 3 4 5; do
+    result=$(nvidia-smi --query-gpu=index,memory.total,memory.free --format=csv,noheader,nounits 2>/dev/null \
+      | awk -F, -v util="$util" -v n="$need_cards" '
+          { gi[NR]=$1+0; f[NR]=$3+0; d[NR]=util*$2*0.98 }
+          END {
+            if (NR==0) { print "-1 0 0 1"; exit }          # no cards visible → skip
+            for (i=1;i<=NR;i++) ord[i]=i                    # sort card rows by free desc
+            for (i=1;i<=NR;i++) for (j=i+1;j<=NR;j++) if (f[ord[j]]>f[ord[i]]) { t=ord[i]; ord[i]=ord[j]; ord[j]=t }
+            k=(n<NR ? n : NR); fits=1; wf=1e18; wn=0; wi=-1  # check the k best cards; report the worst
+            for (i=1;i<=k;i++){ c=ord[i]; if (f[c]<d[c]) fits=0; if (f[c]<wf){ wf=f[c]; wn=d[c]; wi=gi[c] } }
+            printf "%d %.1f %.1f %d", wi, wf/1024, wn/1024, fits
+          }')
+    read -r idx fg ng fits <<< "$result"
+    [[ "$fits" == "1" ]] && return 0
+    [[ "$attempt" -lt 5 ]] && sleep 2
+  done
+
+  echo "[preflight] ERROR: GPU ${idx} has ${fg} GiB free, but this config needs ~${ng} GiB/card" >&2
+  echo "[preflight]        (gpu_memory_utilization=${util}, ${need_cards} card(s) for TP). Something else is holding VRAM —" >&2
+  echo "[preflight]        a desktop on the GPU, another model, or a scene that isn't fully stopped (check: docker ps / nvidia-smi)." >&2
+  echo "[preflight]        Fix: free that VRAM, or lower the ceiling —" >&2
+  echo "[preflight]             GPU_MEMORY_UTILIZATION=0.90 bash scripts/switch.sh <variant>" >&2
+  echo "[preflight]        — then retry.  (Bypass this check with --force.)" >&2
+  if [[ "$force" == "1" ]]; then
+    echo "[preflight] WARN:  --force set — launching anyway; vLLM may still abort at the free-memory check." >&2
+    return 0
+  fi
+  return 1
 }
 
 preflight_running() {
@@ -623,6 +831,10 @@ _preflight_compose_path_default() {
   value="$(printf '%s' "$value" | sed -E 's#\$\{MODEL_DIR[^}]*\}/?##g')"
   value="${value#/models/}"
   value="${value#/root/.cache/huggingface/}"
+  # Strip a trailing `}` left when a path is the DEFAULT inside an outer
+  # ${VAR:-/root/.cache/huggingface/<path>} — the path grep anchors mid-expansion
+  # so it captures `<path>}`. A real model subdir never ends in `}`.
+  value="${value%\}}"
   printf '%s' "$value"
 }
 
@@ -692,12 +904,16 @@ _preflight_weight_recipe_for_key() {
 _preflight_weight_hf_command() {
   local model_dir_expr="${1:-\$MODEL_DIR}"
   [[ -n "${WEIGHT_REPO:-}" ]] || return 1
+  # Mirror an optional revision pin (#319) so the manual fallback fetches the
+  # same bytes setup.sh would. Unset -> no flag (track HEAD).
+  local rev=""
+  [[ -n "${WEIGHT_REVISION:-}" ]] && rev=" --revision ${WEIGHT_REVISION}"
   if [[ -n "${WEIGHT_FILES:-}" ]]; then
-    printf 'hf download %s %s --local-dir %s/%s' \
-      "$WEIGHT_REPO" "$WEIGHT_FILES" "$model_dir_expr" "$WEIGHT_SUBDIR"
+    printf 'hf download %s %s%s --local-dir %s/%s' \
+      "$WEIGHT_REPO" "$WEIGHT_FILES" "$rev" "$model_dir_expr" "$WEIGHT_SUBDIR"
   else
-    printf 'hf download %s --local-dir %s/%s' \
-      "$WEIGHT_REPO" "$model_dir_expr" "$WEIGHT_SUBDIR"
+    printf 'hf download %s%s --local-dir %s/%s' \
+      "$WEIGHT_REPO" "$rev" "$model_dir_expr" "$WEIGHT_SUBDIR"
   fi
 }
 
@@ -829,19 +1045,34 @@ preflight_compose_deps() {
   # ${MODEL_DIR}:/root/.cache/huggingface and pass
   # `/root/.cache/huggingface/<subdir>`.
   local is_llamacpp=0
-  if grep -qhE 'image:.*(ggml-org/llama\.cpp|ikawrakow/ik-llama)' "${compose_files[@]}"; then
+  # beellama.cpp (ghcr.io/{anbeeld/beellama.cpp,noonghunna/beellama-cpp}) is a
+  # llama.cpp-family server: it mounts ${MODEL_DIR}:/models and passes
+  # `-m /models/<path>` (+ `--spec-draft-model /models/<path>` for DFlash/MTP),
+  # so it belongs on the GGUF presence path, NOT the vLLM HF-cache path.
+  if grep -qhE 'image:.*(ggml-org/llama\.cpp|ikawrakow/ik-llama|beellama)' "${compose_files[@]}"; then
     is_llamacpp=1
   fi
 
   if [[ $is_llamacpp -eq 1 ]]; then
     local gguf_paths=()
+    local draft_paths=()
     local mmproj_paths=()
     local token path
 
+    # Target weights: -m / --model
     while IFS= read -r token; do
       path="$(_preflight_compose_path_default "$token")"
       [[ -n "$path" ]] && gguf_paths+=("$path")
     done < <(grep -hoE -- '(^|[[:space:]])(-m|--model)[[:space:]]+/models/[^[:space:]]+' "${compose_files[@]}" \
+      | awk '{print $NF}' || true)
+
+    # Speculative drafter: beellama --spec-draft-model, llama.cpp -md/--model-draft.
+    # A missing drafter GGUF otherwise surfaces only as a cryptic in-container
+    # "failed to open GGUF file" crash (see #288 beellama onboarding reports).
+    while IFS= read -r token; do
+      path="$(_preflight_compose_path_default "$token")"
+      [[ -n "$path" ]] && draft_paths+=("$path")
+    done < <(grep -hoE -- '(^|[[:space:]])(--spec-draft-model|--model-draft|-md)[[:space:]]+/models/[^[:space:]]+' "${compose_files[@]}" \
       | awk '{print $NF}' || true)
 
     while IFS= read -r token; do
@@ -850,8 +1081,13 @@ preflight_compose_deps() {
     done < <(grep -hoE -- '(^|[[:space:]])--mmproj[[:space:]]+/models/[^[:space:]]+' "${compose_files[@]}" \
       | awk '{print $NF}' || true)
 
+    # Env overrides mirror the compose knobs (GGUF_FILE / DRAFT_FILE / MMPROJ_FILE),
+    # each replacing only its own path class.
     if [[ -n "${GGUF_FILE:-}" ]]; then
       gguf_paths=("$GGUF_FILE")
+    fi
+    if [[ -n "${DRAFT_FILE:-}" && ${#draft_paths[@]} -gt 0 ]]; then
+      draft_paths=("$DRAFT_FILE")
     fi
     if [[ -n "${MMPROJ_FILE:-}" && ${#mmproj_paths[@]} -gt 0 ]]; then
       mmproj_paths=("$MMPROJ_FILE")
@@ -860,6 +1096,11 @@ preflight_compose_deps() {
     for path in "${gguf_paths[@]}"; do
       if [[ ! -f "${model_dir}/${path}" ]]; then
         missing+=("${model_dir}/${path} (llama.cpp GGUF weights)")
+      fi
+    done
+    for path in "${draft_paths[@]}"; do
+      if [[ ! -f "${model_dir}/${path}" ]]; then
+        missing+=("${model_dir}/${path} (speculative drafter GGUF)")
       fi
     done
     for path in "${mmproj_paths[@]}"; do
@@ -882,7 +1123,13 @@ preflight_compose_deps() {
           missing+=("${model_dir}/${subdir}/config.json (HF model)")
         fi
       fi
-    done < <(grep -hoE '/root/\.cache/huggingface/[^"'\''[:space:],}:]+' "${compose_files[@]}" || true)
+    # Char-class must NOT exclude `:` or `}` — model paths can be
+    # `/root/.cache/huggingface/${MODEL_SUBDIR:-default}` (vLLM) and excluding
+    # those truncated the token to `${MODEL_SUBDIR` before _preflight_compose_path_default
+    # could resolve the `:-default`, causing a false "missing" (the gemma-4-12b
+    # MODEL_SUBDIR/SPEC_MODEL_SUBDIR composes). Stop only at real delimiters
+    # (quote / whitespace / comma); the `${VAR:-default}` resolver runs downstream.
+    done < <(grep -hv '^[[:space:]]*#' "${compose_files[@]}" 2>/dev/null | grep -oE '/root/\.cache/huggingface/[^"'\''[:space:],]+' || true)
 
     # Experimental SGLang composes mount individual MODEL_DIR subdirectories to
     # /models/target and /models/drafter instead of using the HF cache mount.
@@ -1001,22 +1248,31 @@ preflight_autodetect_endpoint() {
     return 0   # both already set — caller knows what they're doing
   fi
 
-  # Scan for one of our containers + its `0.0.0.0:<host>->8000/tcp` mapping.
-  # Recognises the canonical club-3090 prefixes (vllm-qwen36-27b,
-  # llama-cpp-qwen36-27b, ik-llama-qwen36-27b, vllm-gemma-4-31b) plus the sglang experimental tree.
-  # Users running endpoint-first via `--url` to rebench-full.sh bypass this
-  # entirely (PREFLIGHT_NO_AUTODETECT=1 set there).
+  # Detect a running inference container by its ENGINE-INTERNAL port mapping
+  # (vLLM 8000 / llama.cpp 8080 / sglang 30000), NOT a hardcoded model-name
+  # allowlist — so any compose is found regardless of model: gemma-4-12b,
+  # qwen-35b-a3b, beellama, a BYO container, etc. (#310: the old allowlist only
+  # knew qwen36-27b / gemma-4-31b, so everything else silently fell back to 8020).
+  # Among matches, prefer a recognised club-3090 engine-family prefix; otherwise
+  # take the first. Users running endpoint-first via `--url` bypass this entirely
+  # (PREFLIGHT_NO_AUTODETECT=1 set there).
   #
-  # The `|| true` is load-bearing: grep -E returns 1 when no container
-  # matches, which under `set -euo pipefail` in the caller silently aborts
-  # rebench-full.sh before it reaches its own "endpoint not responding"
-  # error path. Empty `found_line` is what we want for the no-container case.
-  local found_line
-  found_line=$(docker ps --format '{{.Names}}|{{.Ports}}' 2>/dev/null \
-    | grep -E '^(vllm-qwen36-27b|llama-cpp-qwen36-27b|ik-llama-qwen36-27b|vllm-gemma-4-31b|sglang-qwen36-27b)' \
-    | head -1 || true)
-  if [[ -z "$found_line" ]]; then
-    return 0   # nothing running; defaults stand
+  # The `|| true` is load-bearing: grep -E returns 1 when nothing matches, which
+  # under `set -euo pipefail` in the caller would silently abort rebench-full.sh
+  # before its own "endpoint not responding" path. Empty = the no-container case.
+  local engine_lines found_line
+  engine_lines=$(docker ps --format '{{.Names}}|{{.Ports}}' 2>/dev/null \
+    | grep -E '([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]+->(8000|8080|30000)/tcp' || true)
+  if [[ -z "$engine_lines" ]]; then
+    return 0   # nothing serving on an engine port; defaults stand
+  fi
+  # Prefer a recognised club-3090 engine-family prefix when several match.
+  found_line=$(printf '%s\n' "$engine_lines" \
+    | grep -E '^(vllm-|llama-cpp-|ik-llama-|sglang-|beellama-)' | head -1 || true)
+  [[ -z "$found_line" ]] && found_line=$(printf '%s\n' "$engine_lines" | head -1)
+  # Several inference containers up → we picked one; tell the user how to override.
+  if [[ "$(printf '%s\n' "$engine_lines" | grep -c .)" -gt 1 ]]; then
+    echo "[autodetect] multiple inference containers running; picked '${found_line%%|*}' — set CONTAINER=/URL= to override" >&2
   fi
 
   local detected_name detected_port
@@ -1045,4 +1301,126 @@ preflight_autodetect_endpoint() {
     echo "[autodetect] using running ${note}  (skip: PREFLIGHT_NO_AUTODETECT=1)" >&2
   fi
   return 0
+}
+
+# ---------------------------------------------------------------------------
+# Resolve the SERVED model name from the running endpoint's /v1/models when the
+# caller hasn't set MODEL explicitly. Mirrors what soak-test.sh / bench-agentic.sh
+# / quality-test.sh already do — so verify-full / verify-stress / bench / verify
+# send the model the server actually serves instead of a hardcoded qwen default.
+#
+# Why this exists (#372): report.sh autodetects container + URL + engine but NOT
+# the served model, so the verify/bench scripts fell back to MODEL=qwen3.6-27b-
+# autoround. Against a non-qwen vLLM endpoint (e.g. gemma-4-26b-a4b-awq) every
+# request 404'd ("The model `qwen3.6-27b` does not exist"). llama.cpp
+# ignores the request's model field, so the same wrong default silently "worked"
+# there (#371) — which is exactly what masked the bug.
+#
+# Sets MODEL in the caller's scope. No-op when MODEL is already set (an explicit
+# env/flag value always wins — critical for llama-swap / multi-model endpoints
+# where /v1/models returns the first, often wrong, registered model), when there
+# is no URL to query, or when the endpoint isn't reachable (the caller's own
+# reachability check then surfaces the real outage). Callers keep their own
+# last-resort literal after this, so behaviour is unchanged when detection no-ops.
+preflight_autodetect_model() {
+  [[ -n "${MODEL:-}" ]] && return 0
+  local url="${1:-${URL:-}}"
+  [[ -n "$url" ]] || return 0
+  command -v curl >/dev/null 2>&1 || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  local detected
+  detected="$(curl -sf -m 5 "${url%/}/v1/models" 2>/dev/null \
+    | python3 -c "import json,sys
+try:
+    d = json.load(sys.stdin).get('data', [])
+    print(d[0]['id'] if d else '')
+except Exception:
+    print('')" 2>/dev/null || true)"
+  if [[ -n "$detected" ]]; then
+    MODEL="$detected"
+    echo "[autodetect] served model='${MODEL}' (from ${url%/}/v1/models; set MODEL= to override)" >&2
+  fi
+  return 0
+}
+
+# ── #633 — ik-llama cu13/cu12 driver-aware image selection ────────────────────
+# The pinned cu13 ik-llama image has a CUDA 13.2 runtime; on a driver whose
+# supported CUDA < 13.2 the forward-compat path fails on GeForce (CUDA error
+# 804) → silent CPU fallback → segfault crash-loop, with no actionable hint
+# (launch just times out after 600 s). Auto-pick the cu12 sibling build (same
+# build 4574, CUDA 12.6, backward-compatible with the 13.0 driver — validated on
+# a 580.159 rig, #633) unless the user pinned IK_LLAMA_IMAGE. ik-llama only.
+IK_LLAMA_CU13_MIN_CUDA="13.2"
+IK_LLAMA_CU12_FALLBACK="${IK_LLAMA_CU12_FALLBACK:-ghcr.io/ikawrakow/ik-llama-cpp:cu12-server-4574}"
+
+# _cuda_ge A B → 0 (true) iff major.minor A >= B
+_cuda_ge() {
+  local a1="${1%%.*}" b1="${2%%.*}" a2 b2
+  a2="${1#*.}"; [[ "$a2" == "$1" ]] && a2=0
+  b2="${2#*.}"; [[ "$b2" == "$2" ]] && b2=0
+  (( 10#${a1:-0} > 10#${b1:-0} )) && return 0
+  (( 10#${a1:-0} < 10#${b1:-0} )) && return 1
+  (( 10#${a2:-0} >= 10#${b2:-0} ))
+}
+
+# Driver's max supported CUDA (major.minor), or "" if undetectable.
+_driver_cuda_version() {
+  local v
+  v="$(nvidia-smi --query 2>/dev/null | grep -m1 -oE 'CUDA Version[[:space:]]*:[[:space:]]*[0-9]+\.[0-9]+' | grep -oE '[0-9]+\.[0-9]+' || true)"
+  [[ -z "$v" ]] && v="$(nvidia-smi 2>/dev/null | grep -m1 -oE 'CUDA Version:?[[:space:]]*[0-9]+\.[0-9]+' | grep -oE '[0-9]+\.[0-9]+' || true)"
+  printf '%s' "$v"
+}
+
+# preflight_single_card_util <compose_file> [variant]
+# Advisory WARN (never blocks; runs even under --force) when the user raises
+# GPU_MEMORY_UTILIZATION above the compose's validated default on a SINGLE-CARD
+# (TP<=1) config. On one GPU a higher util shrinks the free VRAM a large
+# tool-response prefill needs for its activation peak, so vLLM OOMs mid-prefill
+# even though boot succeeds (verify-stress step 2/8). Two 5090 testers hit this
+# by setting util=0.92 on the nvfp4 slug whose validated default is 0.85 (#617).
+# No-op unless the user overrode the env AND the compose ships a
+# `GPU_MEMORY_UTILIZATION:-<default>` (so it never fires for non-vLLM engines,
+# dual/multi-card, or a plain default run).
+preflight_single_card_util() {
+  local compose_file="$1" variant="${2:-}"
+  [[ -f "$compose_file" ]] || return 0
+  local user_util="${GPU_MEMORY_UTILIZATION:-}"
+  [[ -n "$user_util" ]] || return 0                 # only when explicitly overridden
+
+  local tp=""
+  if declare -F compose_meta_get >/dev/null 2>&1; then
+    tp="$(compose_meta_get "$compose_file" tensor-parallel 2>/dev/null || true)"
+  fi
+  [[ "$tp" =~ ^[0-9]+$ ]] || return 0               # unknown topology → stay quiet
+  (( tp <= 1 )) || return 0                          # single-card only
+
+  local default_util
+  default_util="$(command grep -oE 'GPU_MEMORY_UTILIZATION:-[0-9.]+' "$compose_file" | head -1 | sed -E 's/.*:-//')"
+  [[ -n "$default_util" ]] || return 0               # compose ships no util default
+
+  if awk -v u="$user_util" -v d="$default_util" 'BEGIN{exit !((u+0) > (d+0))}'; then
+    echo "[preflight] WARN:  GPU_MEMORY_UTILIZATION=${user_util} exceeds ${variant:-this config}'s validated single-card default of ${default_util}." >&2
+    echo "[preflight]        On one GPU a higher util steals the headroom a large tool-response prefill needs for its" >&2
+    echo "[preflight]        activation peak — vLLM can OOM mid-prefill (verify-stress step 2/8) even though boot succeeds." >&2
+    echo "[preflight]        Fix: grow context via MAX_MODEL_LEN and keep GPU_MEMORY_UTILIZATION <= ${default_util}. (#617)" >&2
+  fi
+  return 0
+}
+
+preflight_ik_llama_image() {
+  local variant="${1:-}"
+  [[ "$variant" == ik-llama/* ]] || return 0
+  if [[ -n "${IK_LLAMA_IMAGE:-}" ]]; then
+    echo "[preflight] ik-llama image pinned (.env/shell): ${IK_LLAMA_IMAGE}"
+    return 0
+  fi
+  local drv; drv="$(_driver_cuda_version)"
+  [[ -z "$drv" ]] && return 0                    # undetectable → leave compose default (cu13)
+  _cuda_ge "$drv" "$IK_LLAMA_CU13_MIN_CUDA" && return 0   # >=13.2 → cu13 runtime OK
+  export IK_LLAMA_IMAGE="$IK_LLAMA_CU12_FALLBACK"
+  echo "[preflight] ⚠ driver CUDA ${drv} < ${IK_LLAMA_CU13_MIN_CUDA} (the cu13 ik-llama pin's runtime)." >&2
+  echo "[preflight]   cu13 would forward-compat-fail on GeForce (error 804) → CPU fallback → crash loop (#633)." >&2
+  echo "[preflight]   Auto-selected the cu12 sibling build (same build, CUDA 12.6, backward-compatible):" >&2
+  echo "[preflight]     IK_LLAMA_IMAGE=${IK_LLAMA_CU12_FALLBACK}" >&2
+  echo "[preflight]   Pin IK_LLAMA_IMAGE in .env to override." >&2
 }

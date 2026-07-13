@@ -1,0 +1,31 @@
+schema_version: 1
+id: vllm-gemma4-unified
+display_name: vLLM Gemma-4 unified (arch-preview)
+type: vllm
+stability: experimental
+install:
+  method: docker_image
+  spec: vllm/vllm-openai:gemma4-unified
+min_sm: 7.5
+supported_model_families:
+  - gemma4-unified
+features:
+  int8_per_token_head: false
+  turboquant_3bit_nc: false
+  marlin_pad_sub_tile_n: false
+  qwen3_coder_tool_parser: false
+supported_kv_formats:
+  - bf16
+  - fp16
+supported_drafters:
+  - mtp
+  - mtp_assistant
+supported_weight_formats:
+  - bf16
+  - fp16
+  - autoround
+  - compressed-tensors
+required_overlays: []
+vendored_overlays: []
+required_genesis: false
+notes: "Gemma-4-12B (gemma4_unified arch) vLLM path. Pins the EPHEMERAL `vllm/vllm-openai:gemma4-unified` arch-preview tag — gemma4_unified was merged into vLLM main in PR #44429 (2026-06-03); this tag IS today's vLLM main, so Gemma-4 architecture fixes are baked in. The tag may move/disappear — pin a digest before any Production promotion. Only bf16/fp16 KV on this image (no fp8/INT8-PTH path here). 256K (262144) works on the stock image: google/gemma-4-12B-it ships the corrected max_position_embeddings=262144 (upstream config fix, vllm#39914), so the prior local vllm-gemma4-prope-longctx overlay was dropped 2026-06-04 (NIAH 140K–241K validated overlay-free)."

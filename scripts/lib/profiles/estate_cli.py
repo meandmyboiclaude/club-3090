@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import json
 import os
 import re
 import shlex
@@ -133,6 +134,88 @@ def parse_fake_gpus(value: str) -> list[GpuInfo]:
         hardware_id = _hardware_id_from_gpu(name, int(mem_mib), float(sm))
         out.append(GpuInfo(int(idx), name, int(mem_mib), float(sm), hardware_id))
     return sorted(out, key=lambda gpu: gpu.index)
+
+
+# --- GPU UUID resolution (#610 Phase A) -------------------------------------
+# The estate boot path pins GPUs by index (ESTATE_GPUS / CUDA_VISIBLE_DEVICES),
+# which CDI runtimes IGNORE and the classic runtime renumbers — the exact bug
+# gpu-select.sh fixed for `launch.sh --gpus`. Resolve to UUIDs here so estate
+# instances land on the cards they claimed on both runtimes. This is the
+# python twin of scripts/lib/gpu-select.sh; test-gpu-select asserts parity.
+
+
+def resolve_gpu_uuids(indices) -> str | None:
+    """Comma-separated host GPU indices -> their UUID csv. Returns None on any
+    failure (no nvidia-smi, an index that doesn't resolve, fake-GPU test mode)
+    so callers fall back to raw indices — the pre-UUID behavior."""
+    idxs = [str(i).strip() for i in indices if str(i).strip() != ""]
+    if not idxs:
+        return None
+    # Honor the CLUB3090_FAKE_GPUS test seam: no real nvidia-smi to query.
+    if os.environ.get("CLUB3090_FAKE_GPUS"):
+        return None
+    uuids = []
+    for idx in idxs:
+        proc = subprocess.run(
+            ["nvidia-smi", "--query-gpu=uuid", "--format=csv,noheader", "-i", idx],
+            text=True, capture_output=True, check=False,
+        )
+        uuid = (proc.stdout or "").strip().splitlines()[0].strip() if proc.stdout.strip() else ""
+        if proc.returncode != 0 or not uuid.startswith("GPU-"):
+            return None  # partial UUID pinning is worse than the index fallback
+        uuids.append(uuid)
+    return ",".join(uuids)
+
+
+def container_placement_uuids(container: str) -> str:
+    """The GPU UUIDs the container's COMPUTE PROCESSES actually run on — the
+    runtime-agnostic ground truth (--query-compute-apps, NOT --query-gpu: under
+    CDI the container sees all cards but runs on the CUDA-masked set). Sorted,
+    unique csv; empty when no compute apps yet / nvidia-smi unavailable."""
+    proc = subprocess.run(
+        ["docker", "exec", container, "nvidia-smi",
+         "--query-compute-apps=gpu_uuid", "--format=csv,noheader"],
+        text=True, capture_output=True, check=False,
+    )
+    if proc.returncode != 0:
+        return ""
+    seen = sorted({ln.strip() for ln in proc.stdout.splitlines() if ln.strip().startswith("GPU-")})
+    return ",".join(seen)
+
+
+def assert_placement(inst: "InstanceSpec", requested_uuids: str | None) -> dict:
+    """Post-boot placement assertion for one instance (#610 Phase A): confirm
+    the model landed on the GPU(s) it claimed. Loud warning on mismatch; never
+    raises. Returns the {requested, actual, placement: ok|mismatch|unknown}
+    verdict — the single shape the state report + (Phase C) c3 badge read."""
+    verdict = assert_placement_quiet(inst, requested_uuids)
+    if verdict["placement"] == "mismatch":
+        actual_set = set(verdict["actual"].split(","))
+        missing = [u for u in requested_uuids.split(",") if u and u not in actual_set]
+        print(f"[estate] ⚠ PLACEMENT MISMATCH for {inst.name}: requested GPU(s) not running the model — {' '.join(missing)}", file=sys.stderr)
+        print(f"[estate]   requested: {requested_uuids}", file=sys.stderr)
+        print(f"[estate]   actual:    {verdict['actual']}", file=sys.stderr)
+        print("[estate]   On a CDI runtime this usually means CUDA_VISIBLE_DEVICES didn't reach the container (docs/HARDWARE.md → Pinning specific GPUs).", file=sys.stderr)
+    elif verdict["placement"] == "ok":
+        print(f"[estate] ✓ placement verified for {inst.name} — model on the requested GPU(s)", file=sys.stderr)
+    return verdict
+
+
+def assert_placement_quiet(inst: "InstanceSpec", requested_uuids: str | None) -> dict:
+    """assert_placement's verdict WITHOUT the stderr prints — for the parallel
+    boot path (captured stdout) and the state report. Same {requested, actual,
+    placement} shape."""
+    verdict = {"requested": requested_uuids or "", "actual": "", "placement": "unknown"}
+    if not requested_uuids or not requested_uuids.startswith("GPU-"):
+        return verdict
+    actual = container_placement_uuids(container_name(inst.name))
+    verdict["actual"] = actual
+    if not actual:
+        return verdict
+    actual_set = set(actual.split(","))
+    missing = [u for u in requested_uuids.split(",") if u and u not in actual_set]
+    verdict["placement"] = "mismatch" if missing else "ok"
+    return verdict
 
 
 def detect_gpus_from_host() -> list[GpuInfo]:
@@ -344,13 +427,19 @@ def compose_abs_path(compose_name: str) -> Path:
 def compose_env(inst: InstanceSpec) -> dict[str, str]:
     env = load_dotenv()
     joined = ",".join(str(gpu) for gpu in inst.gpu_indices)
+    # Pin CUDA_/NVIDIA_VISIBLE_DEVICES by UUID so the instance lands on the
+    # cards it claimed on BOTH runtimes (#610 Phase A) — CDI ignores the
+    # NVIDIA index form, the classic runtime renumbers it. ESTATE_GPUS stays
+    # index-based (the compose's device_ids interpolation reads the host view).
+    # Falls back to indices when UUIDs can't be resolved (pre-#610 behavior).
+    visible = resolve_gpu_uuids(inst.gpu_indices) or joined
     env.update(
         {
             "ESTATE_GPUS": joined,
             "ESTATE_PORT": str(inst.port),
             "ESTATE_CONTAINER": container_name(inst.name),
-            "CUDA_VISIBLE_DEVICES": joined,
-            "NVIDIA_VISIBLE_DEVICES": joined,
+            "CUDA_VISIBLE_DEVICES": visible,
+            "NVIDIA_VISIBLE_DEVICES": visible,
             "PORT": str(inst.port),
         }
     )
@@ -365,6 +454,50 @@ def compose_env(inst: InstanceSpec) -> dict[str, str]:
 
 def compose_cmd() -> list[str]:
     return shlex.split(os.environ.get("COMPOSE_BIN", "docker compose"))
+
+
+def compose_service_names(compose_name: str) -> list[str]:
+    """Return service names from a registry compose file."""
+    path = compose_abs_path(compose_name)
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    services = data.get("services")
+    if not isinstance(services, dict) or not services:
+        raise EstateCliError(f"compose file for `{compose_name}` has no services: {path}")
+    return [str(name) for name in services.keys()]
+
+
+def compose_override_doc(inst: InstanceSpec) -> dict[str, Any]:
+    """Per-estate compose override.
+
+    Some vLLM compose files expose all NVIDIA devices via the Docker device
+    reservation and only interpolate ESTATE_GPUS into NVIDIA_VISIBLE_DEVICES.
+    In that setup, CUDA may still enumerate physical GPU 0 first. Pass
+    CUDA_VISIBLE_DEVICES inside the container so each estate instance uses the
+    GPUs it claimed.
+    """
+    joined = ",".join(str(gpu) for gpu in inst.gpu_indices)
+    # UUID-pin (#610 Phase A): CDI ignores the NVIDIA index form and the
+    # classic runtime renumbers it; UUIDs mask correctly on both. Fall back to
+    # indices when UUIDs can't be resolved.
+    visible = resolve_gpu_uuids(inst.gpu_indices) or joined
+    return {
+        "services": {
+            service: {
+                "environment": {
+                    "CUDA_VISIBLE_DEVICES": visible,
+                    "NVIDIA_VISIBLE_DEVICES": visible,
+                }
+            }
+            for service in compose_service_names(inst.compose_name)
+        }
+    }
+
+
+def write_compose_override(inst: InstanceSpec) -> Path:
+    boot_log_dir().mkdir(parents=True, exist_ok=True)
+    path = boot_log_dir() / f"{safe_name(inst.name)}.override.yml"
+    path.write_text(yaml.safe_dump(compose_override_doc(inst), sort_keys=False), encoding="utf-8")
+    return path
 
 
 def boot_log_dir() -> Path:
@@ -406,7 +539,10 @@ def append_log(path: Path, message: str) -> None:
 
 
 def run_compose(inst: InstanceSpec, action: str, log_path: Path | None = None) -> None:
-    cmd = compose_cmd() + ["-p", project_name(inst.name), "-f", str(compose_abs_path(inst.compose_name)), action]
+    cmd = compose_cmd() + ["-p", project_name(inst.name), "-f", str(compose_abs_path(inst.compose_name))]
+    if action == "up":
+        cmd += ["-f", str(write_compose_override(inst))]
+    cmd.append(action)
     if action == "up":
         cmd.append("-d")
     if log_path is not None:
@@ -517,6 +653,11 @@ def boot_instance_parallel(index: int, total: int, inst: InstanceSpec, timeout: 
         run_compose(inst, "up", log_path=log_path)
         elapsed_s = wait_ready_quiet(inst, timeout)
         append_log(log_path, f"[estate] healthy after {elapsed_s}s")
+        # Placement assertion (#610 Phase A) — into the per-instance log (the
+        # parallel path has no clean stdout; the verdict lands where the boot
+        # log is). Non-fatal.
+        _pv = assert_placement_quiet(inst, resolve_gpu_uuids(inst.gpu_indices))
+        append_log(log_path, f"[estate] placement: {_pv['placement']} (requested={_pv['requested'] or '-'} actual={_pv['actual'] or '-'})")
         return BootOutcome(index=index, total=total, inst=inst, ok=True, elapsed_s=elapsed_s, log_path=log_path)
     except Exception as exc:
         elapsed_s = int(time.monotonic() - start)
@@ -584,6 +725,7 @@ def command_boot(args: argparse.Namespace) -> int:
             print(f"[estate] [{i}/{total}] booting {inst.name}: {inst.compose_name} GPUs={list(inst.gpu_indices)} port={inst.port}")
             run_compose(inst, "up")
             wait_ready(inst, args.timeout)
+            assert_placement(inst, resolve_gpu_uuids(inst.gpu_indices))
         print("[estate] all selected instances are healthy")
         return 0
     except EstateCliError as exc:
@@ -725,7 +867,97 @@ def command_wizard(args: argparse.Namespace) -> int:
         return 2
 
 
+def diagnose_payload(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+    path = estate_path(args.file)
+    payload: dict[str, Any] = {
+        "estate_file": str(path),
+        "live": bool(args.live),
+        "checks": {},
+        "valid": False,
+        "summary": "RED",
+    }
+    checks = payload["checks"]
+
+    try:
+        data, instances = parse_estate_yaml(path)
+        checks["schema"] = {
+            "ok": True,
+            "schema_version": data.get("schema_version"),
+            "instance_count": len(instances),
+        }
+    except EstateCliError as exc:
+        checks["schema"] = {"ok": False, "error": str(exc)}
+        return payload, 2
+
+    missing = [inst.compose_name for inst in instances if inst.compose_name not in COMPOSE_REGISTRY]
+    checks["registry"] = {
+        "ok": not missing,
+        "missing": missing,
+        "composes": [inst.compose_name for inst in instances],
+    }
+    if missing:
+        return payload, 1
+
+    profiles, _, _, hardware, _, nvlink_active, nvlink_pairs, result = validate_doc(path)
+    per_instance = []
+    for inst in instances:
+        inst_result = result.per_instance[inst.name]
+        per_instance.append(
+            {
+                "name": inst.name,
+                "valid": bool(inst_result.valid),
+                "constraints_passed": len(inst_result.diagnostics.get("constraints_passed", [])),
+                "constraints_failed": len(inst_result.diagnostics.get("constraints_failed", [])),
+                "elapsed_ms": inst_result.diagnostics.get("elapsed_ms"),
+                "reasons": list(inst_result.reasons),
+            }
+        )
+    checks["per_instance_fits"] = per_instance
+
+    checks["cross_checks"] = {
+        "ok": not result.cross_instance_failures,
+        "failures": list(result.cross_instance_failures),
+        "constraints_passed": list(result.diagnostics.get("constraints_passed", [])),
+        "notes": list(result.notes),
+    }
+
+    calibration = []
+    for inst in instances:
+        selected = [hardware[idx] for idx in inst.gpu_indices if 0 <= idx < len(hardware)]
+        status, row = calibration_status(profiles, inst.compose_name, selected)
+        calibration.append(
+            {
+                "name": inst.name,
+                "status": status,
+                "has_row": bool(row),
+                "source": row.get("source") if row else None,
+            }
+        )
+    checks["calibration"] = calibration
+
+    live = []
+    if args.live:
+        for inst in instances:
+            live.append(
+                {
+                    "name": inst.name,
+                    "port": inst.port,
+                    "endpoint_ready": endpoint_ready(inst.port),
+                    "container_running": container_running(inst.name),
+                }
+            )
+    checks["live"] = {"checked": bool(args.live), "instances": live}
+
+    payload["valid"] = bool(result.valid)
+    payload["summary"] = "GREEN" if result.valid else "RED"
+    return payload, 0 if result.valid else 1
+
+
 def command_diagnose(args: argparse.Namespace) -> int:
+    if getattr(args, "json", False):
+        payload, rc = diagnose_payload(args)
+        print(json.dumps(payload, indent=2))
+        return rc
     path = estate_path(args.file)
     print(f"Estate triage: {path}")
     print("=" * (15 + len(str(path))))
@@ -790,7 +1022,85 @@ def command_diagnose(args: argparse.Namespace) -> int:
     return 0 if result.valid else 1
 
 
+def report_state_payload(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+    profiles = load_profiles()
+    payload: dict[str, Any] = {
+        "profile_schema_version": 1,
+        "profile_counts": {
+            "hardware": len(profiles.hardware),
+            "models": len(profiles.models),
+            "workloads": len(profiles.workloads),
+            "engines": len(profiles.engines),
+            "drafters": len(profiles.drafters),
+        },
+        "compose_registry_entries": len(COMPOSE_REGISTRY),
+        "canonical_scenarios": len(CANONICAL_SCENARIOS),
+        "calibration": {model: len(cal.rows) for model, cal in sorted(profiles.calibration.items())},
+        "active_estate": None,
+    }
+
+    path = estate_path(args.file)
+    if not path.exists():
+        payload["active_estate"] = {"present": False, "path": str(path)}
+        return payload, 0
+    try:
+        _, _, instances, hardware, _, _, _, result = validate_doc(path)
+    except EstateCliError as exc:
+        payload["active_estate"] = {"present": True, "valid": False, "path": str(path), "error": str(exc)}
+        return payload, 0
+    claimed = sorted({gpu for inst in instances for gpu in inst.gpu_indices})
+
+    # F7 (c3 T1.1 audit): estate.yml is a desired-state PLAN — reporting its
+    # instances without probing liveness made consumers (the c3 reconcile gate)
+    # treat a leftover plan file as live GPU claims on an empty rig.  Probe
+    # docker per instance: true/false when the probe answers, null when docker
+    # itself is unavailable (consumers must fail CLOSED on null/missing).
+    def _probe_running(name: str):
+        try:
+            return container_running(name)
+        except Exception:
+            return None
+
+    inst_rows = []
+    for inst in instances:
+        running = _probe_running(inst.name)
+        # D3 (#610 addendum 3): carry the per-instance placement verdict so the
+        # c3 pod view (C1) reads ONE source for its health badge. Only probe
+        # a RUNNING instance (the docker-exec check is meaningless otherwise).
+        placement = {"requested": "", "actual": "", "placement": "unknown"}
+        if running is True:
+            try:
+                placement = assert_placement_quiet(inst, resolve_gpu_uuids(inst.gpu_indices))
+            except Exception:
+                pass
+        inst_rows.append(
+            {
+                "name": inst.name,
+                "compose": inst.compose_name,
+                "gpus": list(inst.gpu_indices),
+                "port": inst.port,
+                "container": container_name(inst.name),
+                "running": running,
+                "placement": placement,
+            }
+        )
+    payload["active_estate"] = {
+        "present": True,
+        "valid": bool(result.valid),
+        "path": str(path),
+        "instance_count": len(instances),
+        "running_count": sum(1 for r in inst_rows if r["running"] is True),
+        "gpu_coverage": {"claimed_count": len(claimed), "total": len(hardware), "claimed": claimed},
+        "instances": inst_rows,
+    }
+    return payload, 0
+
+
 def command_report_state(args: argparse.Namespace) -> int:
+    if getattr(args, "json", False):
+        payload, rc = report_state_payload(args)
+        print(json.dumps(payload, indent=2))
+        return rc
     profiles = load_profiles()
     print("## Profile state")
     print("")
@@ -823,13 +1133,279 @@ def command_report_state(args: argparse.Namespace) -> int:
     print(f"  - Validation: {'PASS' if result.valid else 'FAIL'}")
     print(f"  - GPU coverage: {len(claimed)}/{len(hardware)} cards claimed ({claimed})")
     for inst in instances:
-        print(f"  - {inst.name}: {inst.compose_name}, GPUs {list(inst.gpu_indices)}, port {inst.port}")
+        # F7 — estate.yml is a PLAN: say per instance whether it is actually up
+        # (same probe the --json payload carries as `running`).
+        try:
+            live = "running" if container_running(inst.name) else "down (plan only)"
+        except Exception:
+            live = "liveness unknown (docker unavailable)"
+        print(
+            f"  - {inst.name}: {inst.compose_name}, GPUs {list(inst.gpu_indices)}, "
+            f"port {inst.port} — {live}"
+        )
     return 0
+
+
+# ===========================================================================
+# Pod verbs (#610 Phase A′) — create / list / status / rm.
+# A "pod" is an estate instance (a named model on a GPU set + port). These
+# add the CLI surface scripts/pod.sh (and, later, the c3 wizard/view) wrap;
+# up/down reuse `boot`/`down --only <name>`. ONE validation path: everything
+# routes through validate_estate + kv-calc, so a hand-written estate file, the
+# CLI, and the wizard pass identical gates (#610 addendum 3, D2).
+# ===========================================================================
+
+KVCALC = REPO_ROOT / "tools" / "kv-calc.py"
+
+
+def _selected_gpu_infos(indices: list[int]) -> list[GpuInfo]:
+    """Map requested host GPU indices to their detected GpuInfo, erroring on an
+    index the rig doesn't have."""
+    by_idx = {g.index: g for g in detect_gpus_from_host()}
+    out = []
+    for i in indices:
+        if i not in by_idx:
+            raise EstateCliError(f"GPU index {i} not present (detected: {sorted(by_idx)})")
+        out.append(by_idx[i])
+    return out
+
+
+def fit_slug_on_gpuset(slug: str, gpu_infos: list[GpuInfo]) -> dict:
+    """D1 (#610 addendum 3): fit-check a slug against the SELECTED GPU set.
+    kv-calc --card is single-card + registry TP, so:
+      - count != compose TP  -> HARD REJECT (raise);
+      - heterogeneous set     -> fit with the min-VRAM card (conservative floor)
+                                 + a note; true per-card het modeling is a
+                                 deferred kv-calc enhancement;
+      - homogeneous, count==TP -> the common path.
+    Returns {verdict, card, note, ...kv-calc fields}. kvcalc_key=SKIP slugs
+    (ik/llama) skip pricing with verdict 'skip'."""
+    entry = COMPOSE_REGISTRY.get(slug)
+    if not entry:
+        raise EstateCliError(f"unknown slug `{slug}`")
+    tp = int(entry.get("tp") or 1)
+    n = len(gpu_infos)
+    if n != tp:
+        raise EstateCliError(
+            f"slug `{slug}` is TP={tp} but you selected {n} GPU(s) — "
+            f"a pod's GPU count must equal the compose's tensor-parallel size"
+        )
+    if entry.get("kvcalc_key") in (None, "SKIP"):
+        return {"verdict": "skip", "card": None, "note": "non-vLLM slug — kv-calc prices vLLM only"}
+    cards = {g.hardware_id for g in gpu_infos}
+    note = ""
+    if len(cards) == 1:
+        card = next(iter(cards))
+    else:
+        # Heterogeneous: fit against the smallest card in the set (floor).
+        floor = min(gpu_infos, key=lambda g: g.mem_mib)
+        card = floor.hardware_id
+        note = f"heterogeneous set {sorted(cards)} — estimate uses the smallest card ({card})"
+    proc = subprocess.run(
+        ["python3", str(KVCALC), "--fit", slug, "--card", card, "--json"],
+        text=True, capture_output=True, check=False, cwd=REPO_ROOT,
+    )
+    try:
+        verdict = json.loads(proc.stdout) if proc.stdout.strip() else {}
+    except json.JSONDecodeError:
+        verdict = {}
+    verdict.setdefault("verdict", "unknown")
+    verdict["card"] = card
+    verdict["note"] = note
+    return verdict
+
+
+def _pod_free_gpus(instances: list[InstanceSpec]) -> tuple[list[int], list[int]]:
+    """(claimed, free) host GPU indices given the estate's instances."""
+    claimed = sorted({g for inst in instances for g in inst.gpu_indices})
+    try:
+        all_idx = [g.index for g in detect_gpus_from_host()]
+    except EstateCliError:
+        all_idx = claimed  # can't detect — report what we know
+    free = [i for i in all_idx if i not in claimed]
+    return claimed, free
+
+
+def command_create(args: argparse.Namespace) -> int:
+    path = estate_path(args.file)
+    try:
+        gpu_indices = [int(x) for x in str(args.gpus).split(",") if str(x).strip() != ""]
+        if not gpu_indices:
+            raise EstateCliError("--gpus must list at least one index, e.g. --gpus 1,2")
+        if COMPOSE_REGISTRY.get(args.slug) is None:
+            raise EstateCliError(f"unknown slug `{args.slug}` — see `switch.sh --list`")
+        # Existing estate (or a fresh doc).
+        if path.exists():
+            data, instances = parse_estate_yaml(path)
+        else:
+            data, instances = {"schema_version": 1, "estate": []}, []
+        if any(inst.name == args.name for inst in instances):
+            raise EstateCliError(f"pod `{args.name}` already exists in {path}")
+        gpu_infos = _selected_gpu_infos(gpu_indices)
+        # D1 fit-vs-set (raises on count!=TP).
+        fit = fit_slug_on_gpuset(args.slug, gpu_infos)
+        if fit["verdict"] in ("wont-fit", "incompatible-hw"):
+            reason = fit.get("error") or fit["verdict"]
+            raise EstateCliError(f"slug `{args.slug}` does not fit the selected GPU(s): {reason}")
+        # Port: explicit, else the registry default nudged off collisions.
+        used_ports = {inst.port for inst in instances}
+        entry = COMPOSE_REGISTRY[args.slug]
+        port = int(args.port) if args.port else default_port(int(entry["default_port"]), len(instances), used_ports)
+        new_inst = InstanceSpec(name=args.name, compose_name=args.slug, gpu_indices=tuple(gpu_indices), port=port)
+        # ONE validation path: the whole set (GPU collision, port collision, per-instance fits).
+        candidate = instances + [new_inst]
+        profiles = load_profiles()
+        hardware, _ = hardware_for_estate(data, profiles)
+        nvlink_active, nvlink_pairs = detect_nvlink_pairs()
+        result = validate_estate(candidate, hardware, profiles, nvlink_active, nvlink_pairs)
+        if not result.valid:
+            print(f"[pod] ✗ cannot create `{args.name}` — validation failed:", file=sys.stderr)
+            inst_res = result.per_instance.get(args.name)
+            for reason in (inst_res.reasons if inst_res else []):
+                print(f"    - {reason}", file=sys.stderr)
+            for failure in result.cross_instance_failures:
+                print(f"    - {failure}", file=sys.stderr)
+            return 1
+        # Append + persist (indices stay in the file; UUIDs resolved at boot).
+        data.setdefault("schema_version", 1)
+        data.setdefault("estate", [])
+        data["estate"].append({"name": args.name, "compose": args.slug, "gpus": gpu_indices, "port": port})
+        write_estate(path, data)
+        fit_line = fit["verdict"] + (f" (~{fit['vram_est_gb']:.1f} GiB/card)" if fit.get("vram_est_gb") else "")
+        if fit.get("note"):
+            fit_line += f" · {fit['note']}"
+        print(f"[pod] ✓ created `{args.name}`: {args.slug} on GPU {gpu_indices} port {port} — fit {fit_line}")
+        print(f"[pod]   boot it:  bash scripts/pod.sh up {args.name}")
+        return 0
+    except EstateCliError as exc:
+        print(f"[pod] ERROR: {exc}", file=sys.stderr)
+        return 1
+
+
+def command_list(args: argparse.Namespace) -> int:
+    path = estate_path(args.file)
+    if not path.exists():
+        if getattr(args, "json", False):
+            print(json.dumps({"file": str(path), "pods": [], "free_gpus": []}))
+        else:
+            print(f"[pod] no estate file at {path} — create one with `pod.sh create`")
+        return 0
+    try:
+        _data, instances = parse_estate_yaml(path)
+    except EstateCliError as exc:
+        print(f"[pod] ERROR: {exc}", file=sys.stderr)
+        return 1
+    claimed, free = _pod_free_gpus(instances)
+    pods = [
+        {"name": i.name, "slug": i.compose_name, "gpus": list(i.gpu_indices), "port": i.port}
+        for i in instances
+    ]
+    if getattr(args, "json", False):
+        print(json.dumps({"file": str(path), "pods": pods, "claimed_gpus": claimed, "free_gpus": free}, indent=2))
+        return 0
+    if not pods:
+        print(f"[pod] no pods defined in {path}")
+    else:
+        print(f"[pod] {len(pods)} pod(s) in {path}:")
+        for c in pods:
+            print(f"  {c['name']:20s} {c['slug']:32s} GPU {c['gpus']}  port {c['port']}")
+    print(f"[pod] free GPU(s): {free if free else '(none)'}")
+    return 0
+
+
+def command_status(args: argparse.Namespace) -> int:
+    path = estate_path(args.file)
+    if not path.exists():
+        if getattr(args, "json", False):
+            print(json.dumps({"file": str(path), "pods": []}))
+        else:
+            print(f"[pod] no estate file at {path}")
+        return 0
+    try:
+        _data, instances = parse_estate_yaml(path)
+    except EstateCliError as exc:
+        print(f"[pod] ERROR: {exc}", file=sys.stderr)
+        return 1
+    rows = []
+    for inst in instances:
+        try:
+            running = container_running(inst.name)
+        except Exception:
+            running = False
+        serving = endpoint_ready(inst.port) if running else False
+        placement = {"requested": "", "actual": "", "placement": "unknown"}
+        if running:
+            placement = assert_placement_quiet(inst, resolve_gpu_uuids(inst.gpu_indices))
+        rows.append({
+            "name": inst.name, "slug": inst.compose_name, "gpus": list(inst.gpu_indices),
+            "port": inst.port, "running": running, "serving": serving, "placement": placement,
+        })
+    if getattr(args, "json", False):
+        print(json.dumps({"file": str(path), "pods": rows}, indent=2))
+        return 0
+    if not rows:
+        print(f"[pod] no pods defined in {path}")
+        return 0
+    print(f"[pod] status ({path}):")
+    for r in rows:
+        state = "serving" if r["serving"] else ("running" if r["running"] else "down")
+        pl = r["placement"]["placement"]
+        pl_mark = {"ok": "✓", "mismatch": "⚠ MISMATCH", "unknown": ""}.get(pl, "")
+        print(f"  {r['name']:20s} {state:8s} GPU {r['gpus']}  port {r['port']}  {pl_mark}")
+    return 0
+
+
+def command_rm(args: argparse.Namespace) -> int:
+    path = estate_path(args.file)
+    try:
+        if not path.exists():
+            raise EstateCliError(f"no estate file at {path}")
+        data, instances = parse_estate_yaml(path)
+        target = next((i for i in instances if i.name == args.name), None)
+        if target is None:
+            raise EstateCliError(f"pod `{args.name}` not found in {path}")
+        try:
+            if container_running(target.name):
+                raise EstateCliError(f"pod `{args.name}` is running — `pod.sh down {args.name}` first")
+        except EstateCliError:
+            raise
+        except Exception:
+            pass  # docker unavailable — allow removal from the plan
+        data["estate"] = [e for e in data.get("estate", []) if str(e.get("name")) != args.name]
+        write_estate(path, data)
+        print(f"[pod] ✓ removed `{args.name}` from {path}")
+        return 0
+    except EstateCliError as exc:
+        print(f"[pod] ERROR: {exc}", file=sys.stderr)
+        return 1
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="club-3090 estate planner")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    create = sub.add_parser("create")
+    create.add_argument("name")
+    create.add_argument("--gpus", required=True, help="comma-separated host GPU indices, e.g. 1,2")
+    create.add_argument("--slug", required=True, help="registry compose slug, e.g. vllm/dual")
+    create.add_argument("--port", type=int, default=0)
+    create.add_argument("--file", default=str(DEFAULT_ESTATE_PATH))
+    create.set_defaults(func=command_create)
+
+    clist = sub.add_parser("list")
+    clist.add_argument("--file", default=str(DEFAULT_ESTATE_PATH))
+    clist.add_argument("--json", action="store_true")
+    clist.set_defaults(func=command_list)
+
+    cstatus = sub.add_parser("status")
+    cstatus.add_argument("--file", default=str(DEFAULT_ESTATE_PATH))
+    cstatus.add_argument("--json", action="store_true")
+    cstatus.set_defaults(func=command_status)
+
+    crm = sub.add_parser("rm")
+    crm.add_argument("name")
+    crm.add_argument("--file", default=str(DEFAULT_ESTATE_PATH))
+    crm.set_defaults(func=command_rm)
 
     validate = sub.add_parser("validate")
     validate.add_argument("--file", default=str(DEFAULT_ESTATE_PATH))
@@ -859,10 +1435,12 @@ def build_parser() -> argparse.ArgumentParser:
     diagnose = sub.add_parser("diagnose")
     diagnose.add_argument("file", nargs="?", default=str(DEFAULT_ESTATE_PATH))
     diagnose.add_argument("--live", action="store_true")
+    diagnose.add_argument("--json", action="store_true")
     diagnose.set_defaults(func=command_diagnose)
 
     report = sub.add_parser("report-state")
     report.add_argument("--file", default=str(DEFAULT_ESTATE_PATH))
+    report.add_argument("--json", action="store_true")
     report.set_defaults(func=command_report_state)
 
     return parser

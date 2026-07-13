@@ -1,0 +1,187 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     DiffusionGemma 26B-A4B — discrete-diffusion LM / dLLM (RedHatAI
+#              FP8-dynamic, compressed-tensors float-quantized)
+#   Topology:  Dual 3090 (TP=2, NVLink auto-detected via NVLINK_MODE — PCIe by default on this rig)
+#   Drafter:   none — diffusion LM (block-parallel denoising; AR spec-dec N/A)
+#   KV:        bf16 (pool ~408K tok @ util 0.82, 262K-len)
+#   Vision:    no (text diffusion)
+#   Max ctx:   262144 (NIAH retrieval validated to ~250K)
+#   Genesis:   N/A — Genesis is Qwen3-Next-specific
+#   Status:    🧪 Experimental — runs on STOCK vllm/vllm-openai:v0.24.0 (arch native #45163) +
+#              3 vendored Ampere/TP fix-mounts; under active validation, eager-only.
+#              Launch needs --force (non-functional status).
+#   Quality:   8-pack 100/150 (67%) — toolcall 13/15 · instructfollow 13-15/15 ·
+#              structoutput 14/15 · dataextract 10/15 · reasonmath 11/15 ·
+#              bugfind 11/15 · hermesagent-20 14/20 (agentic tool-use works) ·
+#              cli-40 14/40. Deterministic 5-pack 63/75 (84%). (--full, 2026-06-11,
+#              gemma4 tool+reasoning parsers; 57%→84% on the 5-pack WITH parsers.)
+#   Best for:  experimental dLLM serving / agentic tool-use on Ampere (research)
+# ---------------------------------------------------------------------------
+# DiffusionGemma is Google's 26B-A4B (3.8B active) MoE discrete-diffusion LM on the
+# Gemma4 backbone — vLLM's first dLLM (blog 2026-06-10). It denoises a whole block
+# ("canvas", 256 tok) in parallel via bidirectional attention, through vLLM's
+# model-runner-v2 (`VLLM_USE_V2_MODEL_RUNNER=1`). Throughput is content-dependent
+# (entropy-bound sampler): ~150–200 tok/s typical, up to ~1100 on low-entropy text.
+#
+# DELIVERY: stock vLLM v0.24.0 has the dLLM arch NATIVE (PR #45163 merged 2026-06-12,
+# shipped in v0.24.0) — bumped 2026-07-02 off the former :gemma branch digest now that the
+# arch landed in a tagged release. We then bind-mount 3 fix files that are NOT in #45163:
+#   • marlin.py + marlin_utils_fp8.py — sm_86 fp8 Marlin sub-tile-K pad. Without them
+#     stock v0.24.0 dies in warmup (Invalid thread config, K=352/1056, 99 KB shared mem).
+#   • diffusion_gemma.py — TP-vocab soft-embed + dtype fix (upstream recipe is TP=1 →
+#     native #45163 diffusion_gemma.py still craters TP=2 with a vocab matmul mismatch).
+# See ../../../patches/gemma-image-fixes/README.md (provenance + rebase). This replaces
+# the former 123-file sideload overlay on a stock nightly — same perf, 120 fewer files.
+#
+# gemma4 tool + reasoning parsers WORK (it's gemma4-based) — mirrored from the
+# gemma-4-26b-a4b compose. Tool requests http_error WITHOUT --enable-auto-tool-choice;
+# with the gemma4 parsers, tool-calling + reasoning-field routing both function.
+#
+# Output length: generation_config caps max_new_tokens at 256, which vLLM applies as the
+# default max_tokens → truncated answers + next-turn echo for clients (OWUI) that omit
+# max_tokens. We lift it to 16384 via --override-generation-config (NOT --generation-config
+# vllm, which would strip the diffusion denoising params). 16384 is a CAP only — the
+# instruct model self-terminates ~1.2–1.8K words; it will not one-shot 10K (use multi-turn).
+#
+# Streaming note: SSE delivers a whole 256-tok canvas as ~1 chunk (block-parallel decode),
+# not token-by-token — verify-full's per-token streaming check flags this; it's expected.
+#
+# Engine: NO build step, NO sideload script. Pinned official image + 3 mounts. Just
+# `docker compose up` (or switch.sh --force / launch.sh).
+# ===========================================================================
+# Hardware metadata (parsed by scripts/preflight.sh):
+# Requires-min-vram-gb: 24
+# Engine-profile: vllm-diffusion-gemma
+# Requires-min-gpu-count: 2
+# Tensor-parallel: 2
+# Requires-sm: 8.0+
+services:
+  vllm-diffusiongemma-26b-a4b-fp8-tp2:
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.24.0}
+    container_name: "${ESTATE_CONTAINER:-vllm-diffusiongemma-26b-a4b-fp8-tp2}"
+    restart: ${CLUB3090_RESTART:-unless-stopped}
+    ports:
+      - "${ESTATE_PORT:-${PORT:-8042}}:8000"
+    volumes:
+      - ${MODEL_DIR:-../../../../../../models-cache}:/root/.cache/huggingface
+      # 3 Ampere/TP fix-mounts over the official :gemma image's vllm pkg (NOT upstream —
+      # see ../../../patches/gemma-image-fixes/README.md). marlin.py + marlin_utils_fp8.py
+      # = sm_86 fp8 Marlin K-pad; diffusion_gemma.py = TP-vocab soft-embed + dtype fix.
+      - ../../../patches/gemma-image-fixes/marlin.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/kernels/linear/scaled_mm/marlin.py:ro
+      - ../../../patches/gemma-image-fixes/marlin_utils_fp8.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/utils/marlin_utils_fp8.py:ro
+      - ../../../patches/gemma-image-fixes/diffusion_gemma.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/diffusion_gemma.py:ro
+      # NVLink auto-detection — runs inside container at boot (same path as dual-max).
+      - ../../../../../../scripts/detect_nvlink.sh:/etc/club3090/detect_nvlink.sh:ro
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=${ESTATE_GPUS:-${NVIDIA_VISIBLE_DEVICES:-all}}
+      # CUDA-level GPU mask — the runtime-agnostic half of GPU selection
+      # (#610): launch.sh --gpus exports GPU UUIDs here. CDI runtimes (NixOS,
+      # nvidia-ctk cdi) IGNORE NVIDIA_VISIBLE_DEVICES, so this mask is what
+      # actually pins cards there; on the classic runtime the UUID form is
+      # renumbering-proof. Unset → absent (no masking).
+      - CUDA_VISIBLE_DEVICES
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-${OFFLINE:-0}}
+      - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-${OFFLINE:-0}}
+      - VLLM_USE_V2_MODEL_RUNNER=1
+      - TORCHDYNAMO_DISABLE=1
+      - TORCH_COMPILE_DISABLE=1
+      - VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - NVLINK_MODE=${NVLINK_MODE:-auto}
+      - NCCL_CUMEM_ENABLE=0
+      - NCCL_P2P_DISABLE=1
+      # custom all-reduce is now toggled by the entrypoint (OFF on PCIe via
+      # --disable-custom-all-reduce, ON when detect_nvlink finds NVLink/P2P) —
+      # replaces the former static VLLM_DISABLE_CUSTOM_ALL_REDUCE=1.
+      - VLLM_NO_USAGE_STATS=1
+      - OMP_NUM_THREADS=1
+      # DeepGEMM (vLLM's fp8-GEMM path) is built for Hopper (sm_90) + datacenter
+      # Blackwell (sm_100/103). Consumer Blackwell (5090 / PRO 6000 / GB10,
+      # sm_120/121) has no recipe and hard-fails "recipe not found" at boot
+      # (disc #571). Pass-through: switch.sh/launch.sh auto-inject
+      # VLLM_USE_DEEP_GEMM=0 on those cards; if you run raw `docker compose` on a
+      # consumer Blackwell card, set it yourself (VLLM_USE_DEEP_GEMM=0). Unset =
+      # vLLM's arch default (DeepGEMM stays on where it works).
+      - VLLM_USE_DEEP_GEMM
+      - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,max_split_size_mb:512}
+      - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+      - VLLM_ATTENTION_BACKEND=TRITON_ATTN
+      - TRITON_CACHE_DIR=/root/.triton/cache
+    shm_size: "16gb"
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # Custom entrypoint overrides the :gemma image's ["vllm","serve"] so detect_nvlink
+    # can toggle custom all-reduce; command (the model + flags) is passed through as "$@".
+    entrypoint:
+      - bash
+      - -c
+      - |
+        # NVLink auto-detect: detect_nvlink.sh sets the NCCL env + _NVLINK_ENABLED;
+        # vLLM custom all-reduce is ON for NVLink/P2P, OFF (--disable-custom-all-reduce)
+        # for PCIe. $$ escapes $ so Compose v5.1+ passes the bash through verbatim — an
+        # un-escaped _NVLINK_ENABLED ref would be interpolated at parse time → forced to 0.
+        source /etc/club3090/detect_nvlink.sh
+        if [ "$${_NVLINK_ENABLED:-0}" = "1" ]; then
+          exec vllm serve "$$@"
+        else
+          exec vllm serve --disable-custom-all-reduce "$$@"
+        fi
+      - --
+    command:
+      # v0.24.0: model MUST be the --model flag, not a bare positional — v0.24.0's
+      # `vllm serve` arg-parser requires the positional model to be first, but the
+      # entrypoint prepends `--disable-custom-all-reduce`, so use the flag form.
+      - --model
+      - /root/.cache/huggingface/diffusiongemma-26b-a4b-it-fp8-dynamic
+      - --served-model-name
+      - diffusiongemma-26b-a4b
+      - --trust-remote-code
+      - --tensor-parallel-size
+      - "${TP:-2}"
+      - --pipeline-parallel-size
+      - "${PP:-1}"
+      - --max-model-len
+      - "${MAX_MODEL_LEN:-262144}"
+      - --gpu-memory-utilization
+      - "${GPU_MEMORY_UTILIZATION:-0.82}"      # 0.90 OOMs the warmup (KV pool over-provisions); 0.82 leaves activation headroom
+      - --max-num-seqs
+      - "${MAX_NUM_SEQS:-1}"
+      - --max-num-batched-tokens
+      - "${MAX_NUM_BATCHED_TOKENS:-2048}"
+      - --enforce-eager
+      - --kv-cache-dtype
+      - auto
+      - --attention-backend
+      - TRITON_ATTN
+      - --hf-overrides
+      - '{"diffusion_sampler":"entropy_bound","diffusion_entropy_bound":0.1}'
+      # Lift the model's 256-tok default-answer cap (truncation + next-turn echo for
+      # clients that omit max_tokens). Override ONLY max_new_tokens; keep
+      # --generation-config auto so the diffusion denoising params survive.
+      # 16384 ≈ 12K words; it's a CAP, the model self-terminates well before it.
+      - --generation-config
+      - auto
+      - --override-generation-config
+      - '{"max_new_tokens":16384}'
+      # gemma4 tool + reasoning parsers (DiffusionGemma is gemma4-based) — mirrors gemma-4-26b-a4b:
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - gemma4
+      - --reasoning-parser
+      - gemma4
+      - --chat-template
+      - /vllm-workspace/examples/tool_chat_template_gemma4.jinja
+      # Thinking: left at the model/template natural default (NOT force-disabled) — the
+      # earlier "stuck in thinking / empty answer" was the 256-tok cap above, not thinking.
+      # The reasoning parser routes any thinking into the `reasoning` field; clients can
+      # still pass enable_thinking via chat_template_kwargs per request.
+      # NOTE: torch.compile (drop the TORCHDYNAMO/COMPILE-disable envs + --enforce-eager)
+      # WORKS (Codex+Claude validated 2026-06-11) but gave NO throughput gain (~164 vs
+      # ~172 tok/s eager — diffusion is denoising-step-bound) + boot cost → eager stays default.

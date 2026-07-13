@@ -9,6 +9,7 @@ What this stack assumes about your hardware. True regardless of which model or e
 - **NVIDIA RTX 3090 (24 GB, Ampere SM 8.6)** — 1 or 2 cards.
 - **PCIe Gen 4 slot** — Gen 3 works but allreduce on dual-card is slower (mild impact on multi-tenant; minimal impact on single-stream).
 - **NVIDIA driver 580.x or newer** — for CUDA 13 runtime in vLLM nightly. `nvidia-smi` to check. Older drivers won't load CUDA 13 kernels.
+  - ⚠️ **The ik-llama `cu13` pin needs CUDA ≥ 13.2 specifically** (not just 580.x). Its digest is a CUDA 13.2 runtime, so a driver whose *supported* CUDA < 13.2 — e.g. 580.159 = CUDA 13.0 — forward-compat-fails on GeForce (error 804) → CPU fallback → crash loop ([#633](../../../noonghunna/club-3090/issues/633)). The launcher **auto-selects the cu12 sibling build** (same build, backward-compatible) on such drivers; override with `IK_LLAMA_IMAGE=…:cu12-server-4574` in `.env`. Check your ceiling top-right in `nvidia-smi`.
 - **Linux** (Ubuntu 22.04+ tested). vLLM is Linux + CUDA only. llama.cpp works on macOS / Windows but our recipes assume Linux paths.
 - **Docker + NVIDIA Container Toolkit** for vLLM. llama.cpp doesn't need Docker.
 
@@ -61,9 +62,66 @@ MAX_MODEL_LEN=90000 bash scripts/switch.sh vllm/long-text
 
 Same `MAX_MODEL_LEN` / `GPU_MEMORY_UTILIZATION` env overrides apply for any setup running vLLM alongside other GPU consumers on the same card. See [SINGLE_CARD.md "Running alongside a desktop"](SINGLE_CARD.md#running-alongside-a-desktop--sub-24-gb-usable-vram) for safe ranges.
 
-**`dual-turbo.yml` on 20 GB Ampere — swap TQ3 KV → fp8_e5m2.** The shipped `dual-turbo.yml` uses `--kv-cache-dtype turboquant_3bit_nc` (the technique from [TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate](https://arxiv.org/abs/2504.19874), ICLR 2026 — random rotation + scalar quantizers + 1-bit QJL transform on the residual; the paper claims absolute quality neutrality at 3.5 bits/channel). It's the right pick on 24 GB / 3090: smaller KV pool → more concurrency, and the 24 GB budget absorbs the dequant activation cost during the DeltaNet GDN forward. On 20 GB cards the trade flips: TQ3's activation peak (~1 GB/card more pressure than fp8 during the materialized block — see [PerfMamba arxiv 2511.22849](https://arxiv.org/html/2511.22849) for the underlying Mamba-2 block-state-materialization mechanism the GDN forward inherits) exceeds the per-card budget after TP=2 split, and Cliff 2 fires at 90K. **Override to `--kv-cache-dtype fp8_e5m2`** and you get the full 262K context working with verify-stress 7/7 PASS including 91K needles. Validated 2026-05-04 by [@efschu](https://github.com/noonghunna/club-3090/issues/47) on 2× 3080 modded 20 GB at 0.82 mem-util: bench 82.4 narr / 107.9 code TPS, full 257K-token auto-discovery needle PASS at 90% depth. Trade-off: fp8 KV is roomier per cached token but each token's KV state is larger, so concurrency at full ctx drops vs TQ3. Single-stream long-ctx works cleanly.
+**`dual-turbo.yml` on 20 GB Ampere — swap TQ3 KV → fp8_e5m2.** The shipped `dual-turbo.yml` uses `--kv-cache-dtype turboquant_3bit_nc` (the technique from [TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate](https://arxiv.org/abs/2504.19874), ICLR 2026 — random rotation + scalar quantizers + 1-bit QJL transform on the residual; the paper claims near-optimal *average* distortion at ~3.5 bits/channel). **That's a perplexity-level claim, not tail-level** — on our exact Qwen3.6-27B / 3090, [Anbeeld's KV-quant benchmarks](https://anbeeld.com/articles/kv-cache-quantization-benchmarks-for-long-context) put `turbo3_tcq` at **~82% 99.9th-percentile KLD tail precision** (visible loss on the worst 0.1% of positions — JSON keys, closing braces, tool calls). So **TQ3 is a context/concurrency trade, not quality-neutral**: good for prose + long-ctx, but prefer `fp8` / `q5_0` KV for code / JSON / agent workloads (see [FAQ — which KV-cache quant](FAQ.md) + [CLIFFS.md](CLIFFS.md)). It's still the right pick on 24 GB / 3090 for **context + concurrency**: smaller KV pool → more concurrency, and the 24 GB budget absorbs the dequant activation cost during the DeltaNet GDN forward. On 20 GB cards the trade flips: TQ3's activation peak (~1 GB/card more pressure than fp8 during the materialized block — see [PerfMamba arxiv 2511.22849](https://arxiv.org/html/2511.22849) for the underlying Mamba-2 block-state-materialization mechanism the GDN forward inherits) exceeds the per-card budget after TP=2 split, and Cliff 2 fires at 90K. **Override to `--kv-cache-dtype fp8_e5m2`** and you get the full 262K context working with verify-stress 7/7 PASS including 91K needles. Validated 2026-05-04 by [@efschu](https://github.com/noonghunna/club-3090/issues/47) on 2× 3080 modded 20 GB at 0.82 mem-util: bench 82.4 narr / 107.9 code TPS, full 257K-token auto-discovery needle PASS at 90% depth. Trade-off: fp8 KV is roomier per cached token but each token's KV state is larger, so concurrency at full ctx drops vs TQ3. Single-stream long-ctx works cleanly.
 
 ---
+
+## Arch-aware launcher defaults (#246 Phase 1)
+
+The shipped composes carry **Ampere-safe defaults** (fp8_e5m2 KV etc.). Since [#246](https://github.com/noonghunna/club-3090/issues/246) Phase 1, `launch.sh` / `switch.sh` detect your GPU's compute capability and export the better flag for newer silicon so you don't hand-tune:
+
+| Detected class | What the launchers do |
+|---|---|
+| **ampere** (sm_8.6/8.7) | Nothing — compose defaults apply, byte-for-byte pre-#246 behavior |
+| **ada** (sm_8.9) / **hopper** (sm_9.x) / **blackwell** (sm_10+) | Export `KV_CACHE_DTYPE=fp8_e4m3` for the **pilot slugs** — a **better-precision** FP8 KV format. NB: it's storage-only (≡e5m2 in speed) on consumer cards; native FP8 *attention* is Hopper/datacenter-only. See [DTYPE_MATRIX](DTYPE_MATRIX.md#having-the-tensor-cores--using-them-the-two-axes-that-decide-real-behavior) |
+| unknown / heterogeneous mix / no nvidia-smi | Nothing — compose defaults apply |
+
+Mechanics and boundaries:
+
+- **Pilot slugs only**: `vllm/dual`, `vllm/minimal` — the two Qwen fp8-KV reference configs. Expansion to the rest of the catalog is gated on the cross-rig A/B in #246 (≥15% on either canonical prompt on a volunteer 4090/5090; within CV → the injection framework gets closed out instead).
+- **The injected value comes from the hardware profiles** (`scripts/lib/profiles/hardware/<card>.yml` → `kv_format_default.balanced`) — one source of truth shared with the pull gates and c3. 3090-class profiles declare `fp8_e5m2` there, which equals the compose default: the Ampere no-op is data, not a code branch.
+- **Your env wins**: an explicit `KV_CACHE_DTYPE=…` before `launch.sh`/`switch.sh` suppresses the injection entirely.
+- **Quant-specific KV slugs are never touched** — int8-PTH (compressed-tensors weights *reject* fp8 KV), TurboQuant, and bf16 configs keep their registry KV format.
+- **Direct `docker compose -f … up` bypasses all of this** and keeps the Ampere-safe compose defaults on any card.
+- The preflight banner names the detected class: `[preflight] arch: ada (sm_8.9) — arch-aware KV defaults active for pilot slugs (#246)`.
+- `VLLM_ATTENTION_BACKEND` is plumbed through the same channel but **ships no value** — vLLM's backend auto-detect is the default until someone measures a better per-arch choice.
+- **`nvfp4` KV is DATACENTER-Blackwell-only** (sm_100/sm_103). It needs vLLM's trtllm-gen FP4 FMHA, which has no consumer-Blackwell (sm_120/121) build — so it **crashes on RTX 5090s** even though they run NVFP4 *weights* fine ([vLLM #43562](https://github.com/vllm-project/vllm/issues/43562) / [TRT-LLM #10241](https://github.com/NVIDIA/TensorRT-LLM/issues/10241); confirmed on two 5090s, disc #571). On consumer Blackwell use **fp8_e4m3** KV — the launchers inject it automatically for the pilot slugs.
+
+---
+
+## Pinning specific GPUs on multi-GPU rigs (and CDI / NixOS runtimes)
+
+`bash scripts/launch.sh --gpus 1,2` pins the model to host GPUs 1+2 (leaving GPU 0 free for e.g. a desktop session or an image-gen stack). As of [#610] the launcher resolves your indices to **GPU UUIDs** (`nvidia-smi -L`) and exports them as *both* `NVIDIA_VISIBLE_DEVICES` and `CUDA_VISIBLE_DEVICES` — one mechanism that works on **both** container GPU runtimes:
+
+| Runtime | How devices reach the container | What pins the cards |
+|---|---|---|
+| classic `nvidia` runtime (default Docker + nvidia-container-toolkit) | `NVIDIA_VISIBLE_DEVICES` (the runtime hook) | the UUID exposure itself; the CUDA mask is a no-op that agrees with it |
+| **CDI** (NixOS `hardware.nvidia-container-toolkit`, `nvidia-ctk cdi`, Podman) | the compose `deploy` block's CDI `device_ids` (typically `nvidia.com/gpu=all`) — **`NVIDIA_VISIBLE_DEVICES` is IGNORED** | the in-container `CUDA_VISIBLE_DEVICES` UUID mask |
+
+Why UUIDs and not indices: the classic runtime **renumbers** the exposed set inside the container (host GPUs 1,2 become 0,1), so an index-based inner mask would point at the wrong or a nonexistent card. UUIDs are stable under any exposure order.
+
+**CDI rigs (NixOS etc.)** — swap the compose's `deploy` device block for the CDI form and let the CUDA mask do the selection:
+
+```yaml
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: cdi
+              device_ids:
+                - nvidia.com/gpu=all
+```
+
+then `bash scripts/launch.sh --gpus 1,2` as normal (the composes pass `CUDA_VISIBLE_DEVICES` through). Manual/no-launcher equivalent: `CUDA_VISIBLE_DEVICES=GPU-xxxx,GPU-yyyy docker compose -f … up -d` with the UUIDs from `nvidia-smi -L` (indices also work under CDI-with-all-exposed, but UUIDs are unambiguous).
+
+**Gotchas:**
+- *In-container renumbering is expected, not a bug*: with 2 of 3 cards pinned, `nvidia-smi` **inside** the container shows them as GPU 0/1 (classic runtime) or shows *all* cards while CUDA uses only the masked pair (CDI). Verify placement with **host** `nvidia-smi` — the utilization lands on the cards you picked.
+- The single-card GGUF composes (beellama / llama.cpp / ik-llama) select via `device_ids: ["${ESTATE_GPUS:-${CUDA_VISIBLE_DEVICES:-0}}"]` interpolated on the **host** side — they honor the same launcher export on the classic runtime; on CDI, apply the device-block swap above.
+- Estate (multi-instance) GPU pinning is UUID-pinned the same way (#610 Phase A): each instance's `gpus: [..]` stays index-based in the estate file, and the boot path resolves them to UUIDs — so estates land on the cards they claimed on CDI rigs too. After boot, a **placement assertion** (`docker exec … nvidia-smi --query-compute-apps=gpu_uuid`) confirms the model actually ran on the requested GPUs and prints a loud ⚠ on mismatch — no more silent wrong-card serving.
+
+**Multiple models on one host (pods).** Running several models at once, each pinned to its own GPU set + port, is a **pod** workload — managed with `scripts/pod.sh` (CLI) or the c3 cockpit's Operate tab, both over one estate file with the UUID pinning + placement verification described above. Full guide: **[PODS.md](PODS.md)**.
+
+[#610]: https://github.com/noonghunna/club-3090/issues/610
 
 ## NVLink
 
@@ -74,6 +132,7 @@ Same `MAX_MODEL_LEN` / `GPU_MEMORY_UTILIZATION` env overrides apply for any setu
 - **Override**: set `NVLINK_MODE=force_on|force_off` in your `.env` to bypass auto-detection.
 - Without NVLink (PCIe), `--disable-custom-all-reduce` is passed to vLLM and `NCCL_P2P_DISABLE=1` is set. With NVLink, custom all-reduce is enabled and NCCL uses the NVLink path.
 - **If you have NVLink installed and working**, single-stream TPS on dual-card will be ~1.6-1.8× single-card (vs ~1.05× without). Measured NVLink lift is ~10-15% over PCIe on the same rig. See [BENCHMARKS.md](../BENCHMARKS.md) for cross-rig data.
+- **No NVLink?** You can still enable GPU↔GPU P2P over the PCIe bus on a patched driver for a workload-dependent gain — and learn why `nvidia-smi topo -m` reports `PHB` instead of `PIX` — in [PCIE_P2P.md](PCIE_P2P.md).
 
 ---
 
@@ -363,7 +422,7 @@ For visualization of how VRAM splits across single + dual configs, see [vram-bud
 
 - **Per model**: ~20 GB for weights + Docker layers + scratch.
 - **Per engine**: vLLM Docker image is ~9 GB. llama.cpp binary is ~50 MB.
-- **For dual-card vLLM**: add ~2 GB for the patched vLLM source clone (`/opt/ai/engines/vllm/primary/`).
+- **For dual-card vLLM**: nothing extra — the marlin-pad patch is two small files vendored in-repo, mounted into the stock image (no vLLM source clone).
 
 If you'll run multiple models, plan ~20 GB each.
 
@@ -499,7 +558,7 @@ Setting `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False` resolves the crash. 
 
 Known occurrences:
 
-- JusefPol — NVLink-wired dual-3090 setups (PR #31). The `dual-nvlink*.yml` composes already hardcode `expandable_segments` off for that case.
+- JusefPol — NVLink-wired dual-3090 setups (PR #31). NVLink rigs can hit this; set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False` in `.env` (the dual composes default it on; the old `dual-nvlink*.yml` variants are retired — NVLink is auto-detected at boot via `NVLINK_MODE`).
 - club-3090 issue (this PR, 2026-05-06) — single-card RTX 3090 Ti on WSL2, driver 596.36, vLLM nightly `01d4d1ad` (the v7.72.2-uplift pin).
 
 #### Override

@@ -1,0 +1,217 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Qwen3.6-27B FP8 (official e4m3, embedded mtp head)
+#   Topology:  Dual 3090 (TP=2, NVLink auto-detected via NVLINK_MODE)
+#   Drafter:   MTP n=3 (built-in) — survives LMCache, acceptance ~83%
+#   KV:        int8_per_token_head (1 byte/token) + LMCache tiered prefix cache
+#                (GPU → L1 CPU RAM → optional L2 disk)
+#   Vision:    yes
+#   Max ctx:   262K (util 0.92 — KV pool ~279K tok, 1.07× — live-validated 2026-06-17)
+#   Genesis:   none
+#   Status:    🐣 Incubating
+#   Caveats:   OPT-IN KV-offload variant of vllm/qwen-27b-dual-max (#133). Three reasons it's
+#                incubating, not production: (1) runs LMCache's third-party image
+#                (lmcache/vllm-openai, DIGEST-pinned — the tag is mutable) bundling a NEWER vLLM
+#                (0.23.1-dev) than the stack's v0.22.0 pin; promotion to ✅ wants LMCache on our
+#                own image. (2) L2 disk tier (--l2-adapter) is wired but OFF by default
+#                (rehydrate ~5.3 s, compute-bound not disk-bound — cross-rig #423). (3) 38 GB image pulled
+#                on-demand. RAM-gated: preflight (preflight_lmcache_ram) hard-fails the launch
+#                unless AVAILABLE RAM (/proc/meminfo MemAvailable) >= L1 + 28 GB — the +28 covers
+#                the vLLM process + OS. The gate is COMPUTED from the live L1 (tracks the
+#                LMCACHE_L1_GB override), not the static 58 below: default --l1-size-gb 30 → ~58 GB;
+#                LMCACHE_L1_GB=10 → ~38 GB. Hard-fail is `--force`-proof (host-choke prevention is
+#                not optional — the l1=100→reboot lesson). Hidden from `switch.sh --list`
+#                (see --list --all); `--force` to launch.
+#   Quality:   inherits dual-max fidelity (FP8 + int8-PTH + MTP); 8-pack not re-run (KV-cache
+#                layer, not a quant change). Decode 74 narr / 94 code TPS — ZERO penalty vs
+#                non-LMCache (controlled A/B 2026-06-17).
+#   Best for:  many concurrent long (50K–262K) sessions kept warm across turns/swaps — LMCache
+#                reuses cached prefix KV instead of re-prefilling (cold→warm TTFT ~7–8×) ⭐
+# ---------------------------------------------------------------------------
+# Dual RTX 3090 — Qwen3.6-27B "max accuracy + LMCache KV-offload" (vllm/qwen-27b-dual-lmcache).
+# Byte-identical serving fidelity to vllm/qwen-27b-dual-max (FP8 weights + int8-PTH KV + MTP n=3
+# @262K) with an LMCache tiered persistent prefix-KV cache bolted on. LMCache (MP/HMA connector,
+# new in 0.4.7) caches each session's prefix KV in CPU RAM (L1) and optionally on disk (L2), so
+# long multi-turn / multi-session workloads reuse context instead of re-prefilling it.
+#
+# Validated 2026-06-17 (club-3090 #133): boots + serves @262K, MTP active (~83% accept), and a
+# controlled A/B (toggle ONLY the connector) shows decode 74/94 TPS == without LMCache — the KV
+# offload is async/overlapped, ZERO decode penalty. (An earlier "halves decode" claim was an
+# uncontrolled-measurement error, retracted — see club-3090 #133.)
+#
+# LMCache boot recipe (the constraints that make the hybrid + connector load — each was a boot
+# assertion we hit and fixed):
+#   - LMCacheMPConnector (NOT the simple LMCacheConnectorV1, which crashes hybrids)
+#   - --mamba-cache-mode align  (mandatory for GDN; sets attention block = 1584 for int8-PTH KV)
+#   - --max-num-batched-tokens >= block (1584)   AND   lmcache --chunk-size a multiple of block
+#   - NO PYTORCH_CUDA_ALLOC_CONF=expandable_segments (INCOMPATIBLE with the MP connector)
+#   - shm_size >= --l1-size-gb (else SHM silently falls back to slow pickle)
+#
+# Capacity (LMCache cache ≈ 131 KB/token MEASURED — ~7x the GPU's 18.9 int8-PTH rate, which only
+# governs max servable context, NOT cache size):
+#   --l1-size-gb 30 (default) → ~4 realistic 50K sessions (or <1 full 262K) in CPU RAM.
+#   L2 disk same ~131 KB/token (~33 GB per 262K session). See INTERNALS.md for the full sizing table.
+#   Cap ~50 GB on a 94 GB rig (vLLM needs ~25 GB). Raising LMCACHE_L1_GB above ~34 also needs a
+#   bigger shm_size below. Add an L2 disk tier (LMCACHE_L2_ADAPTER) for unbounded + restart-survival.
+#
+# Run (direct docker — launchers inject VLLM_IMAGE from the engine profile):
+#   docker compose -f dual/fp8/lmcache.yml up -d
+#   # opt into disk L2:  LMCACHE_L2_ADAPTER='{"type":"fs","base_path":"/mnt/ssd/lmcache-kv"}' docker compose ...
+#   #   (use the `fs` adapter, not `nixl_store` — this image's NIXL backend is broken.
+#   #    L2 disk ~125 KB/token measured (~33 GB per 262K session); rehydrate ~4.8 s vs
+#   #    ~43 s cold re-prefill for a 37K session, and it survives container restarts.
+#   #    Warm-L2 is COMPUTE-bound not disk-bound (~4.8 s recompute vs <0.5 s disk on NVMe,
+#   #    cross-rig #423) — a faster SSD won't speed warm-load on this GDN hybrid.)
+#   # ⚠️ The first long prefill must run to COMPLETION — LMCache banks a session's blocks only
+#   #    on request completion; a client timeout mid-prefill leaves orphaned-but-unindexed L2
+#   #    (only the completed prefix cached) and re-prefills from scratch (#423, 2026-06-24).
+# ===========================================================================
+# Hardware metadata (parsed by scripts/preflight.sh):
+# Requires-min-vram-gb: 24
+# Engine-profile: vllm-lmcache
+# Requires-min-gpu-count: 2
+# Tensor-parallel: 2
+# LMCache-l1-gb: 30
+# Requires-min-ram-gb: 58
+services:
+  vllm-qwen36-27b-lmcache:
+    # Image resolved from the vllm-lmcache engine profile (install.spec, DIGEST-pinned —
+    # the lmcache tag is mutable). Launchers inject VLLM_IMAGE; this default mirrors it.
+    image: ${VLLM_IMAGE:-lmcache/vllm-openai@sha256:663f9b2f7528e34105c9b0428880b811616f9bc85133b6e2a577b2e7282be8de}
+    container_name: "${ESTATE_CONTAINER:-vllm-qwen36-27b-lmcache}"
+    restart: ${CLUB3090_RESTART:-unless-stopped}
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8017}}:8000"
+    # Host-safety caps (defense-in-depth alongside preflight): the container cannot exceed
+    # mem_limit and cannot swap → it gets OOM-killed instead of choking the host (the l1=100
+    # incident). Raise these AND shm_size + LMCACHE_L1_GB together for a bigger cache.
+    mem_limit: ${CLUB3090_MEM_LIMIT:-70g}
+    memswap_limit: ${CLUB3090_MEM_LIMIT:-70g}
+    shm_size: "32gb"   # MUST be >= LMCACHE_L1_GB (default 30). Raise if you raise the cache.
+    ipc: host
+    volumes:
+      - ${MODEL_DIR:-../../../../../../models-cache}:/root/.cache/huggingface
+      # froggeric chat template is shared from the vllm engine dir (model-scoped) —
+      # one extra `../` vs dual-max because this compose lives under vllm-lmcache/.
+      - ../../../../vllm/patches/froggeric-chat-template/chat_template.jinja:/etc/qwen-froggeric-chat-template.jinja:ro
+      # L2 disk tier host dir — defaults to the gitignored repo-root lmcache-kv/ so LMCACHE_L2=1
+      # works with zero setup. Override the host path with LMCACHE_KV_DIR, or bypass entirely with
+      # LMCACHE_L2_ADAPTER (point at a faster/larger SSD). Mount is harmless when L2 is off.
+      - ${LMCACHE_KV_DIR:-../../../../../../lmcache-kv}:/lmcache-kv
+      # NVLink auto-detection — runs inside container at boot (same path as dual-max).
+      - ../../../../../../scripts/detect_nvlink.sh:/etc/club3090/detect_nvlink.sh:ro
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=${ESTATE_GPUS:-${NVIDIA_VISIBLE_DEVICES:-all}}
+      # CUDA-level GPU mask — the runtime-agnostic half of GPU selection
+      # (#610): launch.sh --gpus exports GPU UUIDs here. CDI runtimes (NixOS,
+      # nvidia-ctk cdi) IGNORE NVIDIA_VISIBLE_DEVICES, so this mask is what
+      # actually pins cards there; on the classic runtime the UUID form is
+      # renumbering-proof. Unset → absent (no masking).
+      - CUDA_VISIBLE_DEVICES
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-${OFFLINE:-0}}
+      - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-${OFFLINE:-0}}
+      - VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - NVLINK_MODE=${NVLINK_MODE:-auto}
+      - NCCL_CUMEM_ENABLE=0
+      - NCCL_P2P_DISABLE=1
+      - VLLM_NO_USAGE_STATS=1
+      - VLLM_USE_FLASHINFER_SAMPLER=1
+      # DeepGEMM (vLLM's fp8-GEMM path) is built for Hopper (sm_90) + datacenter
+      # Blackwell (sm_100/103). Consumer Blackwell (5090 / PRO 6000 / GB10,
+      # sm_120/121) has no recipe and hard-fails "recipe not found" at boot
+      # (disc #571). Pass-through: switch.sh/launch.sh auto-inject
+      # VLLM_USE_DEEP_GEMM=0 on those cards; if you run raw `docker compose` on a
+      # consumer Blackwell card, set it yourself (VLLM_USE_DEEP_GEMM=0). Unset =
+      # vLLM's arch default (DeepGEMM stays on where it works).
+      - VLLM_USE_DEEP_GEMM
+      - LMCACHE_DISABLE_BANNER=1
+      # Forward host-tunable LMCache knobs into the in-container entrypoint.
+      # Keep empty defaults here so bash's own $${VAR:-fallback} logic below
+      # remains the single source of default values when the host env is unset.
+      - LMCACHE_L1_GB=${LMCACHE_L1_GB:-}
+      - LMCACHE_L2=${LMCACHE_L2:-}
+      - LMCACHE_L2_ADAPTER=${LMCACHE_L2_ADAPTER:-}
+      - LMCACHE_CHUNK_SIZE=${LMCACHE_CHUNK_SIZE:-}
+      # NOTE: PYTORCH_CUDA_ALLOC_CONF=expandable_segments is intentionally OMITTED —
+      # it is incompatible with the LMCacheMPConnector (raises at engine config validation).
+    entrypoint:
+      - bash
+      - -c
+      - |
+        # NVLink auto-detection (sets NCCL env vars, _NVLINK_ENABLED).
+        source /etc/club3090/detect_nvlink.sh
+        if [ "$${_NVLINK_ENABLED:-0}" = "0" ]; then
+          # detect_nvlink sets expandable_segments on PCIe — incompatible with LMCacheMPConnector.
+          unset PYTORCH_CUDA_ALLOC_CONF
+        fi
+        # LMCache MP server. L1 = CPU RAM (--l1-size-gb). L2 = optional disk, OFF by default:
+        #   LMCACHE_L2=1                -> enable L2 at the in-repo default /lmcache-kv (fs adapter)
+        #   LMCACHE_L2_ADAPTER='{...}'  -> full override (custom path/backend); wins over LMCACHE_L2
+        # chunk-size MUST be a multiple of vLLM's unified block (1584 for int8-PTH KV).
+        # $$ escapes $ so Docker Compose passes bash syntax through (v5.1+ interpolates
+        # entrypoint strings; $${VAR[@]} without escape → "invalid interpolation format").
+        LM_ARGS=(--chunk-size "$${LMCACHE_CHUNK_SIZE:-1584}" --l1-size-gb "$${LMCACHE_L1_GB:-30}" --eviction-policy LRU)
+        if [ -n "$${LMCACHE_L2_ADAPTER:-}" ]; then
+          LM_ARGS+=(--l2-adapter "$${LMCACHE_L2_ADAPTER}")
+        elif [ "$${LMCACHE_L2:-0}" = "1" ]; then
+          LM_ARGS+=(--l2-adapter '{"type":"fs","base_path":"/lmcache-kv"}')
+        fi
+        lmcache server "$${LM_ARGS[@]}" &
+        sleep 6
+        if [ "$${_NVLINK_ENABLED:-0}" = "1" ]; then
+          exec vllm serve "$$@"
+        else
+          exec vllm serve --disable-custom-all-reduce "$$@"
+        fi
+      - --
+    command:
+      - --model
+      - /root/.cache/huggingface/qwen3.6-27b-fp8
+      - --served-model-name
+      - qwen3.6-27b
+      - qwen3.6-27b-autoround
+      - --quantization
+      - fp8
+      - --dtype
+      - bfloat16
+      - --tensor-parallel-size
+      - "${TP:-2}"
+      - --max-model-len
+      - "${MAX_MODEL_LEN:-262144}"
+      - --gpu-memory-utilization
+      - "${GPU_MEMORY_UTILIZATION:-0.92}"
+      - --max-num-seqs
+      - "${MAX_NUM_SEQS:-2}"
+      - --max-num-batched-tokens
+      - "${MAX_NUM_BATCHED_TOKENS:-1584}"
+      - --kv-cache-dtype
+      - "${KV_CACHE_DTYPE:-int8_per_token_head}"
+      - --mamba-cache-mode
+      - align
+      - --speculative-config
+      - '{"method":"mtp","num_speculative_tokens":3}'
+      - --enable-prefix-caching
+      - --kv-transfer-config
+      - '{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both"}'
+      - --trust-remote-code
+      - --chat-template
+      - /etc/qwen-froggeric-chat-template.jinja
+      - --reasoning-parser
+      - qwen3
+      - --default-chat-template-kwargs
+      - '{"enable_thinking": false}'
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - qwen3_coder
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

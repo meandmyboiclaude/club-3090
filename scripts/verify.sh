@@ -14,13 +14,24 @@
 #
 # Env vars (optional):
 #   URL          Override endpoint. Default: http://localhost:8020
-#   MODEL        Served model name. Default: qwen3.6-27b-autoround
+#   MODEL        Served model name. Default: qwen3.6-27b
 #   CONTAINER    Docker container name for log scraping. Default: vllm-qwen36-27b
 
 set -euo pipefail
 
+# Auto-detect running container + port + served model (env vars still win).
+# See scripts/preflight.sh::preflight_autodetect_endpoint / _model.
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -f "${ROOT_DIR}/scripts/preflight.sh" ]]; then
+  # shellcheck source=preflight.sh
+  source "${ROOT_DIR}/scripts/preflight.sh"
+  preflight_autodetect_endpoint
+fi
 URL="${URL:-http://localhost:8020}"
-MODEL="${MODEL:-qwen3.6-27b-autoround}"
+# Resolve the served model from /v1/models when MODEL is unset (#372). The qwen
+# literal below is only a last resort if detection no-ops (endpoint unreachable).
+declare -F preflight_autodetect_model >/dev/null && preflight_autodetect_model
+MODEL="${MODEL:-qwen3.6-27b}"
 CONTAINER="${CONTAINER:-vllm-qwen36-27b}"
 
 pass() { printf "  \033[32m✓\033[0m %s\n" "$1"; }

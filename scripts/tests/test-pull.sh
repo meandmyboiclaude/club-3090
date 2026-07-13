@@ -397,19 +397,14 @@ check(r.stratum is P.Stratum.PROFILE_LIKE
       f"g13: llamacpp/default -> stratum-2 unsupported-runtime-engine "
       f"(got {r.stratum.name}/{r.abort_reason})")
 
-# g0: Path-A non-emittable profile (vllm/dual-turbo, genesis_equipped) ->
-# stratum-2 profile-not-emittable BEFORE [C0].
-r = P.run_pull(CURATED_SLUG, "vllm/dual-turbo", path="A",
-                hardware_sm=SM_86, fetcher=NoNet(), profiles=profiles,
-                statvfs=BIG_DISK)
-check(r.stratum is P.Stratum.PROFILE_LIKE
-      and r.abort_reason == "profile-not-emittable",
-      f"g0: vllm/dual-turbo (genesis) -> stratum-2 profile-not-emittable "
-      f"(got {r.stratum.name}/{r.abort_reason})")
+# g0: Genesis profile-not-emittable coverage moved to test-pullgate-gates,
+# where the gate accepts synthetic registry/runtime fixtures. No
+# Genesis-equipped compose remains in COMPOSE_REGISTRY post-#254, and
+# run_pull() intentionally takes only real registry profile-like slugs.
 
 # g3b: Path-A model/variant mismatch -> stratum-2 profile-mismatch.
-# vllm/gemma-mtp is vLLM + emittable but model=gemma-4-31b != curated qwen.
-r = P.run_pull(CURATED_SLUG, "vllm/gemma-mtp", path="A",
+# vllm/gemma-bf16-mtp is vLLM + emittable but model=gemma-4-31b != curated qwen.
+r = P.run_pull(CURATED_SLUG, "vllm/gemma-bf16-mtp", path="A",
                 hardware_sm=SM_86, fetcher=NoNet(), profiles=profiles,
                 statvfs=BIG_DISK)
 check(r.stratum is P.Stratum.PROFILE_LIKE
@@ -530,8 +525,8 @@ check(r.ok and r.stratum is P.Stratum.DECIDED,
       "g6b: BOTH flags (+ --yes) -> clears stratum-3 -> Path-B verdict")
 
 # g10: runtime-incompatible is NON-bypassable; --experimental-arch does
-# NOT bypass it. Curated MoE arch with a loads:false pin (Path B, arch from
-# config) -> runtime-incompatible.
+# NOT bypass it. Curated MoE arch with no loads:true row for the selected
+# engine pin (Path B, arch from config) -> runtime-incompatible.
 s = "fixtures/qwen35-moe"
 moe = {
     "model_type": "qwen3_5_moe",
@@ -540,14 +535,14 @@ moe = {
     "num_attention_heads": 32, "num_key_value_heads": 8,
     "num_local_experts": 128, "torch_dtype": "bfloat16",
 }
-r = P.run_pull(s, "vllm/default", path="B", hardware_sm=SM_90,
+r = P.run_pull(s, "vllm/gemma-int8-mtp", path="B", hardware_sm=SM_90,
                 fetcher=ff_derived(s, moe), profiles=profiles,
                 statvfs=BIG_DISK)
 check(r.stratum is P.Stratum.C0
       and r.abort_reason == "engine-support-unknown/runtime-incompatible",
-      f"g10: loads:false pin -> stratum-3 runtime-incompatible "
+      f"g10: missing loads:true pin -> stratum-3 runtime-incompatible "
       f"(got {r.stratum.name}/{r.abort_reason})")
-r = P.run_pull(s, "vllm/default", path="B", hardware_sm=SM_90,
+r = P.run_pull(s, "vllm/gemma-int8-mtp", path="B", hardware_sm=SM_90,
                 fetcher=ff_derived(s, moe), profiles=profiles,
                 statvfs=BIG_DISK, experimental_arch=True)
 check(r.stratum is P.Stratum.C0
@@ -649,11 +644,11 @@ moe2 = {
     "num_local_experts": 128, "torch_dtype": "bfloat16",
 }
 c0 = G.c0_engine_support(
-    "vllm/qwen-a3b-preview", P.D.DeriveResult(
+    "vllm/qwen-35b-a3b-dual", P.D.DeriveResult(
         slug=s, profile={"arch": "Qwen3_5MoeForConditionalGeneration",
                          "auto_map": False}),
     path="B", hardware_sm=SM_86, root=root)
-r = P.run_pull(s, "vllm/qwen-a3b-preview", path="B", hardware_sm=SM_86,
+r = P.run_pull(s, "vllm/qwen-35b-a3b-dual", path="B", hardware_sm=SM_86,
                 fetcher=ff_derived(s, moe2), profiles=profiles,
                 statvfs=BIG_DISK, experimental_arch=True)
 check(c0.state is G.C0State.ENGINE_SUPPORTED
@@ -839,7 +834,7 @@ for _pl in ("vllm/minimal", "vllm/dual"):
 # Path-B structural isolation: NO Path-B run can ever set emitted/
 # compose_text. Sweep a representative matrix.
 pathb_emit = False
-for pl in ("vllm/minimal", "vllm/dual", "vllm/tools-text"):
+for pl in ("vllm/minimal", "vllm/dual", "vllm/qwen-35b-a3b-dual"):
     rb = P.run_pull(CURATED_SLUG, pl, dry_run=True, hardware_sm=SM_86,
                     fetcher=NoNet(), profiles=profiles, statvfs=BIG_DISK,
                     yes=True, force_download=True)
@@ -906,7 +901,7 @@ moec = {
     "num_attention_heads": 32, "num_key_value_heads": 8,
     "num_local_experts": 128, "torch_dtype": "bfloat16",
 }
-r = P.run_pull(s, "vllm/qwen-a3b-preview", path="B", hardware_sm=SM_86,
+r = P.run_pull(s, "vllm/qwen-35b-a3b-dual", path="B", hardware_sm=SM_86,
                 fetcher=ff_derived(s, moec, weight_gb=300.0),
                 profiles=profiles, statvfs=TINY_DISK,
                 experimental_arch=True)
@@ -916,7 +911,7 @@ check(r.stratum is P.Stratum.C2A_DISK,
 
 # stratum-5 BEFORE [B]/[C1]: ineligible model never reaches a verdict.
 s = "fixtures/order-s5"
-r = P.run_pull(s, "vllm/qwen-a3b-preview", path="B", hardware_sm=SM_86,
+r = P.run_pull(s, "vllm/qwen-35b-a3b-dual", path="B", hardware_sm=SM_86,
                 fetcher=ff_derived(s, moec, weight_gb=4.0),
                 profiles=profiles, statvfs=BIG_DISK,
                 experimental_arch=True)
@@ -944,7 +939,7 @@ r_norow = P.run_pull(s, "vllm/minimal", path="B", hardware_sm=SM_86,
 check(r_norow.ok or r_norow.stratum is not P.Stratum.C0,
       "scope: --experimental-arch BYPASSES no-arch-row")
 check(
-    P.run_pull("fixtures/qwen35-moe2", "vllm/default", path="B",
+    P.run_pull("fixtures/qwen35-moe2", "vllm/gemma-int8-mtp", path="B",
                hardware_sm=SM_90,
                fetcher=ff_derived("fixtures/qwen35-moe2", {
                    "model_type": "qwen3_5_moe",
@@ -1294,10 +1289,10 @@ if os.path.exists(_o21):
     os.unlink(_o21)
 
 # --- g22: derived but CONTRACT-5 reject -> structured refuse, NO dl/boot -
-# Point --profile-like at an overlay/TQ3 shape so derived_emittable refuses
-# BEFORE any download/boot. vllm/gemma-int8-tq3 = TQ3 KV + required feats.
+# Point --profile-like at the single-card fp8 Gemma shape so derived_emittable
+# refuses BEFORE any download/boot on the Ampere hardware gate.
 c = _Calls()
-r = P.run_pull(DSLUG, "vllm/gemma-int8-tq3", path="B", hardware_sm=SM_90,
+r = P.run_pull(DSLUG, "vllm/gemma-mtp-tp1", path="B", hardware_sm=SM_86,
                 fetcher=ff_derived(DSLUG, dense_cfg("Qwen2ForCausalLM"),
                                    weight_gb=4.0),
                 profiles=profiles, statvfs=BIG_DISK, trust_remote_code=True,

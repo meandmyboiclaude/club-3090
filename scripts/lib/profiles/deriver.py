@@ -38,6 +38,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import struct
 import sys
 import urllib.error
@@ -194,14 +195,51 @@ def _load_kv_calc():
 
 
 # ---------------------------------------------------------------------------
-# HF_HOME resolution (--hf-home > $HF_HOME > $XDG_CACHE_HOME/huggingface > ~)
+# HF_HOME resolution
+#   --hf-home > $HF_HOME > $MODEL_DIR/.cache/huggingface > $XDG_CACHE_HOME/hf > ~
 # ---------------------------------------------------------------------------
+def _model_dir_from_env_or_dotenv() -> Optional[str]:
+    """MODEL_DIR from the environment, else parsed from the repo `.env` (the
+    SAME value switch.sh / launch.sh / c3 resolve). `None` if set in neither.
+    Read with `encoding="utf-8"` (non-UTF-8-locale rigs, #599)."""
+    env = os.environ.get("MODEL_DIR")
+    if env:
+        return env
+    try:
+        for raw in (REPO_ROOT / ".env").read_text(
+            encoding="utf-8", errors="replace"
+        ).splitlines():
+            s = raw.strip().rstrip("\r")
+            if not s or s.startswith("#") or "=" not in s:
+                continue
+            if s.startswith("export "):
+                s = s[len("export "):]
+            key, _, val = s.partition("=")
+            if key.strip() == "MODEL_DIR":
+                val = val.strip().strip('"').strip("'")
+                return val or None
+    except OSError:
+        pass
+    return None
+
+
 def resolve_hf_home(hf_home: Optional[str] = None) -> Path:
+    """HF_HOME precedence: `--hf-home > $HF_HOME > $MODEL_DIR/.cache/huggingface
+    > $XDG_CACHE_HOME/huggingface > ~/.cache/huggingface`.
+
+    The MODEL_DIR step keeps a bare `pull.sh <repo>` — run with only `.env`'s
+    MODEL_DIR set and no explicit HF_HOME — on the MODEL DISK, instead of
+    silently falling to `~/.cache` on root (the footgun that misplaced a brought
+    model's weights, #617-followup). c3 is unaffected: it sets HF_HOME
+    explicitly, which still wins here."""
     if hf_home:
         return Path(hf_home).expanduser()
     env = os.environ.get("HF_HOME")
     if env:
         return Path(env).expanduser()
+    model_dir = _model_dir_from_env_or_dotenv()
+    if model_dir:
+        return Path(model_dir).expanduser() / ".cache" / "huggingface"
     xdg = os.environ.get("XDG_CACHE_HOME")
     if xdg:
         return Path(xdg).expanduser() / "huggingface"
@@ -314,6 +352,43 @@ def _siblings(api: dict) -> list[dict]:
     return out
 
 
+def _declares_mtp(config: dict) -> bool:
+    """True when config.json declares a multi-token-prediction head — Qwen3-Next
+    uses `mtp_num_hidden_layers`; other families use `num_nextn_predict_layers`.
+    Checks the top level AND a nested `text_config` (VLMs nest the LM config)."""
+    for cfg in (config or {}, (config or {}).get("text_config") or {}):
+        if not isinstance(cfg, dict):
+            continue
+        for key in ("mtp_num_hidden_layers", "num_nextn_predict_layers"):
+            v = cfg.get(key)
+            if isinstance(v, int) and v > 0:
+                return True
+    return False
+
+
+def _has_mtp_weight_file(api: dict) -> bool:
+    """True when the repo ships a dedicated MTP-head weights file — the layout
+    fine-tune re-quants use (e.g. `model_mtp_bf16.safetensors`)."""
+    for s in _siblings(api):
+        name = (s.get("rfilename") or "").lower()
+        if name.endswith(".safetensors") and ("mtp" in name or "nextn" in name):
+            return True
+    return False
+
+
+def detect_mtp_head(config: dict, api: dict) -> bool:
+    """Whether a brought checkpoint actually carries an MTP draft head, so the
+    Route-C weight-swap keeps `--speculative-config` instead of blanket-dropping
+    it. The blanket drop was a bug: fine-tunes that PRESERVE the head (e.g.
+    ThinkingCap) were served MTP-off. Signal (no extra fetch — config + siblings
+    are already in hand): config DECLARES the MTP layers AND a dedicated mtp
+    weights file is present. Ground-truth for the separate-file layout every
+    fine-tune uses. An embedded-head repo (head baked into the shards with no
+    named file) still falls back to drop — the named-file layout is the norm and
+    the alternative is reading each shard's index weight_map."""
+    return _declares_mtp(config) and _has_mtp_weight_file(api)
+
+
 def select_weight_files(
     api: dict,
 ) -> tuple[Optional[list[str]], Optional[DeriverError]]:
@@ -364,6 +439,20 @@ def select_weight_files(
             # Index present but no obvious shard naming — fall back to all
             # non-adapter top-level safetensors as the set.
             shards = sorted(safet)
+        else:
+            # A dedicated MTP/nextn head (e.g. `mtp_grafted.safetensors`) is a
+            # real weight the model needs with MTP enabled, but it's neither a
+            # `model-*` nor `-of-` shard, so the filter above drops it —
+            # which silently omitted Tess-4-27B-FP8's MTP head and would break
+            # MTP serving (club-3090 #617). `detect_mtp_head` already sees such a
+            # file; union it into the download set so it's actually fetched.
+            mtp_head = [
+                n for n in safet
+                if n not in shards
+                and ("mtp" in n.lower() or "nextn" in n.lower())
+            ]
+            if mtp_head:
+                shards = sorted(set(shards) | set(mtp_head))
         return shards, None
 
     # No index: must be exactly one complete set.
@@ -512,6 +601,139 @@ def sized_download_gb(api: dict) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Bring-funnel stage-1 INSPECT — artifact inventory (design §2 / §2b)
+# ---------------------------------------------------------------------------
+# GGUF quant token in a basename (Q4_K_M / IQ4_XS / UD-Q5_K_XL / Q8_0 / TQ1_0 /
+# BF16 / F16), tolerant of multi-part suffixes which are stripped first.
+_GGUF_PART_RE = re.compile(r"-(\d{5})-of-(\d{5})$", re.I)
+_GGUF_QUANT_RE = re.compile(
+    r"(?:^|[-_.])((?:UD-)?(?:I?Q\d|TQ\d|BF16|F16|F32)[A-Z0-9_]*)$", re.I
+)
+
+
+def _blob_sizes(api: dict) -> dict[str, int]:
+    by_name: dict[str, int] = {}
+    for s in _siblings(api or {}):
+        size = s.get("size")
+        if size is None and isinstance(s.get("lfs"), dict):
+            size = s["lfs"].get("size")
+        if size is not None:
+            by_name[s["rfilename"]] = int(size)
+    return by_name
+
+
+def artifact_inventory(api: dict) -> dict:
+    """What servable artifacts does this repo carry? — WITHOUT gating on
+    format.  A GGUF-only repo is a first-class bring here (design §2b-1/2:
+    the staged Bring UI reveals nothing template-side until this says the
+    repo is supported, and presents ALL discovered GGUF variants for the
+    user to pick BEFORE any engine/slug appears).  `select_weight_files`
+    stays the vLLM/safetensors gate — this never replaces it.
+
+    Returns (all sizes GiB, from the ?blobs=true siblings):
+      formats          ["safetensors", "gguf"] — whichever are present
+      safetensors      {weight_files, size_gb} | None (top-level, non-adapter)
+      gguf_variants    [{quant, size_gb, parts, files}] sorted by size —
+                       multi-part files grouped under one quant token; a file
+                       with no parseable token keys by its stem (never dropped)
+      gguf_mmproj      vision-projector *.gguf names (NOT variants)
+      lineage_base_model  cardData.base_model when the API carries it
+                          (friction #11 — ⑤'s taxonomy default + credits)"""
+    sizes = _blob_sizes(api)
+    names = [s["rfilename"] for s in _siblings(api or {})]
+
+    safet = [
+        n for n in names
+        if n.endswith(".safetensors") and "/" not in n and not _is_adapter(n)
+    ]
+    st = None
+    if safet:
+        st = {
+            "weight_files": sorted(safet),
+            "size_gb": round(sum(sizes.get(n, 0) for n in safet) / (1024 ** 3), 4),
+        }
+
+    # GGUF: any depth (quant subdirs are common), mmproj split out.
+    # Grouping key = the STEM (basename minus the -NNNNN-of-NNNNN part
+    # suffix), NOT the quant token — a repo can ship DISTINCT artifacts
+    # sharing a token (live dogfood 2026-07-05: Qwythos ships
+    # `…-Q4_K_M.gguf` AND `…-MTP-Q4_K_M.gguf` per quant; token-keying
+    # merged them into one "2-part variant" with a summed, wrong size).
+    # True multi-part shards share a stem, so `parts` still counts them.
+    variants: dict[str, dict] = {}
+    mmproj: list[str] = []
+    for n in names:
+        if not n.lower().endswith(".gguf"):
+            continue
+        base = n.rsplit("/", 1)[-1][: -len(".gguf")]
+        if base.lower().startswith("mmproj"):
+            mmproj.append(n)
+            continue
+        stem = _GGUF_PART_RE.sub("", base)
+        v = variants.setdefault(stem, {"size_gb": 0.0, "parts": 0, "files": []})
+        v["size_gb"] += sizes.get(n, 0) / (1024 ** 3)
+        v["parts"] += 1
+        v["files"].append(n)
+    # Display label: the stem minus the repo-wide COMMON prefix — for
+    # standard repos that IS the quant token ("Q4_K_M"); for multi-artifact
+    # repos it keeps the distinguishing part ("MTP-Q4_K_M").  Falls back to
+    # the parsed token, then the full stem (labels stay unique: stems are).
+    common = os.path.commonprefix(list(variants)) if len(variants) > 1 else ""
+    out_variants = []
+    for stem, v in variants.items():
+        label = stem[len(common):].strip("-_. ")
+        if not label:
+            m = _GGUF_QUANT_RE.search(stem)
+            label = m.group(1).upper() if m else stem
+        out_variants.append(
+            {"quant": label, "size_gb": round(v["size_gb"], 4),
+             "parts": v["parts"], "files": sorted(v["files"])}
+        )
+    gguf_variants = sorted(out_variants, key=lambda v: (v["size_gb"], v["quant"]))
+
+    formats = []
+    if st:
+        formats.append("safetensors")
+    if gguf_variants or mmproj:
+        formats.append("gguf")
+
+    card = api.get("cardData") if isinstance(api, dict) else None
+    base_model = (card or {}).get("base_model") if isinstance(card, dict) else None
+
+    return {
+        "formats": formats,
+        "safetensors": st,
+        "gguf_variants": gguf_variants,
+        "gguf_mmproj": sorted(mmproj),
+        "lineage_base_model": base_model,
+    }
+
+
+def inspect_repo(
+    slug: str,
+    *,
+    hf_token: Optional[str] = None,
+    fetcher: Optional[HttpFetcher] = None,
+) -> dict:
+    """Stage-1 INSPECT entry: fetch the model API + return the inventory.
+    Structured errors, never a traceback (same discipline as derive())."""
+    if fetcher is None:
+        fetcher = HttpFetcher()
+    hf_token = hf_token or os.environ.get("HF_TOKEN") or None
+    try:
+        api, err = _fetch_model_api(slug, fetcher, hf_token)
+    except NetworkError as exc:
+        return {"repo": slug, "error": f"network error: {exc}"}
+    if err is not None:
+        return {"repo": slug, "error": str(err)}
+    inv = artifact_inventory(api or {})
+    inv["repo"] = slug
+    if not inv["formats"]:
+        inv["error"] = "no servable artifacts (no safetensors weight set, no *.gguf)"
+    return inv
+
+
+# ---------------------------------------------------------------------------
 # Bounded safetensors-header probe (pre-download, range-bounded)
 # ---------------------------------------------------------------------------
 def probe_safetensors_dtype(
@@ -600,6 +822,24 @@ def _quant_bpw(quant_cfg: dict) -> Optional[float]:
     )
     if isinstance(bits, (int, float)) and bits > 0:
         return float(bits)
+    # compressed-tensors (llm-compressor) checkpoints nest the bit-width per
+    # config-group instead of top-level: config_groups.<g>.weights =
+    # {num_bits: 8, type: "float"|"int", ...}. Take the widest weights
+    # num_bits across groups (mixed-precision groups exist; the widest
+    # dominates the VRAM footprint the fit-check cares about). Explicit
+    # structure beats the method-name heuristics below — "compressed-tensors"
+    # as a method name matches none of them (the Agents-A1-FP8-dynamic
+    # producer-zero dogfood finding, 2026-07-02).
+    groups = quant_cfg.get("config_groups")
+    if isinstance(groups, dict):
+        bits_seen = []
+        for g in groups.values():
+            w = g.get("weights") if isinstance(g, dict) else None
+            nb = w.get("num_bits") if isinstance(w, dict) else None
+            if isinstance(nb, (int, float)) and nb > 0:
+                bits_seen.append(float(nb))
+        if bits_seen:
+            return max(bits_seen)
     method = str(
         quant_cfg.get("quant_method")
         or quant_cfg.get("method")
@@ -845,6 +1085,11 @@ def derive(
         "config_num_hidden_layers": _int(config or {}, "num_hidden_layers"),
         "config_num_attention_heads": _int(config or {}, "num_attention_heads"),
         "config_num_key_value_heads": _int(config or {}, "num_key_value_heads"),
+        # Additive: does the brought checkpoint carry an MTP draft head? The
+        # Route-C weight-swap (pull.sh _swap_path) reads this to keep vs drop
+        # --speculative-config, instead of the old blanket "fine-tune → no MTP"
+        # drop that silently served head-preserving fine-tunes MTP-off.
+        "has_mtp_head": detect_mtp_head(config or {}, api or {}),
     }
     res.diagnostics["resolution"] = "derived"
 
@@ -855,3 +1100,42 @@ def derive(
         res.confidence = Confidence.NOT_ELIGIBLE  # P4 wires stratum-5 abort
 
     return res
+
+
+# ---------------------------------------------------------------------------
+# CLI — stage-1 INSPECT for the Bring funnel (c3 subprocess + standalone use)
+#   python3 scripts/lib/profiles/deriver.py --inventory <org/Model> [--json]
+# ---------------------------------------------------------------------------
+def _cli(argv: list[str]) -> int:
+    import argparse
+
+    ap = argparse.ArgumentParser(
+        prog="deriver", description="Bring-funnel stage-1 INSPECT (artifact inventory)"
+    )
+    ap.add_argument("repo", help="HF repo slug, e.g. org/Model")
+    ap.add_argument("--inventory", action="store_true", required=True,
+                    help="emit the artifact inventory (the only CLI mode)")
+    ap.add_argument("--json", action="store_true", help="JSON output (default: pretty)")
+    ns = ap.parse_args(argv)
+    inv = inspect_repo(ns.repo)
+    if ns.json:
+        print(json.dumps(inv))
+    else:
+        if inv.get("error"):
+            print(f"error: {inv['error']}")
+        else:
+            print(f"repo: {inv['repo']}  formats: {', '.join(inv['formats'])}")
+            if inv.get("safetensors"):
+                st = inv["safetensors"]
+                print(f"  safetensors: {len(st['weight_files'])} file(s), {st['size_gb']:.1f} GiB")
+            for v in inv.get("gguf_variants") or []:
+                print(f"  gguf {v['quant']}: {v['size_gb']:.1f} GiB ({v['parts']} file(s))")
+            for m in inv.get("gguf_mmproj") or []:
+                print(f"  mmproj: {m}")
+            if inv.get("lineage_base_model"):
+                print(f"  base_model: {inv['lineage_base_model']}")
+    return 1 if inv.get("error") else 0
+
+
+if __name__ == "__main__":  # pragma: no cover - thin CLI shim
+    raise SystemExit(_cli(sys.argv[1:]))

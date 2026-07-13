@@ -1,0 +1,48 @@
+schema_version: 1
+id: qwen3.6-40b-deckard
+display_name: Qwen 3.6 40B Deckard
+family: qwen35-dense
+# Dense 40B uncensored community frankenmerge (DavidAU's Opus-Deckard, Qwen3.6-VL
+# base). Arch CONFIRMED from the GGUF header (general.architecture=qwen35):
+# STANDARD GQA attention, uniform across all 97 layers — NOT a Qwen3-Next/DeltaNet
+# hybrid (no GDN / linear-attention layers, despite the earlier scaffold guess).
+# Served text-only (the base is VL-capable, but no mmproj is mounted here).
+hidden_size: 5120
+num_hidden_layers: 97
+num_attn_heads: 24
+num_kv_heads: 4
+head_dim_attn: 256          # key_length == value_length == 256
+intermediate_size: 17408    # feed_forward_length
+attention_k_eq_v: false     # standard GQA — K and V are separate caches (same as Qwen3.6-27B)
+max_ctx_supported: 262144
+# rope_theta = 1e7. MTP: the GGUF carries 1 nextn (MTP) predict-layer (PiehSoft's
+# BF16 head injection) — engaged via --spec-type draft-mtp.
+vision_capable: false
+weights:
+  piehsoft-q6k:
+    path: qwen3.6-40b-deckard-gguf/piehsoft-q6k
+    local_subdir: qwen3.6-40b-deckard-gguf/piehsoft-q6k
+    size_gb: 31                 # 33.2 GB on disk (Q6_K weights + embedded MTP head)
+    format: gguf
+    status: production
+    # MTP-injected GGUF published by PiehSoft — a BF16 MTP (nextn) head injected
+    # onto DavidAU's Q6_K Opus-Deckard base (DavidAU/Qwen3.6-40B-Claude-4.6-Opus-
+    # Deckard-Heretic-Uncensored-Thinking-NEO-CODE-Di-IMatrix-MAX-GGUF). The
+    # PiehSoft repo is the one we fetch — it carries the head; the DavidAU base
+    # does NOT. setup.sh/launch.sh auto-fetch it from hf_repo below.
+    hf_repo: PiehSoft/Qwen3.6-40B-Deckard-MTP-Q6_K
+    files:
+      - Qwen3.6-40B-Deckard-MTP-Q6_K.gguf
+    engine: llama-cpp
+    kind: gguf
+    verify_glob: "*.gguf"
+default_weight_variant: piehsoft-q6k
+compatible_drafters:
+  - qwen-mtp-builtin
+# num_kv_heads=4 supports TP up to 4 (each rank needs ≥1 KV head).
+# Practically limited to TP=2 on this rig (2× 3090).
+valid_tp:
+  - 1
+  - 2
+  - 4
+requires_genesis: false

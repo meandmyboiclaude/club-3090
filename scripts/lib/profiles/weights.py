@@ -27,15 +27,20 @@ PROFILE_ROOT = Path(__file__).resolve().parent
 
 ALIASES = {
     "qwen3.6-27b:autoround_int4": ("qwen3.6-27b", "autoround-int4"),
+    "qwen3.6-27b:nvfp4": ("qwen3.6-27b", "nvfp4"),
     "qwen3.6-27b:gguf_q4km": ("qwen3.6-27b", "unsloth-q4km"),
     "qwen3.6-27b:gguf_iq4ks": ("qwen3.6-27b", "ubergarm-iq4ks"),
     "qwen3.6-27b:carnice_bf16mtp": ("qwen3.6-27b", "carnice-bf16mtp"),
     "qwen3.6-27b:qwopus_bf16mtp": ("qwen3.6-27b", "qwopus-bf16mtp"),
     "qwen3.6-35b-a3b:autoround_int4": ("qwen3.6-35b-a3b", "autoround-int4"),
+    "qwen3.6-35b-a3b:nvfp4": ("qwen3.6-35b-a3b", "nvfp4"),
+    "agents-a1:fp8_dynamic": ("agents-a1", "fp8-dynamic"),
     "gemma-4-31b:autoround_int4": ("gemma-4-31b", "autoround-int4"),
     "gemma-4-26b-a4b:autoround_int4_mixed": ("gemma-4-26b-a4b", "autoround-int4-mixed"),
     "gemma-4-26b-a4b:awq_compressed_tensors": ("gemma-4-26b-a4b", "awq"),
     "qwen3.6-27b-autoround-int4": ("qwen3.6-27b", "autoround-int4"),
+    "qwen3.6-27b-nvfp4": ("qwen3.6-27b", "nvfp4"),
+    "Qwen3.6-27B-NVFP4": ("qwen3.6-27b", "nvfp4"),
     "qwen3.6-27b-dflash": ("qwen3.6-27b", "dflash"),
     "qwen3.6-27b-prism-eagle3": ("qwen3.6-27b", "prism_eagle3"),
     "qwen3.6-27b-mtp-head": ("qwen3.6-27b", "mtp_head"),
@@ -43,6 +48,9 @@ ALIASES = {
     "qwen3.6-27b-mmproj-f16": ("qwen3.6-27b", "gguf_mmproj_f16"),
     "qwen3.6-27b-gguf-iq4ks": ("qwen3.6-27b", "ubergarm-iq4ks"),
     "qwen3.6-35b-a3b-autoround-int4": ("qwen3.6-35b-a3b", "autoround-int4"),
+    "qwen3.6-35b-a3b-nvfp4": ("qwen3.6-35b-a3b", "nvfp4"),
+    "Qwen3.6-35B-A3B-NVFP4": ("qwen3.6-35b-a3b", "nvfp4"),
+    "Agents-A1-FP8-dynamic": ("agents-a1", "fp8-dynamic"),
     "gemma-4-31b-autoround-int4": ("gemma-4-31b", "autoround-int4"),
     "gemma-4-31b-it-AWQ-4bit": ("gemma-4-31b", "awq"),
     "gemma-4-31b-it-assistant": ("gemma-4-31b", "assistant"),
@@ -118,6 +126,7 @@ def _recipe(model_id: str, variant: str) -> dict[str, str]:
         "WEIGHT_ENGINE": str(meta.get("engine") or ""),
         "WEIGHT_KIND": str(meta.get("kind") or ""),
         "WEIGHT_REPO": str(meta.get("hf_repo") or ""),
+        "WEIGHT_REVISION": str(meta.get("revision") or ""),
         "WEIGHT_SUBDIR": str(meta.get("local_subdir") or meta.get("path") or ""),
         "WEIGHT_FILES": " ".join(str(f) for f in files),
         "WEIGHT_VERIFY_GLOB": str(meta.get("verify_glob") or "*.safetensors"),
@@ -188,7 +197,38 @@ def main(argv: list[str] | None = None) -> int:
     p_entry.add_argument("variant", nargs="?")
     p_lookup = sub.add_parser("lookup")
     p_lookup.add_argument("path")
+    # `list --json` — batch static weights metadata for every (model, variant)
+    # with a local_subdir, for the TUI's download-state join (it stats the dirs
+    # itself against its configured model dir).  Pure profile read, no FS check.
+    p_list = sub.add_parser("list")
+    p_list.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
+
+    if args.cmd == "list":
+        import json as _json
+
+        rows: list[dict[str, Any]] = []
+        for model_id, model in _load_models().items():
+            for variant, meta in (model.get("weights") or {}).items():
+                if not isinstance(meta, dict):
+                    continue
+                subdir = str(meta.get("local_subdir") or meta.get("path") or "")
+                if not subdir:
+                    continue
+                rows.append(
+                    {
+                        "model": model_id,
+                        "variant": variant,
+                        "subdir": subdir,
+                        "hf_repo": str(meta.get("hf_repo") or ""),
+                        "size_gb": meta.get("size_gb"),
+                        "verify_glob": str(meta.get("verify_glob") or "*.safetensors"),
+                        "status": str(meta.get("status") or ""),
+                        "kind": str(meta.get("kind") or ""),
+                    }
+                )
+        print(_json.dumps(rows))
+        return 0
 
     if args.cmd == "entry":
         if args.variant:

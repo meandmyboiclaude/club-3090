@@ -52,9 +52,47 @@ This stack ships **vLLM-CUDA-first** composes (NVIDIA), with **llama.cpp as the 
 - **Ampere (sm_80/86)** — adds **BF16** and **TF32** TCs. **Roughly 2× the INT8/INT4 throughput of Turing** + new **2:4 structured sparsity** path that doubles peak again on supported kernels. **No native FP8** (despite what some marketing suggested) — FP8 on Ampere is software-only and runs at ≤ fp16 speed. *(Note: TF32 here is a training/mixed-precision convenience format — it's rarely the active path during LLM inference, which generally runs in FP16/BF16/INT8/FP8 instead.)*
 - **Ada (sm_89)** — first consumer arch with **native FP8 Tensor Cores** (E4M3 + E5M2). The 4090 / L40 get a real FP8 path. Peak FP8 TFLOPS is lower than Hopper's and — crucially — Ada **lacks Hopper's full transformer-engine integration** (faster on-die format conversion between FP8↔FP16, smarter mixed-precision accumulation, native FP8 KV). So Ada's FP8 is a real inference path but with a thinner kernel ecosystem than H100. Expect ~half the FP8 TFLOPS/clock of Hopper at comparable TC count.
 - **Hopper (sm_90)** — first **transformer engine** with FP8 weights + FP8 KV both on-die, plus block-scaling support for higher-accuracy FP8 paths. The fast path for FP8 inference. H100 also adds TMA (Tensor Memory Accelerator).
-- **Blackwell (sm_10x DC / sm_120 consumer)** — adds **NVFP4 / FP4 / MXFP4** (4-bit float on TCs), **MXFP8**, and **FP6**. The first arch where 4-bit *compute* (not just storage) is a hardware feature. Genesis treats sm_10x and sm_120 as one family with the same FP8/FP4 hardware capabilities; performance per watt differs. *(Current vLLM nightlies on Blackwell still prefer FP8 paths in practice — NVFP4 kernels are landing but NVFP4-quantized weight artifacts for 27-31B models are scarce as of 2026-05. Expect FP8 → NVFP4 to be the next migration.)*
+- **Blackwell (sm_10x DC / sm_120/121 consumer)** — adds **NVFP4 / FP4 / MXFP4** (4-bit float on TCs), **MXFP8**, and **FP6**. The first arch where 4-bit *compute* (not just storage) is a hardware feature. **⚠️ The raw Tensor Cores are similar across datacenter (sm_10x) and consumer (sm_12x) Blackwell, but the *attention/KV kernels are NOT* — see the section below; this is the #1 "it has the hardware so it should work" trap.** *(Current vLLM on consumer Blackwell prefers FP8 KV in practice — NVFP4 *weights* work, but NVFP4 *KV* needs a datacenter-only kernel.)* **Same trap for INT8:** the raw INT8 Tensor Cores exist on Blackwell (matrix row above shows ✓), but vLLM's **W8A8** (INT8-weights + INT8-activations) quant kernel **does not build for sm ≥ 10.0** — so W8A8 is **Ampere/Ada/Hopper-only**, and FP8 weights are the Blackwell 8-bit path ([llm-compressor W8A8 docs](https://docs.vllm.ai/en/latest/features/quantization/llm_compressor/int8_w8a8/): *"INT8 is not supported on compute capability >= 10.0"*; see the W8A8 row in [BENCHMARKS.md](../BENCHMARKS.md)).
 
 ---
+
+
+## Having the Tensor Cores ≠ using them: the two axes that decide real behavior
+
+The matrix above is *silicon capability* — what the Tensor Cores can multiply. It does **not** tell you what vLLM's kernels actually run, and two independent splits decide that. Getting this wrong is how "the 5090 has FP4, so `nvfp4` KV should work" turns into a boot crash.
+
+### Axis 1 — weights vs KV are gated separately
+
+- **Weight quant** (FP8/FP4/INT4 weights → the GEMM) is available wherever the Tensor Cores exist: FP8 weights on **sm_89+** (Ada 4090, Hopper, all Blackwell), FP4/NVFP4 weights on **all Blackwell** — consumer (sm_120/121) *and* datacenter (sm_100/103). If your card is in the matrix column, the weights path works.
+- **KV quant** is *not* the same story, because KV compression interacts with the **attention (FMHA) kernel**, which has far narrower arch coverage than the raw Tensor Cores.
+
+### Axis 2 — KV "compute" vs KV "storage": the FMHA gate
+
+A KV dtype is used one of two ways:
+
+- **Storage-only** — KV is stored quantized (e.g. 1 byte/token for FP8), then **dequantized to BF16/FP16 for the attention matmul**. Saves VRAM (bigger pool / longer context), **no compute speedup**. Works on basically any arch vLLM runs on.
+- **Native compute** — the attention matmul itself runs in the quantized domain (FP8/FP4). This needs a purpose-built FMHA kernel, and there are only two: **FlashAttention-3** (Hopper **sm_90 only**) and the **trtllm-gen FMHA** (datacenter Blackwell **sm_100/103 only**).
+
+**So on every consumer GPU we care about — Ada (4090, sm_89), consumer Blackwell (5090 / RTX PRO 6000 Blackwell, sm_120), and the DGX Spark (GB10, sm_121) — FP8 KV is storage-only, and `nvfp4` KV does not work at all.** Neither FA3 nor the trtllm-gen FMHA builds for those arches.
+
+Two consequences, both empirically confirmed on this program:
+
+1. **`fp8_e4m3` vs `fp8_e5m2` is speed-neutral on consumer cards.** Both are 1 byte/token stored, both dequant to BF16 for attention — identical throughput. Measured on an RTX 5090: **86.73 vs 86.66 decode TPS** (<0.5%, [disc #571](https://github.com/noonghunna/club-3090/discussions/571)). Their only difference is *numeric* (e4m3 = more mantissa → better KV precision; e5m2 = wider range). Prefer **e4m3 on sm_89+ for precision, not speed**.
+2. **`nvfp4` KV crashes on consumer Blackwell** (sm_120/121) — the trtllm-gen FP4 FMHA has no build there ([vLLM #43562](https://github.com/vllm-project/vllm/issues/43562) / [TRT-LLM #10241](https://github.com/NVIDIA/TensorRT-LLM/issues/10241)). NVFP4 *weights* are fine; only the KV/attention path fails.
+
+**Consumer Blackwell is one family (sm_12x).** The 5090 (sm_120), RTX PRO 6000 Blackwell (sm_120), and DGX Spark GB10 (sm_121) share this behavior — do **not** conflate them with datacenter Blackwell (B100/B200/GB200, sm_100/103), which *does* ship the trtllm-gen FMHA and therefore native FP8/FP4 KV compute. On consumer Blackwell the useful KV lever is **compression for capacity** (fit more context — e.g. INT8-PTH / TQ3), not dtype-for-compute.
+
+### Does this apply to the other engines? No — it's a vLLM-family story
+
+Everything above is about the **vLLM family (vLLM + SGLang)**, and it's a *consequence of* those engines having a native-quantized-KV-attention path at all. The **llama.cpp family (mainline / ik-llama / beellama)** — which is where most of our single-card composes live — is a completely different regime with **no consumer-vs-datacenter split**:
+
+- **llama.cpp KV quant (`q4_0`/`q8_0`/`q5_0`/`iq4_nl`/TQ) is storage-only on *every* arch.** The quantized KV is dequantized on-the-fly *inside* the flash-attention kernel; the matmul runs in FP16/FP32. It never touches FP8/FP4 tensor cores — [not even on Hopper](https://github.com/ggml-org/llama.cpp/discussions/22411), where the hardware could. So `q4_0` KV behaves identically on a 3090, 4090, 5090, or DGX Spark — **which is exactly why our single-3090 ik/beellama configs hit 262K, and why they're the right tool for a consumer card that wants big context.**
+- **The flip side:** GGUF engines never get a *native-KV-compute* speedup on *any* hardware — the memory saving is the whole benefit, universally. There's no `e4m3`-vs-`e5m2`-for-speed question in GGUF-land because there's no native-KV-compute path. (The only "fast path" nuance is that symmetric K/V quant enables the *fused* FA kernel vs a slower fallback — arch-agnostic, not a tensor-core-precision effect.)
+- **Weights too:** GGUF weight quant (K-quants / IQ-quants) is dequant-to-FP16 — a Q4/Q8 GGUF on a 5090 does **not** use the FP8/FP4 tensor cores. The "native FP8/NVFP4 weights" win is vLLM/CUTLASS-only; there's no GGUF equivalent.
+
+**Division of labor, then:** the *native low-precision compute* wins (FP8/FP4 weights, FP8 KV compute) are **vLLM-only, and mostly datacenter-only for KV**. The *capacity* win (KV compression for long context) is delivered **universally and arch-agnostically by the llama.cpp family**. So a consumer card (4090 / 5090 / Spark) that wants long context is best served by the GGUF composes — which were never in the "consumer can't do native KV compute" trap, because they don't do native KV compute anywhere.
+
+
 
 ## Weight-quantization schemes — storage format vs compute path
 
@@ -102,18 +140,45 @@ KV cache is a separate concern from weights — vLLM ships several KV-quant sche
 | KV format | Implementation | Native HW? | Works on Ampere? | Notes |
 |---|---|:--:|:--:|---|
 | FP16 / BF16 | Standard cast | ✓ (FP16/BF16 TC) | ✓ | Baseline. Largest KV pool footprint. |
-| FP8 (E4M3 / E5M2) | Software cast on Ampere; HW TC on Ada+ | partial | ✓ (SW) | Half the bytes/token vs FP16. The default in `dual/autoround-int4/fp8-mtp.yml`. |
-| INT8 PTH (per-token-head) | Custom kernel with per-(token, head) scales | ✓ (INT8 TC) | ✓ | High single-stream TPS; **doesn't scale at concurrency** (see [FAQ](FAQ.md#int8-pth-gives-me-150-tps-single-stream-but-doesnt-scale-with-concurrency--is-that-a-bug)). |
+| FP8 (E4M3 / E5M2) | **Storage-only on all consumer GPUs** (stored 1 B/tok, dequant→BF16 for attention). Native FP8 *attention* compute only on Hopper (FA3) / datacenter Blackwell (trtllm-gen) | consumer: storage-only; Hopper/DC-Blackwell: compute | ✓ (storage) | Half the bytes/token vs FP16. The default in `dual/autoround-int4/fp8-mtp.yml`. e4m3≡e5m2 in speed on consumer cards (precision vs range only). |
+| INT8 PTH (per-token-head) | Custom kernel with per-(token, head) scales | ✓ (INT8 TC) | ✓ | High single-stream TPS; **doesn't scale at concurrency** (see [FAQ](FAQ.md#int8-pth-gives-me-150-tps-single-stream-but-doesnt-scale-with-concurrency--is-that-a-bug)). **Native in stock vLLM ≥ v0.22.0 for uniform-head-dim models** (Qwen etc.) — no overlay; Gemma-4 needs the #40391 overlay (see "KV-quant × checkpoint compatibility" below). |
 | TurboQuant 3-bit (TQ3) | Custom Triton kernels | ✗ (Triton soft) | ✓ | ~5× the KV pool of FP16. Hybrid-attention models (Qwen3-Next) need a multi-query verify kernel for spec-decode (only Genesis P67 today). |
 | TurboQuant 4-bit (TQ4) | Custom Triton kernels | ✗ | ✓ | ~4× the KV pool of FP16. Slightly higher quality than TQ3. |
 | TurboQuant k8v4 | 8-bit K + 4-bit V mixed | ✗ | ✓ | Asymmetric — K matters more for attention precision. BF16-equivalent quality per the TQ paper. |
 
-**Ada / Hopper / Blackwell get a real win on FP8 KV** because the Tensor Cores can multiply FP8 directly without an upcast. On Ampere, FP8 KV is just smaller storage — the matmul still happens in FP16, so you save VRAM but not compute time. That's why the 3090's fp8 KV gives lower per-stream TPS than INT8 PTH (which *can* multiply in INT8 on the Tensor Core directly).
+**Only Hopper (FA3) and datacenter Blackwell (trtllm-gen) get a compute win on FP8 KV** — those are the only two backends that run the *attention matmul* in FP8. Everywhere else — Ampere, **and every consumer card including Ada 4090, the 5090, and the DGX Spark** — FP8 KV is **storage-only**: it saves VRAM (bigger pool / longer context) but the attention matmul still upcasts to BF16, so there's no per-stream speedup and no `e4m3`-vs-`e5m2` throughput difference (see the two-axes section above). On such cards, if you want a KV format that actually multiplies faster on the Tensor Core, that's **INT8-PTH** (native INT8 TC), not FP8.
+
+**The launchers inject `KV_CACHE_DTYPE=fp8_e4m3` on sm_89+ since [#246](https://github.com/noonghunna/club-3090/issues/246) Phase 1** (pilot slugs `vllm/dual`/`vllm/minimal`; Ampere keeps its compose default; explicit env wins; quant-specific KV slugs untouched). **NOTE the reframe from the first cross-rig data:** e4m3 is *not* a throughput win on consumer cards (it's storage-only there, ≡ e5m2 — see above). It's still the right default on sm_89+ as the **better-precision** FP8 KV format at zero speed cost — but the #246 "e4m3 for native FP8 compute" hypothesis only holds on Hopper / datacenter Blackwell, which the community doesn't run.
+
+**⚠️ Storage-only ≠ decode-neutral — the KV format selects the attention *backend*, and that's a real decode-at-DEPTH lever** (measured 2026-07-06, dual-max 2× 3090, [#594](https://github.com/noonghunna/club-3090/pull/594)). FP8 KV gets no native-FP8-*compute* win on consumer cards, but the *choice* of KV format still determines which attention backend vLLM can run — and they don't decode equally at long context:
+- **INT8-PTH KV → `TRITON_ATTN` only** (boot log: `potential backends: ['TRITON_ATTN']`). Single-stream decode **craters with context depth**: 130.8 TPS warm → **50.7 @ 35K** (bench-agentic). So its weakness isn't *only* concurrency (INT8-PTH row above) — it's single-stream depth too.
+- **`fp8` (→ e4m3) KV → `FLASHINFER`** (`['FLASHINFER','TRITON_ATTN']` → picks FlashInfer). Decode stays **flat**: 114.4 warm → **115.0 @ 35K** (≈2.3× INT8-PTH at depth), ~2× prefill, NIAH recall **ties** INT8-PTH to 240K. INT8-PTH still wins short-ctx (<5K, warm +14%) and VRAM headroom.
+- **With an fp8-*weights* checkpoint, use `--kv-cache-dtype fp8` (= e4m3), NOT `fp8_e5m2`** — e5m2 is hard-rejected (`fp8_e5m2 kv-cache is not supported with fp8 checkpoints`; scale-free, conflicts with the fp8 checkpoint path). e4m3 boots on our sm_86 via FlashInfer at **scale=1.0** — the checkpoint is weight-only (`kv_cache_scheme: None`, carries no KV scales), and `calculate_kv_scales` warmup calibration is **disabled on Qwen3-Next hybrid** (GDN recurrent state → unreliable scales), so 1.0 is the only in-serving fp8 KV. No SM89 dependence — the "e4m3 needs SM89+" floor is the *Triton* path (e.g. Gemma's non-fp8 W4A16 checkpoint).
+- **Quality-neutral despite scale=1.0:** e4m3's 8-pack **ties** INT8-PTH — **109 vs 107/150** ([#594](https://github.com/noonghunna/club-3090/pull/594), thinking-off). NIAH is blind to KV-quant drift, but the 8-pack isn't — and it's a wash. e4m3's exponent range tolerates a flat 1.0 well enough for KV. vLLM's own [fp8-KV blog](https://vllm.ai/blog/2026-04-22-fp8-kvcache) benchmarks scale=1.0 fp8 KV *deliberately* as the reproducible near-lossless **lower bound**, and reports **Qwen3.5-27B matches baseline AUC at 1M ctx** — independent corroboration of our tie.
+- **Ampere support for fp8_e4m3 KV is weights-conditional** (encoded in `compat.py` C5): allowed on rtx-3090 **only for fp8-*weights*** checkpoints (which route to FlashInfer). Non-fp8 weights — e.g. Gemma's W4A16 — route to Triton (needs SM89+) and are correctly *rejected*. `weights_variant` is a validated proxy for that backend split (Qwen fp8 works #594; Gemma fp8_e4m3 fails, `gemma-4-31b.md` 2026-07-01). Caveat: a hypothetical Gemma-*fp8-weights* checkpoint would still route to Triton and fail — the proxy would wrongly allow it; revisit if one appears.
 
 **Emerging KV recipes** (worth watching, not yet defaults):
 - **Block-scaled FP8 KV** — per-block scales like MXFP8 but applied to KV cache rather than weights. Recovers accuracy at long-context where flat FP8 can lose precision in deep layers. Lands on Hopper / Blackwell first.
-- **NVFP4 KV** — Blackwell-native, ~4× smaller than FP16 KV at NVFP4 weight accuracy levels. Kernels still maturing in vLLM nightlies.
+- **NVFP4 KV** — **DATACENTER Blackwell only (sm_100/sm_103: B100/B200/GB200).** It forces vLLM's trtllm-gen FP4 FMHA, which has **no consumer-Blackwell (sm_120/121) build** — so it **crashes on RTX 5090s** despite their FP4 hardware ([vLLM #43562](https://github.com/vllm-project/vllm/issues/43562) / [TRT-LLM #10241](https://github.com/NVIDIA/TensorRT-LLM/issues/10241); empirically hit on two 5090s via #246, disc #571). NVFP4 *weights* run on consumer Blackwell — only the KV/attention path doesn't. Consumer-Blackwell FP4-era KV = **fp8_e4m3**. (A textbook 'literal exists ≠ kernel exists' — the exact trap the #246 A/B was built to catch.)
 - **TensorRT-LLM W4A8 / W4A4** — Hopper/Blackwell weight+activation quant recipes that pair INT4/NVFP4 weights with FP8/FP4 activations. Out of scope for the vLLM-first composes here but worth knowing if you cross-shop.
+
+### KV-quant × checkpoint compatibility — the two Ampere traps
+
+Beyond "does the kernel exist", two non-obvious rules decide which KV dtype you can actually *use*:
+
+1. **fp8 KV is rejected for *compressed-tensors* checkpoints.** `--kv-cache-dtype fp8_e5m2` on an AWQ / FP8-weight / INT8-weight checkpoint loaded via the **compressed-tensors** path dies with `ValueError: fp8_e5m2 kv-cache is not supported with fp8 checkpoints` — and it fires whether `--quantization compressed-tensors` is explicit *or* auto-detected (the guard keys off the *detected* method, not the flag). It is **not** caused by a real fp8 weight component — a pure-int4 AWQ (e.g. `cyankiwi/...-AWQ-BF16-INT4`, which has zero fp8 in its config) trips it too. The **`auto_round` / GPTQ loaders are *not* affected** — that's why `vllm/dual` (AutoRound) runs fp8 KV fine. **So for a compressed-tensors checkpoint, the 1-byte-per-token KV path is INT8-PTH, not fp8.**
+
+2. **INT8-PTH is native in stock vLLM (≥ v0.22.0) — but only for *uniform-head-dim* models.** `--kv-cache-dtype int8_per_token_head` works out-of-the-box on Qwen and other standard-attention models (defined in `config/cache.py` + `v1/kv_cache_interface.py`; **no overlay**). The catch is **heterogeneous head dims**: Gemma-4 interleaves head_dim 256 (sliding) / 512 (global), so the per-token-head page sizes (520 B vs 1032 B) don't satisfy vLLM's `unify_kv_cache_spec_page_size()` and the engine refuses to boot. The vendored **#40391** overlay pads global layers to a 1040-B factor to fix *only that*. So #40391 is **Gemma-4-specific — do not copy it to other models**, and don't assume INT8-PTH needs a patch in general.
+
+**Putting it together — picking a KV dtype on Ampere (sm_86):**
+
+| Your checkpoint / goal | KV dtype | Overlay? |
+|---|---|---|
+| `auto_round` / GPTQ weights | `fp8_e5m2` | none |
+| compressed-tensors (AWQ / FP8 / INT8 weights), **long context** | `int8_per_token_head` | none — **except Gemma-4: +#40391** |
+| anything, **context ≤ ~half the model-max** | `bf16` (default) | none |
+
+The "INT8-PTH needs no overlay" point was upstreamed in v0.22.0 and is easy to miss — **engine capability flags that predate it can be wrong; verify against the running image**, not the profile. (The reason most people never hit any of this: they run **bf16 KV at the auto-fit context**, well under the model max — the int8-PTH/overlay question only arises when you stack *max context* AND *a compressed-tensors checkpoint*.)
 
 ---
 
@@ -300,9 +365,9 @@ What to ship as the default for each GPU class, given the matrix above:
 | **Turing (T4, 20-series)** | INT8 native; GPTQ INT4 via Marlin works | FP16 / INT8 | n-gram only | not a primary target |
 | **Ampere consumer (3090/3080/3060)** ⭐ | **AutoRound INT4** | **TQ3 (Genesis) / INT8 PTH / fp8** | **MTP n=3** + Genesis P67 | `dual/autoround-int4/turbo.yml`, `dual/autoround-int4/tq3-mtp-genesis.yml`, `single/autoround-int4/long-text.yml` — primary target of this stack |
 | **Ampere DC (A100)** | AutoRound INT4 or FP16 | TQ3 / fp8 | MTP n=3 | Same composes as 3090, more VRAM headroom |
-| **Ada (4090 / L40)** | AutoRound INT4 (preserve INT4 path) **OR** FP8 weights for full TC use | **fp8 (HW)** / TQ3 / INT8 PTH | MTP n=3 / DFlash | Same composes work; FP8 KV is now a real perf win |
+| **Ada (4090 / L40)** | AutoRound INT4 **OR** FP8 weights (native FP8 GEMM on sm_89) | **INT8-PTH** (native INT8 TC) / TQ3 for a compute win; `fp8_e4m3` = storage-only (≡e5m2, launcher-injected #246, precision not speed) | MTP n=3 / DFlash | FP8 KV here is **storage-only** — no FA3 (Hopper-only); the arch win is FP8 *weights*, not FP8 KV |
 | **Hopper (H100/H200)** | FP8 weights (FBGEMM/INC) | **fp8 (HW transformer engine)** | MTP / DFlash | Not a primary target — these cards are usually already running their own optimised stacks |
-| **Blackwell consumer (5090/5080/5070)** | AutoRound INT4 today; NVFP4 when vLLM kernels mature | fp8_e5m2 advisory (e4m3 path undertuned per #51) | MTP n=3 | Genesis treats Blackwell consumer as a separate regime — some Hopper-targeted patches don't apply |
+| **Blackwell consumer (5090 / PRO 6000 Blackwell / DGX Spark, sm_12x)** | AutoRound INT4 or **NVFP4 *weights*** (native FP4 GEMM) | **fp8_e4m3** = storage-only (≡e5m2; launcher-injected #246 for precision). **`nvfp4` KV does NOT work** (datacenter-only trtllm-gen FMHA, [#43562](https://github.com/vllm-project/vllm/issues/43562)). Compute-win KV = **INT8-PTH / TQ3** | MTP n=3 | **Measured (disc #571): e4m3≡e5m2, no KV-dtype perf lever.** The arch win is raw silicon + FP4 *weights*, not KV. DGX Spark (sm_121) = same family, plus low-bandwidth → favor KV *compression* for capacity |
 | **Blackwell DC (B100/B200/GB200)** | NVFP4 / FP8 weights | NVFP4 / fp8 | MTP / DFlash | Out of scope for club-3090 |
 
 The starred row (Ampere consumer) is the actual target of this stack; everything else is "should work, here's the data point we have".

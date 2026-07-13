@@ -44,7 +44,7 @@ assert_entry qwen3.6-27b:prism_eagle3 Ex0bit/Qwen3.6-27B-PRISM-EAGLE3 qwen3.6-27
 assert_entry qwen3.6-27b:unsloth-q4km unsloth/Qwen3.6-27B-MTP-GGUF qwen3.6-27b-gguf/unsloth-mtp-q4km
 assert_entry qwen3.6-27b:gguf_mmproj_f16 unsloth/Qwen3.6-27B-GGUF qwen3.6-27b-gguf
 assert_entry qwen3.6-27b:ubergarm-iq4ks ubergarm/Qwen3.6-27B-GGUF qwen3.6-27b-gguf/ubergarm-mtp-iq4ks
-assert_entry qwen3.6-35b-a3b:autoround-int4 Qwen/Qwen3-MoE-A3B-Instruct-AutoRound-Int4-mixed qwen3.6-35b-a3b-autoround-int4
+assert_entry qwen3.6-35b-a3b:autoround-int4 Intel/Qwen3.6-35B-A3B-int4-mixed-AutoRound qwen3.6-35b-a3b-autoround-int4
 assert_entry gemma-4-31b:autoround-int4 Intel/gemma-4-31B-it-int4-AutoRound gemma-4-31b-autoround-int4
 assert_entry gemma-4-31b:awq cyankiwi/gemma-4-31B-it-AWQ-4bit gemma-4-31b-it-AWQ-4bit
 assert_entry gemma-4-31b:assistant google/gemma-4-31B-it-assistant gemma-4-31b-it-assistant

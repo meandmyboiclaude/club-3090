@@ -1,34 +1,68 @@
 schema_version: 1
 id: vllm-stable
-display_name: vLLM stable release
+display_name: vLLM stable v0.24.0 (overlay-free)
 type: vllm
 stability: stable
 install:
-  method: pip
-  spec: vllm==0.20.2
+  method: docker_image
+  spec: vllm/vllm-openai:v0.24.0
 min_sm: 7.5
 supported_model_families:
   - dense
+  - gemma4-swa-dense
+  - gemma4-swa-moe
+  - gemma4-unified   # Gemma-4-12B unified arch — NATIVE in v0.24.0 (PR #44429 merged) → folds off
+                     # the ephemeral vllm-gemma4-unified image onto this engine (2026-07-01).
+  - qwen3-next-hybrid
+  - qwen3-next-moe
+  - qwen35-dense     # Tess-4-27B (qwen3_5 hybrid) — LIVE-VALIDATED on stock v0.24.0
+                     # 2026-07-11 (62.4 tok/s TP=2, forensics-week boots; slug
+                     # vllm/tess-dual-nvfp4). Family also covers Deckard-40B if a
+                     # vLLM path is ever added there.
 features:
-  int8_per_token_head: false
+  int8_per_token_head: true    # NATIVE for qwen3-next (uniform head dims) since v0.22.0 — that's why the
+                               # flag is true. NOT correct for Gemma-4 (hetero heads): on v0.24.0 int8-PTH
+                               # allocates the pool but SILENTLY craters recall past ~32K (needs #40391,
+                               # open/conflicting upstream) → gemma-31b-dual ships BF16 here, not int8-PTH.
+                               # (verified 2026-07-01; corrects the earlier "gemma native @262K" claim.)
   turboquant_3bit_nc: false
   marlin_pad_sub_tile_n: false
-  qwen3_coder_tool_parser: stable_only
+  qwen3_coder_tool_parser: false
 supported_kv_formats:
   - bf16
   - fp16
-  - fp8_e5m2
   - fp8_e4m3
+  - fp8_e5m2
+  - int8_per_token_head   # NATIVE for uniform-head-dim models (qwen3-next) since v0.22.0. Gemma-4 (hetero
+                          # head dims) needs the #40391 page-align overlay for CORRECT recall — and #40391 is
+                          # NOT native in v0.24.0 (it allocates the pool but recall craters past ~32K). So
+                          # Gemma-4 uses BF16 KV on THIS engine (gemma-31b-dual); int8-PTH here = qwen3-next
+                          # only. Gemma int8-PTH+#40391 (262K) stays on vllm-gemma-stable. (corrected 2026-07-01)
 supported_drafters:
-  - eagle3
+  - mtp
+  - mtp_assistant
 supported_weight_formats:
   - bf16
   - fp16
   - autoround
   - awq
   - gptq
+  - compressed-tensors
+  - fp8                   # qwen3.6-27b-fp8 (official e4m3 release) — Marlin W8A16 on Ampere sm_86
+                          # (memory win, no FP8 compute speedup). Drives the qwen "max accuracy" tier.
+  - modelopt              # nvidia modelopt checkpoints (NVFP4 / MIXED_PRECISION) — stock vLLM
+                          # supports --quantization modelopt; the FP4 KERNELS need Hopper/Blackwell,
+                          # which is encoded per-slug via required_sm=9.0 (vllm/qwen-27b-*-nvfp4),
+                          # NOT here (the loader itself is arch-agnostic).
 required_overlays: []
+# OVERLAY-FREE BY DESIGN. This is the load-bearing distinction (#254, 2026-06-05):
+# `derived_emittable` (CONTRACT-5) refuses any engine with vendored_overlays != []
+# as a derived-emission base, and vllm-stable IS used as the overlay-free base for
+# uncurated derives (profile-like). Overlay-CARRYING paths (Gemma int8 #40391, Gemma
+# duals #42006) live on the separate `vllm-gemma-stable` engine, which declares the
+# overlay provenance for diagnose-profile. Compose owns patch APPLICATION; engine owns
+# provenance — and a single engine cannot be both overlay-free (for derived bases) and
+# overlay-carrying (for Gemma's provenance), hence the two-engine split.
 vendored_overlays: []
 required_genesis: false
-notes: "Pinned to latest PyPI GA observed at implementation time: vLLM 0.20.2."
-
+notes: "Overlay-free stable vLLM — docker `vllm/vllm-openai:v0.22.0`. The VERSION lives only in install.spec: bump here on the next stable, the engine NAME never changes ('keep the tag, change the number'; #254 2026-06-05). This is the v0.22.0 SUCCESSOR to `vllm-nightly-clean` (whose nightly-bf610c2f image was purged from Docker Hub): the broad, overlay-free engine for Qwen3-Next (hybrid 27b + MoE 35B-A3B), generic `dense` transformers, and uncurated derived-emission bases. Slugs: `vllm/qwen-35b-a3b-dual`, `vllm/dual`, `vllm/minimal` (live-validated on stock v0.22.0 2026-06-05: TP=2 + MTP + tool-call clean, marlin-pad confirmed unnecessary). Gemma 4 paths stay on `vllm-gemma-stable` (it carries the #40391 per-head-KV + #42006 tool-parser overlays — an overlay-carrying engine cannot be a derived base, so it must remain separate). The pip `dense` lower-bound is `vllm-pip-baseline`. As the remaining `vllm-nightly-clean` slugs are validated on v0.22.0 they migrate here and that engine is deprecated. VLLM_IMAGE override still works."

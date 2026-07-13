@@ -1,0 +1,41 @@
+schema_version: 1
+model: gemma-4-12b
+# Seeded from the MEASURED gemma4-unified boot ground truth (dual RTX 3090
+# sm_86, TP=2, vLLM image vllm/vllm-openai:gemma4-unified, bf16 KV,
+# max_model_len 131072, gpu-memory-utilization 0.90, MTP assistant drafter
+# resident): boot log reported GPU KV cache size = 384,019 tokens, Available
+# KV cache memory = 8.16 GiB, Maximum concurrency = 2.93×. vLLM pre-reserves
+# the full KV pool, so measured per-card peak ≈ budget (0.90 × 24 = 21.6 GB);
+# implied non-KV resident = 21.6 − 8.76 (= 8.16 GiB) ≈ 12.84 GB/card.
+#
+# INTEGRITY NOTE: these rows are the measured ground truth, NOT back-fit to make
+# the predictor agree. REFINED 2026-06-04 — the gemma4_unified GLOBAL-KV per-token
+# term is now CALIBRATED to the measurement: kv-calc's gemma4-swa-dense branch uses
+# `measured_kv_growing_bpt_tp1=45,632` (= 22,816 B/tok/card) for the 12B, because
+# the 31B-derived global-only formula priced it at 32,768 B/tok/card
+# (8 global × 8 kv × 512 × bpe2 / TP2) — 1.44× too high. That fix moves predicted
+# token capacity ~204K → ~315K (vs the measured 384K). The shared activation +
+# cudagraph/overhead constants are intentionally LEFT UNTUNED (shared with
+# gemma-4-31b): the residual ~315K-vs-384K gap is the deliberately-conservative
+# `cudagraph_overhead_gb` (estimates ~1.70 GB/card at mem_util 0.90, but the
+# gemma4-unified image captured only 0.11 GiB — a tiny [1,2,4,8] graph set). Left
+# conservative ON PURPOSE: under-predicting capacity is the SAFE direction, and
+# trimming a SHARED term to fit one model would corrupt qwen / gemma-31b. The
+# verdict stays correct (TIGHT, boots, peak < 24 GB). To close the residual, add a
+# gemma4-unified-specific overhead calibration ONLY with ≥3 more anchors across
+# KV-format / ctx / TP — do NOT fit the shared term to this single boot.
+#
+# SLIDING-FIXED (per Codex review): the 22,816 B/tok/card above is TOTAL available
+# KV / tokens — NOT net of the ~0.08 GB/card sliding-window fixed term, which kv-calc
+# then ADDS separately. That ~0.08 GB double-count is intentional + conservative
+# (keeps the override one clean measured number); it is NOT an exact growing-vs-fixed
+# decomposition.
+rows:
+  - compose: vllm/gemma-12b-dual-bf16-mtp
+    vram_gb: 24
+    measured_peak_gb: 21.6
+    ctx_override: null
+    status: active
+    engine_pin: vllm-gemma4-unified
+    genesis_pin: null
+    source: "gemma4-unified boot log @2026-06-04 (KV 384,019 tok / 8.16 GiB avail / 2.93× conc, TP=2 bf16 131072 mem_util 0.90, MTP drafter resident)"

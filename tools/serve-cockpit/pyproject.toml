@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "club3090-cockpit"
+version = "0.1.0"
+description = "club-3090 serve cockpit — lazydocker-style TUI for the AI inference stack"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "club3090-tui-core>=0.1.0",
+    "textual>=0.60",
+    "rich>=13.0",
+    # The cockpit shells out to the repo's profile scripts (estate_cli.py,
+    # weights.py, compat.py, classifier.py, patch_attribution.py) which
+    # `import yaml`. Declaring PyYAML here means a `uv pip install -e` /
+    # `pip install` venv has it — otherwise `c3`'s python3 subprocess (the
+    # venv interpreter) hits `ModuleNotFoundError: No module named 'yaml'`
+    # on Doctor → diagnose-estate (works only if SYSTEM python3 has it).
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+c3 = "club3090_cockpit.__main__:main"
+
+# club3090-tui-core is an in-repo sibling package (tools/tui-core), not on PyPI.
+# Wire it as a local editable path so `uv pip install -e .` resolves it from the
+# checkout. Plain `pip` doesn't read this — for pip, install tui-core first
+# (`pip install -e ../tui-core`) then this package. See README "How to run".
+[tool.uv.sources]
+club3090-tui-core = { path = "../tui-core", editable = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["club3090_cockpit"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = [
+    "ignore::pytest.PytestCollectionWarning",
+    "ignore::DeprecationWarning",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.0",
+    "pytest-asyncio>=1.4.0",
+]

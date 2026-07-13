@@ -71,8 +71,11 @@ valid_tp:
   - 1
   - 2
 requires_genesis: false               # Gemma 4 family doesn't need Genesis (no DeltaNet quirks)
-# kv-calc.py models MoE + asymmetric KV heads (8 sliding / 2 global) as of
-# v0.7.3. Calibration is low-anchor (AWQ no-MTP + AWQ-MTP rows only); add
-# longer context / lower max_num_seqs rows before treating projections as
-# production-grade.
+# kv-calc.py models MoE + asymmetric KV heads (8 sliding / 2 global), and as of
+# #326 its KV-pool floor is per-sequence (capped at the legacy 1 GB) rather than a
+# flat 1 GB — so the KV-light single-card AWQ+MTP slug projects TIGHT (correct:
+# 0.78 GB growing pool holds 17,490 tok ≥ 16,384 max_ctx, boots+serves live
+# 2026-06-06) instead of a false FAIL, without disabling the gate on a config we
+# actively ship the drafter on. Calibration corpus is empty (both slugs
+# kvcalc_key=SKIP) pending the #464 rebench anchor; projections stay directional.
 kv_calc_supported: true

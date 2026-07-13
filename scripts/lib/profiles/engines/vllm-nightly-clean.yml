@@ -2,7 +2,7 @@ schema_version: 1
 id: vllm-nightly-clean
 display_name: vLLM nightly (no Genesis)
 type: vllm
-stability: nightly
+stability: deprecated
 install:
   method: docker_image
   spec: vllm/vllm-openai:nightly-bf610c2f56764e1b30bc6065f4ceace3d6e59036
@@ -39,4 +39,4 @@ supported_weight_formats:
 required_overlays: []
 vendored_overlays: []
 required_genesis: false
-notes: "Unconstrained-nightly path: free to bump to whatever's current on Docker Hub, since no Genesis patches are anchored here. Per the TQ3-only Genesis policy (Genesis is strictly required only for turboquant_3bit_nc KV), this engine accepts every supported model family — non-TQ3 composes for Qwen 3.6-27B (qwen3-next-hybrid) and Gemma 4-31B (gemma4-swa-dense) route here, alongside the new MoE additions (qwen3-next-moe, gemma4-swa-moe). For Qwen3-Next workloads at long context (>21-26K), Genesis-anchored vllm-nightly-mtp is *recommended* for Cliff 2 mitigations but not strictly required to boot. Excludes turboquant_3bit_nc KV (Genesis-only feature) — TQ3 composes must route to vllm-nightly-mtp. Launch exports VLLM_NIGHTLY_SHA from this spec; VLLM_IMAGE override still works."
+notes: "DEPRECATED 2026-06-06 (#326): purged nightly (nightly-bf610c2f, 404 on Docker Hub), zero registry users — its last users (the gemma-4-26b-a4b slugs) moved to AWQ on stock vllm-stable@v0.22.0. This was the FINAL purged-nightly engine; the nightly-engine cleanup is now complete (mtp/full/dflash/clean all deprecated). Retained (not deleted) for reference. ORIGINAL: Unconstrained-nightly path: free to bump to whatever's current on Docker Hub, since no Genesis patches are anchored here. Per the TQ3-only Genesis policy (Genesis is strictly required only for turboquant_3bit_nc KV), this engine accepts every supported model family — non-TQ3 composes for Qwen 3.6-27B (qwen3-next-hybrid) and Gemma 4-31B (gemma4-swa-dense) route here, alongside the new MoE additions (qwen3-next-moe, gemma4-swa-moe). For Qwen3-Next workloads at long context (>21-26K), Genesis-anchored vllm-nightly-mtp is *recommended* for Cliff 2 mitigations but not strictly required to boot. Excludes turboquant_3bit_nc KV (Genesis-only feature) — TQ3 composes must route to vllm-nightly-mtp. Launch exports VLLM_NIGHTLY_SHA from this spec; VLLM_IMAGE override still works."

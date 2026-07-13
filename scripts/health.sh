@@ -17,14 +17,24 @@
 #
 # Env:
 #   URL          API base. Default: http://localhost:8020
+#   CONTAINER    Target a specific named container instead of auto-matching.
+#                Default: unset → auto-match any recognized engine-prefix
+#                container (vllm-/llama-cpp-/ik-llama-/sglang-/beellama-).
 #   LOG_LINES    How many log lines to scan for AL/errors. Default: 200
 #   WATCH_INTERVAL seconds between refreshes for --watch. Default: 5
 
 set -uo pipefail
 
 URL="${URL:-http://localhost:8020}"
+CONTAINER="${CONTAINER:-}"
 LOG_LINES="${LOG_LINES:-200}"
 WATCH_INTERVAL="${WATCH_INTERVAL:-5}"
+
+# Engine-prefix regex used when CONTAINER= is unset: any recognized inference
+# engine, not just qwen36-27b. (qwen36-27b containers — vllm-qwen36-27b /
+# llama-cpp-qwen36-27b — still match the first two alternatives, so a running
+# qwen container is selected identically to before.)
+ENGINE_PREFIX_RE='^(vllm-|llama-cpp-|ik-llama-|sglang-|beellama-)'
 
 # Color helpers
 if [[ -t 1 ]]; then
@@ -66,9 +76,14 @@ probe() {
   fi
   ok "Serving model: ${model_name}  (engine: ${engine})"
 
-  # 2. Container — find any qwen36-27b container
+  # 2. Container — target CONTAINER= if set, else any recognized engine container
   local container container_id status_str started uptime
-  container=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -E '^(vllm-qwen36-27b|llama-cpp-qwen36-27b)' | head -1)
+  if [[ -n "$CONTAINER" ]]; then
+    # Exact-name match for the user-specified container.
+    container=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -Fx "$CONTAINER" | head -1)
+  else
+    container=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -E "$ENGINE_PREFIX_RE" | head -1)
+  fi
   if [[ -z "$container" ]]; then
     warn "No matching container running on this host (server may be on another machine, or running as a host process)"
     container=""
