@@ -73,7 +73,9 @@ services:
       # mismatch/OOM; never overrides an explicit --kv-cache-memory.
       - VLLM_ENABLE_STARTUP_PLAN=1
       # [2026-07-13 Wave-3b] arms the torch profiler endpoints (inert until /start_profile)
+      # DEV_MODE required: /start_profile //stop_profile are dev-mode-gated on dev1060.
       - VLLM_TORCH_PROFILER_DIR=/profiles
+      - VLLM_SERVER_DEV_MODE=1
       - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
       - VLLM_FLOAT32_MATMUL_PRECISION=high
       - VLLM_USE_FLASHINFER_SAMPLER=1
