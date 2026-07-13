@@ -38,9 +38,19 @@ COMPOSE="$CLUB/models/qwen3.6-27b/vllm/compose/single/tools-text-aibox.yml"
 #   crash fixes) + PN81/83. Genesis at 8e15d1f (dev799 KNOWN_GOOD + PN8 re-anchor).
 # Rollback (full build): tag validated-qwopus-3f5a1e17 (dev424) + image
 #   vllm-rollback:3f5a1e17-20260707; older tag validated-qwopus-b53b1c7 (2dc5938) + vllm-rollback:b53b1c7-20260625.
-TAG=validated-qwopus-69715823
-PIN_IMG=nightly-69715823df89b11ee684b84066390cbb9092d5c1
-PIN_VER=0.23.1rc1.dev799+g69715823d
+# [2026-07-13 PROMOTE] dev1060 (nightly-9e57de71) promoted to validated after full
+#   gate: verify-full 6/6, verify-stress 8/8, bench idle 75.6/99.0 (+1.7%/+0.6% vs
+#   same-day dev799 baseline). Brings 481e481b (hybrid partial prefix-cache) +
+#   51878e5b (KV layout repack). PN80 re-anchored dual-form; genesis re-anchors
+#   PN8/PN12/P34/P83 on reanchor-dev1060 (d5e5604..930c3ff), guards.py pin added.
+#   First-boot KV ValueError during swap = transient VRAM-release race (restart
+#   policy recovers); not a pin defect.
+# Rollback (full build): tag validated-qwopus-69715823 (dev799) + image
+#   vllm-rollback:69715823-20260713; older: validated-qwopus-3f5a1e17 (dev424) +
+#   vllm-rollback:3f5a1e17-20260707.
+TAG=validated-qwopus-9e57de71
+PIN_IMG=nightly-9e57de7197f234f9d9187715d96e07e007048c0f
+PIN_VER=0.23.1rc1.dev1060+g9e57de719
 
 log() { echo "[vllm-boot-guard] $*"; }
 
