@@ -62,7 +62,11 @@ COMPOSE="$CLUB/models/qwen3.6-27b/vllm/compose/single/tools-text-aibox.yml"
 # Rollback (full build): tag validated-qwopus-9e57de71 (dev1060 stock) + compose image
 #   nightly-9e57de7197f234f9d9187715d96e07e007048c0f; older: validated-qwopus-69715823
 #   (dev799) + vllm-rollback:69715823-20260713.
-TAG=validated-qwopus-3da1671f
+# [2026-07-13 WAVE-1] engine-decides lane-2 (GENESIS_SNDR_TRUST_DEFAULT_ON) + WAVE-1
+#   tier-A/B flags: lane-2 5->29 applied / 0 failed. PN389 dev1060 re-anchor (genesis
+#   72412ee) fixed NameError 400s on ALL structured output (grammar-compile timeouts now
+#   live). Gate: grammar 12/12, tool 2/15 residual, bench 76.5/102.9 (par), burst 236+.
+TAG=validated-qwopus-3da1671f-w1
 PIN_IMG=localhost/vllm-qwen36-endgame:dev1060cherry-2204-20260713
 PIN_VER=0.1.dev1+g3da1671fc.d20260713
 

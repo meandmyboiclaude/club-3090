@@ -134,6 +134,37 @@ services:
       # [endgame 2026-07-13] BUG-069 residual (1-2/15 tool-storm leaks post-#48361):
       # parse fallback for malformed qwen3coder tool-call XML (vllm#41466 backport).
       - GENESIS_ENABLE_PN56_QWEN3CODER_XML_FALLBACK=1
+      # ===== ENGINE-DECIDES WAVE (2026-07-13 user directive) =====
+      # Restore the registry's own default_on semantics: the sndr dispatcher +
+      # config_detect + arch gates decide which of the 209 net-new v12 patches
+      # engage on THIS stack (the import had forced default_on->off for its
+      # no-regression guarantee). Still spec-driven (SNDR_APPLY_VIA_SPECS).
+      # Patches that select but fail to anchor WARN -> those get fixes.
+      - GENESIS_LEGACY_DEFAULT_ON=1
+      # lane-2: trust the sndr registry's own default_on set (28 patches; per-patch
+      # config gates still filter, GENESIS_DISABLE_* still vetoes):
+      - GENESIS_SNDR_TRUST_DEFAULT_ON=1
+      # ===== end ENGINE-DECIDES WAVE =====
+      # ----- WAVE-1 Tier A (correctness — triage 2026-07-13) -----
+      - GENESIS_ENABLE_PN402_SANITIZE_INVALID_DRAFT_TOKENS=1
+      - GENESIS_ENABLE_PN389_GRAMMAR_TIMEOUTS=1
+      - GENESIS_ENABLE_PN28_MERGE_ATTN_NAN_GUARD=1
+      - GENESIS_ENABLE_PN526_THREADSAFE_SO_TOKENIZER=1
+      - GENESIS_ENABLE_PN346B=1
+      - GENESIS_ENABLE_PN372_EAGLE_ZERO_SEQLEN_GUARD=1
+      - GENESIS_ENABLE_SPN71_THINKING_TAG_NORMALIZE=1
+      - GENESIS_ENABLE_SPN73_TOOL_ARGS_SAFE_NORMALIZE=1
+      # ----- WAVE-1 Tier B (low-risk perf/arch-caps) -----
+      - GENESIS_ENABLE_PN296_ARCH_PROFILE_INIT=1
+      - GENESIS_ENABLE_PN300_UNIVERSAL_TRITON_AUTOTUNE_WRAPPER=1
+      - GENESIS_ENABLE_PN298_FLA_CHUNK_O_ARCH_WARPS=1
+      - GENESIS_ENABLE_PN299_FLA_MULTI_ARCH_WARPS=1
+      - GENESIS_ENABLE_PN299B=1
+      - GENESIS_ENABLE_PN299C=1
+      - GENESIS_ENABLE_PN299D=1
+      - GENESIS_ENABLE_PN299E=1
+      - GENESIS_ENABLE_PN345=1
+      - GENESIS_ENABLE_PN354_GDN_USE_EXP2=1
       - GENESIS_ENABLE_P62_STRUCT_OUT_SPEC_TIMING=1
       # OOM Protection
       - GENESIS_ENABLE_PN32_GDN_CHUNKED_PREFILL=1
