@@ -128,9 +128,12 @@ services:
       # Performance
       - GENESIS_ENABLE_P40=1
       - GENESIS_ENABLE_P82=1
-      # [2026-07-14] PN50=1: kernel non-pow2 arange fixed (b23b704, bit-exact parity);
-      # boot-8/9 replay crash attributed to P98 (dropped) — PN50 exonerated by BISECT-9
-      - GENESIS_ENABLE_PN50_GDN_FUSED_PROJ=1
+      # [2026-07-14] PN50=0 FINAL for this wave: kernel arange fixed (b23b704) but the
+      # WRAPPER torch.empty()s 4 outputs per call inside the compiled region -> inductor
+      # bakes the alloc into the captured graph -> aten::empty stable-ABI failure on replay
+      # (boots 8/9/12 signature; boot 10 green with PN50=0). Needs out-tensor pooling or
+      # capture-time preallocation — A/B basket item, not a flag flip.
+      - GENESIS_ENABLE_PN50_GDN_FUSED_PROJ=0
       # Correctness
       - GENESIS_ENABLE_P91=1
       - GENESIS_ENABLE_P107_MTP_TRUNCATION_DETECTOR=1
@@ -171,8 +174,8 @@ services:
       - GENESIS_ENABLE_PN354_GDN_USE_EXP2=1
       # ----- WAVE-2 (2026-07-13: remaining triage candidates; PN77 held for quality-A/B,
       #       PN520 verified-unnecessary — Qwopus split-BF16 in_proj loads fine, parity 31/31) -----
-      # BISECT-12 [sample_tokens state error, boot 11]: # - GENESIS_ENABLE_P101=1
-      # BISECT-12 [sample_tokens state error, boot 11]: # - GENESIS_ENABLE_P38B_COMPILE_SAFE=1
+      - GENESIS_ENABLE_P101=1
+      - GENESIS_ENABLE_P38B_COMPILE_SAFE=1
       # DROPPED per registry conflicts_with (conflicts_with PN390; ngram-oriented, we run MTP):
       # - GENESIS_ENABLE_P71_BLOCK_VERIFY=1
       - GENESIS_ENABLE_P88_PREFIX_CACHE_STATS_DEDUP=1
@@ -197,7 +200,7 @@ services:
       - GENESIS_ENABLE_PN16_V6_STREAMING_TRUNCATOR=1
       # DROPPED per registry conflicts_with (conflicts_with P7/P7b (same forward_cuda site)):
       # - GENESIS_ENABLE_PN204_DUAL_STREAM_INPROJ=1
-      # BISECT-12 [sample_tokens state error, boot 11]: # - GENESIS_ENABLE_PN25_SILU_INDUCTOR_SAFE=1
+      - GENESIS_ENABLE_PN25_SILU_INDUCTOR_SAFE=1
       # DROPPED per registry conflicts_with (conflicts_with PN57):
       # - GENESIS_ENABLE_PN26_TQ_UNIFIED=1
       - GENESIS_ENABLE_PN289_PROCESS_INFO=1
@@ -207,13 +210,13 @@ services:
       # on first request (live-hit boot 7). Premise is A5000/Ampere launch overhead;
       # we're Ada. Re-vendoring the deleted function = reverting an upstream perf win.
       # - GENESIS_ENABLE_PN292_REVERT_FUSED_MAMBA_POSTPROCESS=1
-      # BISECT-12 [sample_tokens state error, boot 11]: # - GENESIS_ENABLE_PN293_MAMBA_ATTN_PREFILL_FASTPATH=1
-      # BISECT-12 [sample_tokens state error, boot 11]: # - GENESIS_ENABLE_PN294_UNSPLIT_MTP_ATTN_GROUPS=1
+      - GENESIS_ENABLE_PN293_MAMBA_ATTN_PREFILL_FASTPATH=1
+      - GENESIS_ENABLE_PN294_UNSPLIT_MTP_ATTN_GROUPS=1
       - GENESIS_ENABLE_PN31_FA_VARLEN_PERSISTENT_OUT=1
-      # BISECT-12 [sample_tokens state error, boot 11]: # - GENESIS_ENABLE_PN340=1
-      # BISECT-12 [sample_tokens state error, boot 11]: # - GENESIS_ENABLE_PN341=1
-      # BISECT-12 [sample_tokens state error, boot 11]: # - GENESIS_ENABLE_PN350=1
-      # BISECT-12 [sample_tokens state error, boot 11]: # - GENESIS_ENABLE_PN351=1
+      - GENESIS_ENABLE_PN340=1
+      - GENESIS_ENABLE_PN341=1
+      - GENESIS_ENABLE_PN350=1
+      - GENESIS_ENABLE_PN351=1
       # [2026-07-14] DROPPED — SUPERSEDED MITIGATION: PN353B downgrades TQ _cudagraph_support
       # UNIFORM_BATCH -> UNIFORM_SINGLE_TOKEN_DECODE (kills the FULL leg of FULL_AND_PIECEWISE,
       # our doubly-validated #1 decode win, -5-8% TPS) to dodge the _prefill_attention .tolist()
