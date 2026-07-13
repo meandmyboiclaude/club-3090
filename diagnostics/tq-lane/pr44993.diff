@@ -1,0 +1,302 @@
+diff --git a/tests/v1/structured_output/test_reasoning_structured_output.py b/tests/v1/structured_output/test_reasoning_structured_output.py
+index 861e919c102a..457c34a1d5bc 100644
+--- a/tests/v1/structured_output/test_reasoning_structured_output.py
++++ b/tests/v1/structured_output/test_reasoning_structured_output.py
+@@ -73,6 +73,7 @@ def mock_request_with_structured_output(self):
+         request.all_token_ids = [1, 2, 3, 4, 5, 6, 7, 8]
+         request.num_computed_tokens = 5
+         request.num_output_placeholders = 0
++        request.request_id = "mock_req"
+         return request
+ 
+     @pytest.fixture
+@@ -208,53 +209,143 @@ def test_should_advance_reasoning_just_ended(
+             mock_request_with_structured_output
+         )
+ 
+-        # Should set reasoning_ended to True but return False for this step
++        # The scheduler trims the reasoning prefix before advancing the grammar.
+         assert (
+             mock_request_with_structured_output.structured_output_request.reasoning_ended
+             is True
+         )
+-        assert result is False
++        assert result is True
++
++    def test_should_advance_reasoning_already_ended(
++        self,
++        manager_with_reasoner,
++        mock_request_with_structured_output,
++    ):
++        """Test should_advance when reasoning has already ended."""
++        # Set reasoning as already ended
++        (
++            mock_request_with_structured_output.structured_output_request
++        ).reasoning_ended = True
++
++        result = manager_with_reasoner.should_advance(
++            mock_request_with_structured_output
++        )
++
++        # Should return True since reasoning has ended
++        assert result is True
+ 
+-    def test_should_advance_reasoning_just_ended_with_spec_decode_structural_tag(
++    def test_should_advance_uses_new_token_ids_when_provided(
+         self,
+         manager_with_reasoner,
+         mock_request_with_structured_output,
+     ):
+-        """When reasoning ends this step, advance immediately for structural
+-        tags with speculative decoding."""
++        """Regression for #43388: when caller passes new_token_ids, the
++        reasoner sees the exact multi-token delta rather than the
++        placeholder-derived window.
++        """
+         structured_req = mock_request_with_structured_output.structured_output_request
+         structured_req.reasoning_ended = False
+-        structured_req.structured_output_key = (
+-            StructuredOutputOptions.STRUCTURAL_TAG,
+-            "{}",
+-        )
++
++        end_token_id = 248069
++
+         reasoner = MockReasoner(tokenizer=Mock())
+-        reasoner.is_reasoning_end_streaming.return_value = True
++        # Detection mirrors the real Qwen3 parser: end token in the delta.
++        reasoner.is_reasoning_end_streaming = Mock(
++            side_effect=lambda input_ids, delta_ids: end_token_id
++            in list(delta_ids)
++        )
+         structured_req.reasoner = reasoner
+ 
+-        manager_with_reasoner.vllm_config.speculative_config = Mock()
++        # Scenario from #43388: async + spec decode K=4, 4 tokens accepted
++        # but only 1 placeholder remains (some drafts were rejected).
++        # The placeholder math would yield delta=[271] and miss </think>.
++        # Passing new_token_ids must override that.
++        new_token_ids = [9, 198, end_token_id, 271]
++        mock_request_with_structured_output.all_token_ids = (
++            [1, 2, 3, 4, 5] + new_token_ids
++        )
++        mock_request_with_structured_output.num_computed_tokens = 9
++        mock_request_with_structured_output.num_output_placeholders = 1
+ 
+         result = manager_with_reasoner.should_advance(
+-            mock_request_with_structured_output
++            mock_request_with_structured_output,
++            new_token_ids=new_token_ids,
+         )
+ 
++        # First call to is_reasoning_end_streaming was with the full
++        # new_token_ids (not the truncated placeholder window).
++        first_call = reasoner.is_reasoning_end_streaming.call_args_list[0]
++        _, called_delta = first_call.args
++        assert list(called_delta) == new_token_ids
++
+         assert structured_req.reasoning_ended is True
+         assert result is True
+ 
+-    def test_should_advance_reasoning_already_ended(
++    def test_should_advance_without_new_token_ids_falls_back(
+         self,
+         manager_with_reasoner,
+         mock_request_with_structured_output,
+     ):
+-        """Test should_advance when reasoning has already ended."""
+-        # Set reasoning as already ended
+-        (
+-            mock_request_with_structured_output.structured_output_request
+-        ).reasoning_ended = True
++        """Backward compat: callers that don't pass new_token_ids keep
++        the original placeholder-derived delta window.
++        """
++        structured_req = mock_request_with_structured_output.structured_output_request
++        structured_req.reasoning_ended = False
++        reasoner = MockReasoner(tokenizer=Mock())
++        reasoner.is_reasoning_end_streaming.return_value = False
++        structured_req.reasoner = reasoner
++
++        mock_request_with_structured_output.all_token_ids = [1, 2, 3, 4, 5]
++        mock_request_with_structured_output.num_computed_tokens = 5
++        mock_request_with_structured_output.num_output_placeholders = 2
+ 
+         result = manager_with_reasoner.should_advance(
+             mock_request_with_structured_output
+         )
+ 
+-        # Should return True since reasoning has ended
++        # placeholder window: start = 5 - 2 = 3, delta = [4, 5]
++        _, called_delta = reasoner.is_reasoning_end_streaming.call_args[0]
++        assert list(called_delta) == [4, 5]
++        assert result is False
++
++    def test_should_advance_trims_reasoning_prefix_for_json(
++        self,
++        manager_with_reasoner,
++        mock_request_with_structured_output,
++    ):
++        """JSON uses the common trim-then-advance path at the boundary."""
++        structured_req = mock_request_with_structured_output.structured_output_request
++        structured_req.reasoning_ended = False
++        structured_req.structured_output_key = (
++            StructuredOutputOptions.JSON_OBJECT,
++            "{}",
++        )
++
++        marker = 248069
++
++        class MarkerReasoner:
++            def __init__(self, *_, **__):
++                pass
++
++            def is_reasoning_end_streaming(self, input_ids, delta_ids):
++                return marker in list(delta_ids)
++
++        structured_req.reasoner = MarkerReasoner()
++
++        new_token_ids = [9, 198, marker, 271, 5005]
++        mock_request_with_structured_output.all_token_ids = (
++            [1, 2, 3] + new_token_ids
++        )
++
++        result = manager_with_reasoner.should_advance(
++            mock_request_with_structured_output,
++            new_token_ids=new_token_ids,
++        )
++
++        structured_req.grammar.accept_tokens.assert_not_called()
++        assert structured_req.reasoning_ended is True
+         assert result is True
++        assert structured_req.reasoning_end_token_index == 5
++        assert manager_with_reasoner.trim_reasoning_for_advance(
++            mock_request_with_structured_output, new_token_ids
++        ) == [271, 5005]
+diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
+index 483cc2f543bb..a2a9c48941fc 100644
+--- a/vllm/v1/core/sched/scheduler.py
++++ b/vllm/v1/core/sched/scheduler.py
+@@ -1643,7 +1643,9 @@ def update_from_output(
+                 request.status = RequestStatus.FINISHED_STOPPED
+                 stopped = True
+ 
+-            if new_token_ids and self.structured_output_manager.should_advance(request):
++            if new_token_ids and self.structured_output_manager.should_advance(
++                request, new_token_ids=new_token_ids
++            ):
+                 struct_output_request = request.structured_output_request
+                 assert struct_output_request is not None
+                 grammar = struct_output_request.grammar
+diff --git a/vllm/v1/structured_output/__init__.py b/vllm/v1/structured_output/__init__.py
+index 34f775257be1..27a4b26f8381 100644
+--- a/vllm/v1/structured_output/__init__.py
++++ b/vllm/v1/structured_output/__init__.py
+@@ -7,7 +7,6 @@
+ from typing import TYPE_CHECKING
+ 
+ from vllm.config import VllmConfig
+-from vllm.logger import init_logger
+ from vllm.reasoning import ReasoningParserManager
+ from vllm.tokenizers import cached_tokenizer_from_config
+ from vllm.utils.import_utils import LazyLoader
+@@ -15,7 +14,6 @@
+ from vllm.v1.structured_output.backend_types import (
+     StructuredOutputBackend,
+     StructuredOutputGrammar,
+-    StructuredOutputOptions,
+ )
+ from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
+ 
+@@ -30,9 +28,6 @@
+     torch = LazyLoader("torch", globals(), "torch")
+ 
+ 
+-logger = init_logger(__name__)
+-
+-
+ class StructuredOutputManager:
+     """Engine-level manager for structured output requests."""
+ 
+@@ -368,7 +363,11 @@ def should_fill_bitmask(self, request: "Request") -> bool:
+             return request.structured_output_request.reasoning_ended
+         return True
+ 
+-    def should_advance(self, request: "Request") -> bool:
++    def should_advance(
++        self,
++        request: "Request",
++        new_token_ids: list[int] | None = None,
++    ) -> bool:
+         if not request.use_structured_output:
+             return False
+ 
+@@ -391,37 +390,40 @@ def should_advance(self, request: "Request") -> bool:
+         if structured_req.reasoning_ended:
+             return True
+ 
+-        # Check if reasoning ends in *this* step
+-        delta_from = request.num_computed_tokens - request.num_output_placeholders
++        # Check if reasoning ends in *this* step.
++        # When the caller passes new_token_ids (the tokens that were just
++        # appended this step), use it directly as the delta window. The
++        # placeholder-derived fallback assumes num_output_placeholders ==
++        # len(new_token_ids), which breaks under async scheduling + spec
++        # decode when some drafts are rejected (#43388): the placeholder
++        # count remains > 0 after the step and the computed delta window
++        # starts past the reasoning-end marker.
+         all_token_ids = request.all_token_ids
+-        start = (
+-            delta_from if delta_from >= 0 else max(len(all_token_ids) + delta_from, 0)
+-        )
+-        if reasoner.is_reasoning_end_streaming(
+-            all_token_ids, itertools.islice(all_token_ids, start, None)
+-        ):
++        if new_token_ids:
++            # The tokens were already appended this step, so the step window
++            # starts exactly len(new_token_ids) from the end.
++            start = len(all_token_ids) - len(new_token_ids)
++            delta_ids: Iterable[int] = new_token_ids
++        else:
++            delta_from = (
++                request.num_computed_tokens - request.num_output_placeholders
++            )
++            start = (
++                delta_from
++                if delta_from >= 0
++                else max(len(all_token_ids) + delta_from, 0)
++            )
++            delta_ids = itertools.islice(all_token_ids, start, None)
++        if reasoner.is_reasoning_end_streaming(all_token_ids, delta_ids):
+             structured_req.reasoning_ended = True
+ 
+-            # Reasoning just ended this step. Defer FSM advance until the next
+-            # pass (see reasoning_ended check above) for JSON/regex/choice/grammar:
+-            # advancing on the closing boundary token can accept tokens that still
+-            # belong to the reasoning stream. Structural tags are the only safe
+-            # same-step exception: they model phased output (e.g. thinking tag ->
+-            # answer tag), and speculative decoding must run grammar.validate_tokens
+-            # on draft tokens produced immediately after that transition.
+-            if (
+-                self.vllm_config.speculative_config is not None
+-                and structured_req.structured_output_key[0]
+-                == StructuredOutputOptions.STRUCTURAL_TAG
+-            ):
+-                # The scheduler will advance the grammar with this step's
+-                # tokens right away, but the step still contains reasoning
+-                # content up to and including the end marker. Record where
+-                # it ends so trim_reasoning_for_advance() can drop it.
+-                structured_req.reasoning_end_token_index = (
+-                    self._find_reasoning_end_index(reasoner, all_token_ids, start)
+-                )
+-                return True
++            # Record the boundary so the scheduler can exclude reasoning tokens.
++            end_index = self._find_reasoning_end_index(
++                reasoner, all_token_ids, start
++            )
++
++            structured_req.reasoning_end_token_index = end_index
++            return True
+ 
+         return False
+ 
