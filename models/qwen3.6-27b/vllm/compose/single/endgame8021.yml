@@ -64,6 +64,8 @@ services:
       - ./cache-override.yaml:/config/cache-override.yaml:ro
     environment:
       # - CUDA_VISIBLE_DEVICES=0
+      # [2026-07-14] unbuffered stdout — crash-loop tracebacks were lost in the 8K block buffer at exit
+      - PYTHONUNBUFFERED=1
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
       - VLLM_WORKER_MULTIPROC_METHOD=spawn
       - NCCL_CUMEM_ENABLE=0
@@ -209,6 +211,10 @@ services:
       - GENESIS_ENABLE_PN519_SWA_TILE_BASE=1
       - GENESIS_ENABLE_PN57_TQ_CENTROIDS_DISK_CACHE=1
       - GENESIS_ENABLE_PN65=1
+      # [2026-07-14] hand PN65 to lane-2: v3 logging-filter supersedes lane-1's v2
+      # middleware (retired — its api_server import at apply time blacked out the
+      # remaining apply log and hid the PN519 spec-loop failure).
+      - GENESIS_SNDR_OWNS_PN65=1
       # DROPPED per registry conflicts_with (conflicts_with PN54+PN59 (live prod)):
       # - GENESIS_ENABLE_PN79_INPLACE_SSM_STATE=1
       - GENESIS_ENABLE_PN79_V2_MD5_CHUNK=1
@@ -217,7 +223,8 @@ services:
       - GENESIS_ENABLE_SNDR_WORKSPACE_001=1
       - GENESIS_ENABLE_P62_STRUCT_OUT_SPEC_TIMING=1
       # OOM Protection
-      - GENESIS_ENABLE_PN32_GDN_CHUNKED_PREFILL=1
+      # DROPPED per registry conflicts_with (conflicts_with P28 (live prod GDN prealloc); registry: "Operator MUST disable P28 before enabling PN32"):
+      # - GENESIS_ENABLE_PN32_GDN_CHUNKED_PREFILL=1
       - GENESIS_ENABLE_PN12_FFN_INTERMEDIATE_POOL=1
       - GENESIS_ENABLE_P15B_FA_VARLEN_CLAMP=1
       - GENESIS_ENABLE_PN66=1
