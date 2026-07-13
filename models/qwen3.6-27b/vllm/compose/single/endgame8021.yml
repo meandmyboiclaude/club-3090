@@ -178,8 +178,15 @@ services:
       - GENESIS_ENABLE_P88_PREFIX_CACHE_STATS_DEDUP=1
       - GENESIS_ENABLE_P89_REASONING_TOKENS_USAGE=1
       - GENESIS_ENABLE_P91B=1
-      - GENESIS_ENABLE_P98=1
-      - GENESIS_ENABLE_P99=1
+      # [2026-07-14] DROPPED — COLLISION: P98 reverts the TQ WorkspaceManager (dev-era perf
+      # hotfix) -> per-call allocation returns to the decode path -> aten::empty inside the
+      # FULL-captured graph -> stable-ABI RuntimeError on first tool request (boots 8+9,
+      # survived BISECT-9 because it sits in turboquant_attn not the bisected cluster).
+      # WorkspaceManager is the PREREQUISITE for /fixes PN79 cudagraph-safe scratch + FULL CG.
+      # - GENESIS_ENABLE_P98=1
+      # P99 memoizes WorkspaceManager.get_simultaneous — held with P98 for the clean boot;
+      # re-eval standalone after the gate is green (pure memoization, likely safe alone).
+      # - GENESIS_ENABLE_P99=1
       # BISECT-9 [2026-07-14 stable-ABI aten::empty replay crash]: # - GENESIS_ENABLE_PN106_GDN_H_POOL=1
       # BISECT-9 [2026-07-14 stable-ABI aten::empty replay crash]: # - GENESIS_ENABLE_PN118=1
       # BISECT-9 [2026-07-14 stable-ABI aten::empty replay crash]: # - GENESIS_ENABLE_PN118_V2_MD5_TURBOQUANT_ATTN=1
