@@ -169,7 +169,9 @@ counts: retired=46 · upstream_merged=8 · version_gated=7 ·
         optional_absent=23 · anchor_drift=10        roundtrip_fail=0
 ```
 
-**Clean: 118 anchors · Re-anchored: 0 · BLOCKED: 5 patches (7 sub-anchors).**
+**Clean: 118 anchors · Re-anchored: 2 (PN385, PN525) · Absorbed-native: 3 (PN38, PN40, P85) · BLOCKED: 0.**
+*(2026-07-14 resolution pass — every former BLOCKED entry verified against the
+installed dev1060 source; verdicts below. Nothing dropped.)*
 
 Genuine drift dispositions (nothing silently dropped):
 
@@ -178,11 +180,11 @@ Genuine drift dispositions (nothing silently dropped):
 | PN12 (shared) | `pN12_silu_and_mul_pool` | lane-1 covered — our dev1060 re-anchor 3da5370 is live; his dev748 form drifts (SiluAndMul gained forward_cpu). Ours wins, test-verified. |
 | P34 (shared) | `p34_deadlock_guard` | lane-1 covered — our re-anchor d1a01cb (_mamba_block_aligned_split rewrite). Ours wins. |
 | P3 (shared) | `p3_bf16_fp8_cast` | lane-1 covered — our P3 form is the live one (currently skip-gated on this profile anyway). |
-| **PN525** (net-new) | `pn525_no_toolcall_cleaned_content` | **BLOCKED** — dev1060 rewrote the no-tool-calls branch of `parser/abstract_parser.py` and now natively handles required/named tool-choice empty-content (the class of bug PN525 targets). Needs semantic review: likely upstream-absorbed; a text re-anchor would double-handle. |
-| **P85** (net-new) | `p85_mamba_cache_blocks_shadow` | **BLOCKED** — dev1060 (481e481b) added native partial-tail-block hybrid prefix caching to `MambaManager.cache_blocks` (+ `hash_block_size` machinery). P85's fine-shadow store overlaps this; needs functional evaluation (probable retire-on-pin), not a re-anchor. |
-| **PN38** (net-new) | `pN38_a_qkv_proj_call`, `pN38_c_conditional_fused_kv` | **BLOCKED (upstream-absorbed)** — dev1060 `qwen3_dflash.py` natively implements fused-KV projection (`_build_context_kv_buffers`, `_fused_kv_weight`). Applying his form would be wrong; entry should be version-gated ≤dev748. |
-| **PN40** (net-new) | `pN40_a_fused_k_norm` | **BLOCKED (upstream-absorbed)** — same file now fuses the context-KV RMSNorm natively (`ops.rms_norm` on `normed_context_states`). |
-| **PN385** (net-new) | `pn385_responses_forced_named`, `pn385_chatcompletion_forced_named` | **BLOCKED (structural refactor)** — dev1060 replaced the `tool_map[...].parameters` helpers in `tool_parsers/utils.py` with the namespace-tool family (`_extract_tool_info`, `_get_tool_schema_from_name_and_params`, …). PN385 needs a redesign against the new helpers. |
+| **PN525** (net-new) | `pn525_no_toolcall_cleaned_content` + `_dev1060` | **RE-ANCHORED (2026-07-14)** — NOT absorbed: dev1060's expanded else-branch adds a required/named empty-content guard (a *different* fix); the closing `return None, content` still ignores `tool_call_info.content` on the auto path. New dev1060 sub-patch keys on the unique guard-tail+raw-return pair (count==1 byte-verified). Mutually exclusive with the historical anchor. |
+| **P85** (net-new) | `p85_mamba_cache_blocks_shadow` | **ABSORBED-NATIVE (verified 2026-07-14)** — dev1060 (481e481b) `single_type_kv_cache_manager.py` natively implements the fine-grained mechanism (`hash_block_size` mode in `find_longest_cache_hit`, `scale_factor` walk, partial-tail CoW `_partial_hit_reqs`); `MambaManager` inherits it. Applying P85 would double-register shadow keys. Retire-on-pin (version-gate ≤ pre-481e481b). |
+| **PN38** (net-new) | `pN38_a_qkv_proj_call`, `pN38_c_conditional_fused_kv` | **ABSORBED-NATIVE (verified 2026-07-14)** — dev1060 `qwen3_dflash.py:224` is literally PN38's replacement (`qkv, _ = self.qkv_proj(hidden_states)`); fused-KV native (`_build_context_kv_buffers`:413, `_fused_kv_weight`:422, fused GEMM :494). Version-gated ≤dev748. |
+| **PN40** (net-new) | `pN40_a_fused_k_norm` | **ABSORBED-NATIVE (verified 2026-07-14)** — `_normalize_context_k` (:509-518) is the fused single `ops.rms_norm` over stacked `_k_norm_weights` PN40 intended; the per-layer loop anchor is gone. Version-gated ≤dev748. |
+| **PN385** (net-new) | `pn385_*_forced_named` + `_dev1060` pair | **RE-ANCHORED + LIVE (shipped 2026-07-13)** — the dev1060 sub-patch pair against the namespace-tool helpers is applied in the running container (`tool_parsers/utils.py:404-408, 421-425`) with `GENESIS_ENABLE_PN385_FORCED_NAMED_EMPTY_PARAMS=1`. This row was stale. |
 
 Also from the manifest: PN399's dependency on retired PN353A is
 HIGH-but-MITIGATED (PN399 has a native-form fallback anchor that classifies
