@@ -124,6 +124,9 @@ services:
       # PN31 (its own unbounded-pool bug was real and is fixed separately).
       - GENESIS_PREALLOC_TOKEN_BUDGET=4160
       - GENESIS_ENABLE_VRAM_TRACER=${GENESIS_ENABLE_VRAM_TRACER:-0}
+      # [2026-07-14 BUG-072] torch allocator memory-history + snapshot dumps
+      # (armed on first engine step; needs TRACER=1 too; debug only)
+      - GENESIS_VRAM_MEMHIST=${GENESIS_VRAM_MEMHIST:-0}
       # [BUG-072 FIX 2026-07-14] P38 TQ-continuation pools are lazily allocated on
       # the FIRST long prefill, sized to max_model_len, AFTER the profiler already
       # gave that VRAM to KV (P72 caps the profile run at M=2048 so profiling never

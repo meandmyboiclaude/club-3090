@@ -27,10 +27,45 @@ if not _vt_log.handlers:
 _vt_baseline = None
 _vt_step_count = 0
 _vt_last_reserved = 0
+_vt_memhist_on = None
+_vt_snap_count = 0
+
+def _vt_arm_memhist():
+    # [2026-07-14 BUG-072] arm torch allocator history on the FIRST engine step —
+    # runs in the EngineCore process with CUDA live (import-time arming would
+    # spawn a CUDA context in the APIServer parent and skew profiling). The
+    # 17x[8192,24,256] statics grow at runtime (growth-triggered in prior
+    # dumps), so step-1 arming precedes them.
+    global _vt_memhist_on
+    if _vt_memhist_on is not None:
+        return
+    import os as _vt_os
+    _vt_memhist_on = _vt_os.environ.get("GENESIS_VRAM_MEMHIST", "0").strip() == "1"
+    if not _vt_memhist_on:
+        return
+    try:
+        _vt_torch.cuda.memory._record_memory_history(max_entries=300000)
+        _vt_log.info("[VRAM] memory-history recording armed (python stacks per alloc)")
+    except Exception as _vt_ex:
+        _vt_memhist_on = False
+        _vt_log.info(f"[VRAM] memory-history arm failed: {_vt_ex}")
+
+def _vt_dump_snapshot(_vt_tag):
+    global _vt_snap_count
+    if not _vt_memhist_on or _vt_snap_count >= 3:
+        return
+    _vt_snap_count += 1
+    _vt_p = f"/tmp/vt_snapshot_{_vt_snap_count}_{_vt_tag}.pickle"
+    try:
+        _vt_torch.cuda.memory._dump_snapshot(_vt_p)
+        _vt_log.info(f"[VRAM] snapshot dumped: {_vt_p}")
+    except Exception as _vt_ex:
+        _vt_log.info(f"[VRAM] snapshot dump failed: {_vt_ex}")
 
 def _vt_trace_step():
     global _vt_baseline, _vt_step_count, _vt_last_reserved
     _vt_step_count += 1
+    _vt_arm_memhist()
     reserved = _vt_torch.cuda.memory_reserved()
     allocated = _vt_torch.cuda.memory_allocated()
 
@@ -58,6 +93,8 @@ def _vt_trace_step():
             after_gc = _vt_torch.cuda.memory_reserved()
             reclaimed = (reserved - after_gc) / 1024**2
             _vt_log.info(f"[VRAM] after gc+empty_cache: reclaimed={reclaimed:.0f}MB reserved={after_gc//1024**2}MB")
+            # [2026-07-14 BUG-072] snapshot with per-alloc python stacks (max 3)
+            _vt_dump_snapshot("growth")
             # [2026-07-14] attribute the live growth: dump the Genesis
             # prealloc registry (namespace -> bytes) so pool-sizing bugs
             # (BUG-072 class) are visible without a bisect.
