@@ -390,8 +390,8 @@ def pn201_maybe_empty_cache(free_mib: int, free_blocks: Optional[int] = None) ->
             "GENESIS_PN201_FORCE_EMPTY_CACHE_EXPANDABLE", "0",
         ).strip().lower() in ("1", "true", "yes", "on")
         if "expandable_segments:true" in _alloc_conf and not _force:
-            _rt._PN95_STATS["pn201_empty_cache_cudagraph_skips"] = (
-                _rt._PN95_STATS.get("pn201_empty_cache_cudagraph_skips", 0) + 1
+            _rt._PN95_STATS["pn201_empty_cache_expandable_skips"] = (
+                _rt._PN95_STATS.get("pn201_empty_cache_expandable_skips", 0) + 1
             )
             return False
         torch.cuda.empty_cache()
