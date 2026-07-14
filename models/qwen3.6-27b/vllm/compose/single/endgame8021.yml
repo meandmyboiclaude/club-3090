@@ -209,11 +209,10 @@ services:
       # - GENESIS_ENABLE_PN292_REVERT_FUSED_MAMBA_POSTPROCESS=1
       - GENESIS_ENABLE_PN293_MAMBA_ATTN_PREFILL_FASTPATH=1
       - GENESIS_ENABLE_PN294_UNSPLIT_MTP_ATTN_GROUPS=1
-      # [2026-07-14] PN31=0 pending deeper fix: is_compiling gate insufficient — boot 15
-      # crashed with the SAME stable-ABI aten::empty inside the wheel custom op; the
-      # explicit out= kwarg through the traced flash_attn op differs from stock even
-      # when None. Fix lane: capture-aware out contract (see task). Not a drop.
-      - GENESIS_ENABLE_PN31_FA_VARLEN_PERSISTENT_OUT=0
+      # [2026-07-14] PN31=1 v3: capture-state guard + 1024-bucketed bounded pool (max 8
+      # keys) + alloc-failure fallback to stock (genesis 1bee568) — closes both live-hit
+      # failure modes (capture-window alloc + shape-key VRAM explosion).
+      - GENESIS_ENABLE_PN31_FA_VARLEN_PERSISTENT_OUT=1
       - GENESIS_ENABLE_PN340=1
       - GENESIS_ENABLE_PN341=1
       - GENESIS_ENABLE_PN350=1
@@ -244,10 +243,12 @@ services:
       - GENESIS_ENABLE_PN79_V2_MD5_CHUNK=1
       - GENESIS_ENABLE_PN79_V2_MD5_CHUNK_DELTA_H=1
       - GENESIS_ENABLE_PN91_DEVELOPER_ROLE=1
-      # [2026-07-14] PN77 MEASURED REGRESSION on Qwopus GPTQ-Pro: FP8 lm_head swap ->
-      # grammar canary 11/12 RED (boot 14; engine alive, pure quality). Not an
-      # improvement on this checkpoint+grammar+MTP stack — evidence-based off.
-      - GENESIS_ENABLE_PN77_FP8_LM_HEAD=0
+      # [2026-07-14] PN77=1 FIXED: root cause was per-channel quantize x per-TENSOR
+      # dequant on the Ada scaled_mm tier (5.5x median logit amplification -> digit
+      # loops under grammar; boot 14 11/12 RED). Now rowwise scaled_mm end-to-end +
+      # fail-closed ordering-fidelity guard + tied-embed guard (genesis commit).
+      # Offline: top-1 agreement 0.385->0.948, digit-mask argmax 0.552->0.990.
+      - GENESIS_ENABLE_PN77_FP8_LM_HEAD=1
       # PN127 inert as flagged (installs template asset only; serving keeps explicit
       # froggeric --chat-template). Asset staged for the deliberate template A/B.
       - GENESIS_ENABLE_PN127_AUTO_CHAT_TEMPLATE=1
