@@ -13,6 +13,48 @@ from .index import prepare_chunk_indices, prepare_chunk_offsets
 from .op import exp, exp2
 from .utils import FLA_CHUNK_SIZE, use_cuda_graph
 
+# ─── [PN345-style shmem-aware pruner — house port for the fused kernel] ──
+# The autotune sweep below (BV∈[32,64] × num_stages∈[2,3,4]) was compiled
+# fine on 4090 (~99 KiB opt-in budget), but BV=64/num_stages=4 can exceed
+# the budget on other consumer arches and OOR at JIT. Same mechanism as
+# Genesis PN345 (vendor of vllm#43047) gives chunk_delta_h/chunk_o —
+# this file is copied in AFTER Genesis runs, so it must carry its own.
+import functools as _pn345_ft
+
+
+@_pn345_ft.cache
+def _pn345_budget(device_index):
+    try:
+        return torch.cuda.get_device_properties(
+            device_index).shared_memory_per_block_optin
+    except Exception:
+        return 99 * 1024  # safe consumer-arch default
+
+
+def _pn345_make_pruner(estimator, safety_bytes=1024):
+    def _prune(configs, named_args, **kwargs):  # noqa: ARG001
+        try:
+            budget = _pn345_budget(
+                torch.cuda.current_device()) - safety_bytes
+        except Exception:
+            return configs
+        if budget <= 0:
+            return configs
+        kept, smallest, smallest_est = [], None, None
+        for c in configs:
+            try:
+                est = int(estimator(c, named_args))
+            except Exception:
+                kept.append(c)
+                continue
+            if est <= budget:
+                kept.append(c)
+            if smallest_est is None or est < smallest_est:
+                smallest, smallest_est = c, est
+        return kept if kept else ([smallest] if smallest is not None else configs)
+    return _prune
+# ─── /[PN345-style pruner] ───────────────────────────────────────────────
+
 
 @triton.heuristics(
     {
@@ -31,6 +73,23 @@ from .utils import FLA_CHUNK_SIZE, use_cuda_graph
         for BV in [32, 64]
     ],
     key=["H", "K", "V", "BT"],
+    # Precise shmem-budget filter per config (PN345 mechanism). The fused
+    # kernel's footprint EXCEEDS chunk_delta_h's: persistent 4× fp32
+    # [BV,64] b_h + in-loop b_o [BT,BV] fp32 + b_A [BT,BT] fp32 + b_q
+    # [BT,64] bf16, plus per-stage b_w/b_k [BT,64] bf16 + b_v [BT,BV] bf16.
+    prune_configs_by={"early_config_prune": _pn345_make_pruner(
+        lambda c, na: (
+            4 * c.kwargs.get("BV", 64) * 64 * 4        # persistent: 4× fp32 [BV,64] b_h
+            + na.get("BT", 64) * 64 * 2                # b_q bf16
+            + na.get("BT", 64) * c.kwargs.get("BV", 64) * 4   # b_o fp32
+            + na.get("BT", 64) * na.get("BT", 64) * 4  # b_A fp32
+            + c.num_stages * (
+                2 * na.get("BT", 64) * 64 * 2          # per-stage b_w + b_k bf16
+                + na.get("BT", 64) * c.kwargs.get("BV", 64) * 2  # b_v bf16
+            )
+            + 4096                                     # Triton bookkeeping safety
+        )
+    )},
     use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=["T"])
@@ -377,8 +436,19 @@ def chunk_gated_delta_rule_fwd_fused(
     else:
         N = B
 
-    if o_buf is not None:
-        o = o_buf
+    # Adopt the caller's buffer only when its memory is a contiguous match
+    # for the kernel's flat (B, T, H, V) write layout — otherwise the flat
+    # block-pointer strides would land in the wrong cells (silent
+    # corruption) and the returned handle would carry o_buf's shape.
+    # Live prefill passes core_attn_out=None, so this path is normally
+    # dead; the guard de-arms it for any future caller.
+    if (
+        o_buf is not None
+        and o_buf.is_contiguous()
+        and o_buf.dtype == v.dtype
+        and o_buf.numel() == B * T * H * V
+    ):
+        o = o_buf.view(B, T, H, V)
     else:
         o = torch.empty(B, T, H, V, dtype=v.dtype, device=v.device)
 
