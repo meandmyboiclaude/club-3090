@@ -58,6 +58,18 @@ def _vt_trace_step():
             after_gc = _vt_torch.cuda.memory_reserved()
             reclaimed = (reserved - after_gc) / 1024**2
             _vt_log.info(f"[VRAM] after gc+empty_cache: reclaimed={reclaimed:.0f}MB reserved={after_gc//1024**2}MB")
+            # [2026-07-14] attribute the live growth: dump the Genesis
+            # prealloc registry (namespace -> bytes) so pool-sizing bugs
+            # (BUG-072 class) are visible without a bisect.
+            try:
+                from sndr.runtime.prealloc import GenesisPreallocBuffer as _vt_GPB
+                _vt_info = _vt_GPB.get_registry_info()
+                _vt_log.info(f"[VRAM] GPB total={_vt_info['total_human']} buffers={_vt_info['total_buffers']}")
+                for _vt_e in sorted(_vt_info["entries"], key=lambda x: -x["bytes"])[:10]:
+                    if _vt_e["bytes"] > 16 * 1024 * 1024:
+                        _vt_log.info(f"[VRAM]   GPB {_vt_e['size_human']:>10}  {_vt_e['namespace']}  {_vt_e['shape']}")
+            except Exception as _vt_ex:
+                _vt_log.info(f"[VRAM] GPB dump failed: {_vt_ex}")
 
     _vt_last_reserved = _vt_torch.cuda.memory_reserved()
 '''
