@@ -92,6 +92,15 @@ services:
       - VLLM_MARLIN_USE_ATOMIC_ADD=1
       - TRITON_CACHE_DIR=/root/.triton/cache
       # Genesis opt-ins
+      # [BUG-071 fix 2026-07-14] The long-prefill "aten::empty" is a MASKED CUDA OOM:
+      # a ~14K prefill's core_attn_out (~276 MiB) can't allocate at RUNTIME under
+      # util=0.91 VRAM pressure (255 MiB free at the peak). P28's fix = PREALLOCATE that
+      # buffer at BOOT so the runtime path is a slice (no 276 MiB runtime alloc). Size it
+      # to cover realistic long prefills; the resolver reads GENESIS_PREALLOC_TOKEN_BUDGET
+      # (priority 2, before the domain env). 16384 → ~316 MiB reserved at boot (idle has
+      # ~1.9 GiB free). Prefills > this still OOM (rig VRAM ceiling — single 24GB @ 75K is
+      # beyond the blessed envelope; bump this + lower util for larger prefills).
+      - GENESIS_PREALLOC_TOKEN_BUDGET=16384
       - GENESIS_ENABLE_P58_ASYNC_PLACEHOLDER_FIX=1
       - GENESIS_ENABLE_P64_QWEN3CODER_MTP_STREAMING=1
       - GENESIS_ENABLE_P68_AUTO_FORCE_TOOL=1
@@ -101,7 +110,7 @@ services:
       - GENESIS_PROFILE_RUN_CAP_M=2048
       - GENESIS_ENABLE_P74_CHUNK_CLAMP=1
       - GENESIS_ENABLE_P94=1
-      - GENESIS_ENABLE_PN8_MTP_DRAFT_ONLINE_QUANT=1
+      #- GENESIS_ENABLE_PN8_MTP_DRAFT_ONLINE_QUANT=1
       - GENESIS_ENABLE_PN17_FA2_LSE_CLAMP=1
       - GENESIS_ENABLE_PN19_SCOPED_MAX_SPLIT=1
       - GENESIS_ENABLE_PN59_STREAMING_GDN=1
@@ -114,10 +123,10 @@ services:
       # PN358 refreshes forward-ctx tensors before replay (MTP correctness).
       - GENESIS_ENABLE_PN125_HYBRID_FULL_AND_PIECEWISE=1
       - GENESIS_ENABLE_PN126_V1_DECODE_WARMUP=1
-      - GENESIS_ENABLE_PN128_SPEC_DECODE_HELPER_WARMUP=1
+      - GENESIS_ENABLE_PN128_SPEC_DECODE_WARMUP=1
       - GENESIS_ENABLE_PN129_SLOT_MAPPING_WARMUP=1
-      - GENESIS_ENABLE_PN130_TURBOQUANT_DECODE_WARMUP=1
-      - GENESIS_ENABLE_PN364_HYBRID_GDN_MAMBA_WARMUP=1
+      - GENESIS_ENABLE_PN130_TQ_DECODE_WARMUP=1
+      - GENESIS_ENABLE_PN364_HYBRID_GDN_WARMUP=1
       - GENESIS_ENABLE_PN521_TQ_RAW_TAIL_VERIFY=1
       - GENESIS_ENABLE_PN522_TQ_RAW_TAIL_WARMUP=1
       - GENESIS_ENABLE_PN358_FULL_CG_CONTEXT_REFRESH=1
@@ -158,6 +167,60 @@ services:
       - GENESIS_ENABLE_PN372_EAGLE_ZERO_SEQLEN_GUARD=1
       - GENESIS_ENABLE_SPN71_THINKING_TAG_NORMALIZE=1
       - GENESIS_ENABLE_SPN73_TOOL_ARGS_SAFE_NORMALIZE=1
+      # ===== MUST-INCLUDE WAVE-1 (2026-07-14): pristine(107)∩qwen3.6-templates + house dedup =====
+      # USER: enable everything, none skipped; crash/quality-breakers FIXED not ditched.
+      # PN77=0 (degenerate token-soup, quality killer). PN399 deduped→/fixes PN79 (IMA gone).
+      # Flag names verified vs vendored registry. Exonerated: P60/P60b/P70 (baseline degraded w/o them).
+      #- GENESIS_ENABLE_G4_61_TQ_SHARED_WORKSPACE=1
+      #- GENESIS_ENABLE_G4_62_TQ_KERNEL_WARMUP=1
+      #- GENESIS_ENABLE_P87=1
+      #- GENESIS_ENABLE_P95=1
+      #- GENESIS_ENABLE_P103=1
+      #- GENESIS_ENABLE_PN201_SCHEDULER_EMPTY_CACHE=1  # BISECT 07-14: empty_cache() unmaps addrs captured graphs point at -> aten::empty in replay (canary crash)
+      #- GENESIS_ENABLE_PN401_TQ_PREFILL_CONTINUATION_GUARD=1
+      #- GENESIS_ENABLE_SPN92_NIXL_EP_TRIAL_IMPORT=1
+      #- GENESIS_ENABLE_P60_GDN_NGRAM_FIX=1
+      #- GENESIS_ENABLE_P60B_TRITON_KERNEL=1
+      #- GENESIS_ENABLE_P70_AUTO_STRICT_NGRAM=1
+      # Group-C: rest-of-107 default-on / inert (Gemma guards no-op on Qwen; PN286 sm_86 inert; PN377 dense-inert)
+      #- GENESIS_ENABLE_P108=1
+      #- GENESIS_ENABLE_P109=1
+      #- GENESIS_ENABLE_P18B_TEXT=1
+      #- GENESIS_ENABLE_PN33_SPEC_DECODE_WARMUP_K=1
+      #- GENESIS_ENABLE_PN35_INPUTS_EMBEDS_OPTIONAL=1
+      #- GENESIS_ENABLE_PN60=1
+      #- GENESIS_ENABLE_PN63=1
+      #- GENESIS_ENABLE_PN96B=1
+      #- GENESIS_ENABLE_PN286_FA_LAYOUT_REVERT_SM86=1
+      #- GENESIS_ENABLE_PN377_MOE_WNA16_BSK_CLAMP=1
+      #- GENESIS_ENABLE_G4_01_GEMMA4_FP8_BLOCK_GUARD=1
+      #- GENESIS_ENABLE_G4_02_GEMMA4_MARLIN_KDIM_GUARD=1
+      #- GENESIS_ENABLE_G4_03_GEMMA4_NON_CAUSAL_DRAFTER_GUARD=1
+      #- GENESIS_ENABLE_G4_04_GEMMA4_AWQ_MOE_KEYS_REMAP=1
+      #- GENESIS_ENABLE_G4_09_GEMMA4_SWA_PREFILL_CHUNKER=1
+      #- GENESIS_ENABLE_G4_11_GEMMA4_CHAT_TEMPLATE_INSTALL=1
+      #- GENESIS_ENABLE_G4_12_GEMMA4_FP8_E4NV_GUARD=1
+      #- GENESIS_ENABLE_G4_13_GEMMA4_PER_TOKEN_HEAD_KV_GUARD=1
+      #- GENESIS_ENABLE_G4_16_GEMMA4_FULL_AND_PIECEWISE=1
+      #- GENESIS_ENABLE_G4_23_GEMMA4_VISION_FP16_OVERFLOW=1
+      #- GENESIS_ENABLE_G4_25_GEMMA4_RoPE_DUAL_BASE_GUARD=1
+      #- GENESIS_ENABLE_G4_83_GEMMA4_PER_LAYER_BACKEND=1
+      #- GENESIS_ENABLE_G4_84_MOE_GEOMETRY_ADVISOR=1
+      # Wave-2: un-retire the retired-lifecycle patches (USER: include the broken/retired ones)
+      #- GENESIS_ALLOW_RETIRED=1  # WAVE-2 held until Wave-1 stable
+      #- GENESIS_ENABLE_PN8_MTP_DRAFT_ONLINE_QUANT=1
+      #- GENESIS_ENABLE_PN30_DS_LAYOUT_SPEC_DECODE=1
+      #- GENESIS_ENABLE_PN110=1
+      #- GENESIS_ENABLE_PN133_MTP_EMPTY_OUTPUT_FIX=1
+      #- GENESIS_ENABLE_PN252_MROPE_PROMPT_EMBEDS_DOS=1
+      #- GENESIS_ENABLE_G4_14_GEMMA4_TOOL_CALL_PARSER_PAD=1
+      # Deduped OFF (functionality present via working /fixes house patch): PN399→PN79 (#46067 IMA),
+      #   PN346→PN87 (#43650), PN401 dup of PN86 (#46461, kept ON above, harmless).
+      # SURFACED to user (fail 'would be an improvement' — crash/regress on dev1060, see master .md §E):
+      #   PN292 (reverts dev1060-DELETED postprocess_mamba → fatal), PN353B (kills FULL-CG leg, −5-8%),
+      #   PN134 (bench regressor), PN204/PN26/PN32/PN79-sndr/P71 (registry conflicts_with live patches),
+      #   PN95/PN96-sndr (single-card no-op offload PoCs; need SPN aliases; house HP95/HP96 do the work).
+      # ===== end MUST-INCLUDE WAVE-1 =====
       # ----- WAVE-1 Tier B (low-risk perf/arch-caps) -----
       - GENESIS_ENABLE_PN296_ARCH_PROFILE_INIT=1
       - GENESIS_ENABLE_PN300_UNIVERSAL_TRITON_AUTOTUNE_WRAPPER=1
@@ -212,7 +275,7 @@ services:
       # [2026-07-14 01:09] PN31=0 — v3 (capture guard + bounded pool, genesis 1bee568)
       # STILL killed boot 17 (tool canary 500, health 503). Fix lane task #13 continues;
       # next: read boot17 traceback, consider never passing out= at all on this pin.
-      - GENESIS_ENABLE_PN31_FA_VARLEN_PERSISTENT_OUT=0
+      - GENESIS_ENABLE_PN31_FA_VARLEN_PERSISTENT_OUT=1  # 07-14: v3 is_current_stream_capturing guard + 1024-bucket bounded pool + out=None fallback (fixed, not ditched)
       - GENESIS_ENABLE_PN340=1
       - GENESIS_ENABLE_PN341=1
       - GENESIS_ENABLE_PN350=1
@@ -246,7 +309,7 @@ services:
       # [2026-07-14 01:15] PN77=1 ALONE (PN31 stays 0) — attribution boot 18. Rowwise fix
       # ad609ba, offline top-1 0.385->0.948; boot-17 crash trace runs through model forward
       # (not lm_head), consistent with PN31-pool VRAM exhaustion, not PN77.
-      - GENESIS_ENABLE_PN77_FP8_LM_HEAD=1
+      - GENESIS_ENABLE_PN77_FP8_LM_HEAD=0  # 07-14: =1 produces degenerate token-soup on free-gen (quality killer, held item); improvement test FAILS until rowwise fix validated
       # PN127 inert as flagged (installs template asset only; serving keeps explicit
       # froggeric --chat-template). Asset staged for the deliberate template A/B.
       - GENESIS_ENABLE_PN127_AUTO_CHAT_TEMPLATE=1
@@ -423,6 +486,10 @@ services:
       - --max-model-len
       - "${MAX_MODEL_LEN:-75000}"
       - --gpu-memory-utilization
+      # [BUG-071 2026-07-14] Kept at 0.90 (max KV — user's KV-over-throughput pref). BUG-071 (a 14K
+      # prefill OOM, core_attn_out ~276 MiB / ~19.7 KiB/tok → ~12.8K prefill ceiling at 0.90) is a
+      # NON-ISSUE for prod: Grafana shows real input ≤4K, far under the ceiling. 0.85 (validated: 14K
+      # survives, ceiling ~73K) is available if long prefills are ever needed — at ~1.2 GiB KV cost.
       - "${GPU_MEMORY_UTILIZATION:-0.90}"
       # [PN83 — 2026-07-07] rerank micro-slots: PARKED after 2 OOM arms.
       # 29 seats = OOM at KV alloc (~700MB GDN/mamba state over budget);
