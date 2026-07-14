@@ -209,9 +209,11 @@ services:
       # - GENESIS_ENABLE_PN292_REVERT_FUSED_MAMBA_POSTPROCESS=1
       - GENESIS_ENABLE_PN293_MAMBA_ATTN_PREFILL_FASTPATH=1
       - GENESIS_ENABLE_PN294_UNSPLIT_MTP_ATTN_GROUPS=1
-      # [2026-07-14] PN31=1: pool now is_compiling-gated (compiled graph = stock,
-      # eager keeps pooled buffer) — the traced dict-cache alloc was the replay crash.
-      - GENESIS_ENABLE_PN31_FA_VARLEN_PERSISTENT_OUT=1
+      # [2026-07-14] PN31=0 pending deeper fix: is_compiling gate insufficient — boot 15
+      # crashed with the SAME stable-ABI aten::empty inside the wheel custom op; the
+      # explicit out= kwarg through the traced flash_attn op differs from stock even
+      # when None. Fix lane: capture-aware out contract (see task). Not a drop.
+      - GENESIS_ENABLE_PN31_FA_VARLEN_PERSISTENT_OUT=0
       - GENESIS_ENABLE_PN340=1
       - GENESIS_ENABLE_PN341=1
       - GENESIS_ENABLE_PN350=1
