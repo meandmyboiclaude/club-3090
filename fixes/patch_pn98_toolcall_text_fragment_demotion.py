@@ -6,6 +6,11 @@ House-series patch (no upstream PR yet) for the dev1060 pin (9e57de71), 1 file:
   - vllm/parser/engine/streaming_parser_engine.py
       :: _process_lex_tokens (strict-demotion branch)
       :: finish (end-of-output lexer flush)
+      :: _process_scanner_items (mid-stream lexer flush — hunk 3,
+         2026-07-14: the remaining BUG-069 leak; a fragment held in the
+         IncrementalLexer's prefix buffer is flushed mid-stream when a
+         real special-token terminal (PreLexedTerminal) arrives, and
+         surfaced as content exactly like the finish() case)
 
 Bug (BUG-069 residual): non-streaming responses under degenerate
 multi-tool-call storms (21+ tool_calls, qwen3_coder parser) leave a literal
@@ -151,9 +156,51 @@ H2_NEW = (
     "        events.extend(self._process_lex_tokens(_pn98_flush))\n"
 )
 
+# ── hunk 3: _process_scanner_items mid-stream lexer flush (2026-07-14) ──
+# The remaining BUG-069 leak (residual 1-5/15 mid-content fragments):
+# a text-form tag prefix held by the IncrementalLexer's prefix-match
+# buffer is flushed MID-STREAM when a real special-token terminal
+# (PreLexedTerminal) arrives — not only at finish(). Same strip rule as
+# hunk 2, inlined in the loop with distinct locals. Anchor spans the
+# isinstance line so it stays unique vs the finish() flush (which hunk 2
+# rewrites) and matches pristine or PN76-applied files identically.
+H3_OLD = (
+    "            if isinstance(item, PreLexedTerminal):\n"
+    "                events.extend(self._process_lex_tokens(self._lexer.flush()))\n"
+)
+H3_NEW = (
+    "            if isinstance(item, PreLexedTerminal):\n"
+    "                # [Genesis-house PN98] BUG-069 residual: guard the mid-stream\n"
+    "                # flush the same way finish() guards the end-of-output flush —\n"
+    "                # a held tool-tag text prefix flushed here (a real special-token\n"
+    "                # terminal just arrived) would leak into content mid-stream.\n"
+    "                _pn98_ms_flush = self._lexer.flush()\n"
+    "                if self.tool_index >= 0 and _pn98_ms_flush:\n"
+    "                    _pn98_ms_last = _pn98_ms_flush[-1]\n"
+    "                    if (\n"
+    "                        _pn98_ms_last.terminal == CONTENT_TERMINAL\n"
+    "                        and len(_pn98_ms_last.value) >= 2\n"
+    "                    ):\n"
+    "                        _pn98_ms_tags = [\n"
+    "                            _pn98_ms_text\n"
+    "                            for _pn98_ms_name, _pn98_ms_text in (\n"
+    "                                self.config.token_id_terminals.items()\n"
+    "                            )\n"
+    "                            if _pn98_ms_name in self._tool_terminals\n"
+    "                        ]\n"
+    "                        if any(\n"
+    "                            len(_pn98_ms_last.value) < len(_pn98_ms_tag)\n"
+    "                            and _pn98_ms_tag.startswith(_pn98_ms_last.value)\n"
+    "                            for _pn98_ms_tag in _pn98_ms_tags\n"
+    "                        ):\n"
+    "                            _pn98_ms_flush = _pn98_ms_flush[:-1]\n"
+    "                events.extend(self._process_lex_tokens(_pn98_ms_flush))\n"
+)
+
 HUNKS = [
     ("strict-demotion-drop", H1_OLD, H1_NEW),
     ("finish-flush-strip", H2_OLD, H2_NEW),
+    ("scanner-items-midstream-flush-strip", H3_OLD, H3_NEW),
 ]
 
 
