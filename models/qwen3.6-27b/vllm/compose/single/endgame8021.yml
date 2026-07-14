@@ -85,7 +85,14 @@ services:
       # DEV_MODE required: /start_profile //stop_profile are dev-mode-gated on dev1060.
       - VLLM_TORCH_PROFILER_DIR=/profiles
       - VLLM_SERVER_DEV_MODE=1
-      - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+      # [BUG-072 mitigation 2026-07-14] garbage_collection_threshold:0.85 —
+      # reclaim cached-unused blocks under pressure instead of growing the
+      # reservation to the guardian cap and OOM-aborting engine steps (the
+      # post-storm wedge: reserved-at-high-water never freed, every request
+      # finish=abort until podman restart). From genesis main's 24GB
+      # single-card recipe (a7ef419) — previously dropped, re-adopted after
+      # the wedge reproduced twice under sustained mixed load.
+      - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,garbage_collection_threshold:0.85}
       - VLLM_FLOAT32_MATMUL_PRECISION=high
       - VLLM_USE_FLASHINFER_SAMPLER=1
       - OMP_NUM_THREADS=1
