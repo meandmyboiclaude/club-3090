@@ -95,13 +95,17 @@ services:
       - TRITON_CACHE_DIR=/root/.triton/cache
       # Genesis opt-ins
       # [BUG-071 CORRECTED 2026-07-14] GENESIS_PREALLOC_TOKEN_BUDGET=16384 REMOVED —
-      # that was the disproven first theory (long-prefill aten::empty blamed on a
-      # core_attn_out runtime-alloc OOM; the real cause was the traced torch.zeros
-      # in P28's over-capacity fallback lowering to aten::empty inside the
-      # PIECEWISE-compiled GDN graph). The real fix is P28's dynamo-disabled eager
-      # fallback (patch_28_gdn_core_attn.py, validated by longprefill.py on a cold
-      # cache). The 16384 budget just reserved ~316 MiB at boot for nothing;
-      # prefills >4096 take the eager fallback path (dynamo-opaque runtime alloc).
+      # disproven theory: the long-prefill "aten::empty" failure is a MASKED CUDA
+      # OOM of the per-chunk MLP gate+up intermediate (4128 tok x 17408 x fp16 x 2
+      # ~= 276 MiB — matches the live failing alloc byte-for-byte), NOT a
+      # core_attn_out alloc. Preallocating core_attn_out at 16384 rows just
+      # reserved ~316 MiB at boot and made the headroom WORSE. Long prefills
+      # succeed when >=276 MiB is free at the chunk peak (15K validated 200 OK
+      # cold, 6.5s) and abort gracefully via oom_resilience when the scratch
+      # high-water has consumed it (BUG-072 tracks the post-storm wedge).
+      # P73 resolver fixed 2026-07-14 (fallback no longer cached) so P28's
+      # buffer sizes to the real max_num_batched_tokens (4128) once the vLLM
+      # config context exists — every chunk stays on the fast prealloc path.
       - GENESIS_ENABLE_P58_ASYNC_PLACEHOLDER_FIX=1
       - GENESIS_ENABLE_P64_QWEN3CODER_MTP_STREAMING=1
       - GENESIS_ENABLE_P68_AUTO_FORCE_TOOL=1

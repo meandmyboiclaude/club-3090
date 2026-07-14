@@ -70,8 +70,14 @@ def _probe_vllm_config() -> Optional[int]:
     Returns None if vLLM not initialized yet (e.g. called at import time).
     """
     try:
-        from vllm.config import get_current_vllm_config
-        cfg = get_current_vllm_config()
+        # dev1060: get_current_vllm_config() RAISES outside the context;
+        # prefer the _or_none accessor when present (2026-07-14).
+        try:
+            from vllm.config import get_current_vllm_config_or_none
+            cfg = get_current_vllm_config_or_none()
+        except ImportError:
+            from vllm.config import get_current_vllm_config
+            cfg = get_current_vllm_config()
         if cfg is None:
             return None
         sched = getattr(cfg, "scheduler_config", None)
@@ -143,13 +149,20 @@ def resolve_token_budget(
         )
         return _CACHED
 
-    # Priority 4: conservative default
-    _CACHED = _DEFAULT_FALLBACK
+    # Priority 4: conservative default — deliberately NOT cached
+    # (2026-07-14): an early call (patch-apply warm-up) runs before any
+    # engine exists, so the config probe fails; caching 4096 here poisoned
+    # every later resolution and pinned the P28 fast-path buffer below a
+    # 4128-token chunk (BUG-071 class). Leaving _CACHED unset lets the
+    # first call made INSIDE the vLLM config context (module __init__ /
+    # first forward) resolve the true max_num_batched_tokens.
     log.info(
-        "[Genesis P73] token budget resolved → %d (default fallback). "
-        "Set GENESIS_PREALLOC_TOKEN_BUDGET to override.", _CACHED,
+        "[Genesis P73] token budget resolved → %d (default fallback, "
+        "UNCACHED — will re-probe until the vLLM config context is "
+        "available). Set GENESIS_PREALLOC_TOKEN_BUDGET to override.",
+        _DEFAULT_FALLBACK,
     )
-    return _CACHED
+    return _DEFAULT_FALLBACK
 
 
 def assert_fits(num_tokens: int, where: str) -> None:
