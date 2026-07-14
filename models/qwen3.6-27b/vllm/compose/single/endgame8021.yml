@@ -113,6 +113,15 @@ services:
       # P73 resolver fixed 2026-07-14 (fallback no longer cached) so P28's
       # buffer sizes to the real max_num_batched_tokens (4128) once the vLLM
       # config context exists — every chunk stays on the fast prealloc path.
+      - GENESIS_ENABLE_VRAM_TRACER=${GENESIS_ENABLE_VRAM_TRACER:-0}
+      # [BUG-072 FIX 2026-07-14] P38 TQ-continuation pools are lazily allocated on
+      # the FIRST long prefill, sized to max_model_len, AFTER the profiler already
+      # gave that VRAM to KV (P72 caps the profile run at M=2048 so profiling never
+      # triggers them) -> the process then sits above budget forever and every
+      # subsequent large prefill OOM-aborts. Cap the pools to the real traffic
+      # ceiling (6-day Phoenix p99 total = 30.8K; zero >60K): 33024 = 30.8K + margin,
+      # block-rounded. Prefills >33K take P38 transient-alloc fallback (guard :461).
+      - GENESIS_TQ_MAX_MODEL_LEN=33024
       - GENESIS_ENABLE_P58_ASYNC_PLACEHOLDER_FIX=1
       - GENESIS_ENABLE_P64_QWEN3CODER_MTP_STREAMING=1
       - GENESIS_ENABLE_P68_AUTO_FORCE_TOOL=1
