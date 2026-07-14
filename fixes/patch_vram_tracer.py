@@ -83,24 +83,35 @@ def apply():
         log.warning("[vram_tracer] EngineCore class not found")
         return
 
-    step_anchor = None
+    # [2026-07-14] hook BOTH step() and step_with_batch_queue() — the endgame
+    # engine (async scheduling) runs step_with_batch_queue; hooking only
+    # step() produced zero output on the exact config being hunted.
+    step_anchors = []
     for candidate in [
         "    def step(self) -> EngineCoreOutputs:",
         "    def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:",
         "    def step(self)",
     ]:
         if candidate in text:
-            step_anchor = candidate
+            step_anchors.append(candidate)
             break
-    if step_anchor is None:
-        log.warning("[vram_tracer] step() not found")
+    for candidate in [
+        "    def step_with_batch_queue(",
+    ]:
+        if candidate in text:
+            step_anchors.append(candidate)
+    if not step_anchors:
+        log.warning("[vram_tracer] no step function found")
         return
 
     text = text.replace(class_anchor, TRACER_CODE + "\n" + class_anchor, 1)
 
-    idx = text.find(step_anchor)
-    eol = text.find('\n', idx)
-    text = text[:eol+1] + "        _vt_trace_step()\n" + text[eol+1:]
+    for step_anchor in step_anchors:
+        idx = text.find(step_anchor)
+        # skip past the (possibly multi-line) signature to the colon line end
+        sig_end = text.find(':', idx)
+        eol = text.find('\n', sig_end)
+        text = text[:eol+1] + "        _vt_trace_step()\n" + text[eol+1:]
 
     TARGET.write_text(text)
     log.info("[vram_tracer] applied: step-level VRAM tracing enabled")
