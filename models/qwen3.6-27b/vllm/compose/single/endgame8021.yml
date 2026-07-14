@@ -59,7 +59,9 @@ services:
       # entrypoint process, so EngineCore needs `import sndr` to resolve natively.
       - ../../patches/genesis/vllm/_genesis/sndr:/usr/local/lib/python3.12/dist-packages/sndr:ro
       - ../../patches/local/qwen3coder_tool_parser_deferred_commit.py:/patches/qwen3coder_tool_parser_deferred_commit.py:ro
-      - ../../patches/froggeric-chat-template/chat_template.jinja:/chat_template.jinja:ro
+      # [2026-07-14 USER] Froggeric template corrupts chat + thinking on Qwopus3.6 —
+      # switched to the model's OWN native template (XReyRobert/Qwopus3.6-27B-v2-GPTQ-Pro-MTP-BF16).
+      - ../../patches/qwopus-chat-template/chat_template.jinja:/chat_template.jinja:ro
       - ../../../../../fixes:/fixes:ro
       - ./cache-override.yaml:/config/cache-override.yaml:ro
     environment:
@@ -113,7 +115,13 @@ services:
       #- GENESIS_ENABLE_PN8_MTP_DRAFT_ONLINE_QUANT=1
       - GENESIS_ENABLE_PN17_FA2_LSE_CLAMP=1
       - GENESIS_ENABLE_PN19_SCOPED_MAX_SPLIT=1
-      - GENESIS_ENABLE_PN59_STREAMING_GDN=1
+      # [2026-07-14] PN59 (streaming GDN) DISABLED so chunk.py keeps a plain fused-replaceable
+      # body for the self-made Cliff-2b FUSED kernel (register-resident h+v_new: -2.74 GiB +
+      # faster decode). PN59 wins by position if left on → fused kernel becomes dead code.
+      # A/B switch: VLLM_FLA_GDN_FUSED (below). Set PN59=1 + FUSED=0 to revert to streaming.
+      - GENESIS_ENABLE_PN59_STREAMING_GDN=0
+      # Cliff-2b fused GDN kernel A/B switch (read by patched fla/ops/chunk.py): 1=fused, 0=vanilla.
+      - VLLM_FLA_GDN_FUSED=1
       - GENESIS_ENABLE_P67_TQ_MULTI_QUERY_KERNEL=1
       # [cudagraph 2026-06-26] capture-safety for cudagraphs + MTP + TQ3 (+ PN79 fix in entrypoint):
       - GENESIS_ENABLE_P66_CUDAGRAPH_SIZE_FILTER=1
@@ -171,17 +179,28 @@ services:
       # USER: enable everything, none skipped; crash/quality-breakers FIXED not ditched.
       # PN77=0 (degenerate token-soup, quality killer). PN399 deduped→/fixes PN79 (IMA gone).
       # Flag names verified vs vendored registry. Exonerated: P60/P60b/P70 (baseline degraded w/o them).
-      #- GENESIS_ENABLE_G4_61_TQ_SHARED_WORKSPACE=1
-      #- GENESIS_ENABLE_G4_62_TQ_KERNEL_WARMUP=1
-      #- GENESIS_ENABLE_P87=1
-      #- GENESIS_ENABLE_P95=1
+      # [2026-07-14] ALL ON. Arch/topology-gated ones self-gate to no-op on our SM89/TP=1 rig
+      # (they fire correctly on the hardware they target — inert ≠ dropped). PN401 self-retires
+      # harmlessly (native in wheel #46461) = fail-loud guard. P60/P60b/P70 = GDN spec-decode.
+      - GENESIS_ENABLE_G4_61_TQ_SHARED_WORKSPACE=1
+      - GENESIS_ENABLE_G4_62_TQ_KERNEL_WARMUP=1
+      - GENESIS_ENABLE_P87=1
+      - GENESIS_ENABLE_P95=1
+      - GENESIS_ENABLE_PN401_TQ_PREFILL_CONTINUATION_GUARD=1
+      - GENESIS_ENABLE_SPN92_NIXL_EP_TRIAL_IMPORT=1
+      - GENESIS_ENABLE_P60_GDN_NGRAM_FIX=1
+      - GENESIS_ENABLE_P60B_TRITON_KERNEL=1
+      - GENESIS_ENABLE_P70_AUTO_STRICT_NGRAM=1
+      # [2026-07-14] PN201 now graph-safe (genesis fix: skips empty_cache() while a cudagraph is
+      # capturing OR expandable_segments is active → reclaims only when it can't corrupt captured
+      # graphs; the FULL-CG replay crash can't recur). ON.
+      - GENESIS_ENABLE_PN201_SCHEDULER_EMPTY_CACHE=1
+      # P103 OFF — REPLACED by our own better patch (per the off-rule): P103 wraps
+      # chunk_gated_delta_rule_fwd to CHUNK the big h tensor (805→200 MiB); the live cliff2b FUSED
+      # kernel ELIMINATES h materialization entirely (register-resident) → P103 has no h to chunk
+      # (zero benefit) and its outer rebind over the fused path adds redundant-chunking risk.
+      # Can't usefully combine. Re-enable only if the fused kernel is ever turned off (FUSED=0).
       #- GENESIS_ENABLE_P103=1
-      #- GENESIS_ENABLE_PN201_SCHEDULER_EMPTY_CACHE=1  # BISECT 07-14: empty_cache() unmaps addrs captured graphs point at -> aten::empty in replay (canary crash)
-      #- GENESIS_ENABLE_PN401_TQ_PREFILL_CONTINUATION_GUARD=1
-      #- GENESIS_ENABLE_SPN92_NIXL_EP_TRIAL_IMPORT=1
-      #- GENESIS_ENABLE_P60_GDN_NGRAM_FIX=1
-      #- GENESIS_ENABLE_P60B_TRITON_KERNEL=1
-      #- GENESIS_ENABLE_P70_AUTO_STRICT_NGRAM=1
       # Group-C: rest-of-107 default-on / inert (Gemma guards no-op on Qwen; PN286 sm_86 inert; PN377 dense-inert)
       #- GENESIS_ENABLE_P108=1
       #- GENESIS_ENABLE_P109=1
@@ -309,7 +328,13 @@ services:
       # [2026-07-14 01:15] PN77=1 ALONE (PN31 stays 0) — attribution boot 18. Rowwise fix
       # ad609ba, offline top-1 0.385->0.948; boot-17 crash trace runs through model forward
       # (not lm_head), consistent with PN31-pool VRAM exhaustion, not PN77.
-      - GENESIS_ENABLE_PN77_FP8_LM_HEAD=0  # 07-14: =1 produces degenerate token-soup on free-gen (quality killer, held item); improvement test FAILS until rowwise fix validated
+      # [2026-07-14] OFF — GENUINE MODEL LIMIT (not a lazy skip): even WITH the rowwise per-vocab-row
+      # _scaled_mm fix at HEAD, PN77 FP8 lm_head still degenerates on SAMPLED generation. Coherence
+      # gate 07-14: temp=0 greedy survives (argmax robust to logit noise) but temp>0 → token-soup
+      # ("All 80 are there to remain...", tool name "get_weatehir"). FP8 distorts the logit
+      # DISTRIBUTION; this uncalibrated GPTQ model's lm_head is too precision-sensitive for FP8.
+      # ~0.7GB saving not worth broken sampling. Re-enable only with a properly CALIBRATED FP8 head.
+      - GENESIS_ENABLE_PN77_FP8_LM_HEAD=0
       # PN127 inert as flagged (installs template asset only; serving keeps explicit
       # froggeric --chat-template). Asset staged for the deliberate template A/B.
       - GENESIS_ENABLE_PN127_AUTO_CHAT_TEMPLATE=1
@@ -374,14 +399,24 @@ services:
         fi
         pip install -q pytest 2>/dev/null || true
         python3 -m vllm._genesis.patches.apply_all
+        # [2026-07-14] Self-made Cliff-2b FUSED GDN kernel — MUST run after apply_all
+        # (so PN354 kwargs are already in chunk.py to match the re-anchor). Gated by
+        # VLLM_FLA_GDN_FUSED (default 1); flip to 0 for the vanilla A/B arm.
+        python3 /fixes/cliff2b/apply_cliff2b.py
         python3 /patches/qwen3coder_tool_parser_deferred_commit.py
         python3 /fixes/patch_drafter_skip.py
+        # [2026-07-14] Text-only ViT skip — reclaims the ViT footprint (we set
+        # --language-model-only; anchor byte-exact on qwen3_5.py both classes). No-op-safe.
+        python3 /fixes/patch_vision_tower_skip.py
         # [BUG-028] DISABLED: tq_buffer_pool reuses module-level GPU scratch buffers across
         # async decode steps -> race under MTP spec-decode + big prefill -> device-side assert
         # in _flash_attn_varlen. Redundant with PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
         # (the actual VRAM-frag fix). Re-enable only with a stream-aware/synced pool.
         # python3 /fixes/patch_tq_buffer_pool.py
         python3 /fixes/patch_vram_guardian.py
+        # [2026-07-14 USER] vram_tracer wired but flag-gated OFF (GENESIS_ENABLE_VRAM_TRACER=1 to
+        # enable). In-config for findability; self-skips as a debug-only per-step tracer.
+        python3 /fixes/patch_vram_tracer.py
         python3 /fixes/patch_gdn_oom_retry.py
         python3 /fixes/patch_oom_resilience.py
         python3 /fixes/patch_pn71_reasoning_alias.py
@@ -415,6 +450,9 @@ services:
         # sentinel (shape-mismatch EngineCore fatal, live-reproduced on dev799).
         # Prerequisite for PN81 (/rerank on :8020). Upstream-contributable.
         python3 /fixes/patch_pn82_bonus_logprobs_full_vocab_guard.py
+        # [2026-07-14] PN84 vllm#42245 (NOT merged in pin): zero-init prompt_logprobs on
+        # prefix-cache-skipped tokens → deterministic; standing prereq for packed rerank (PN81).
+        python3 /fixes/patch_pn84_42245_prompt_logprobs_zeros.py
         # [Wave-1 2026-07-13] correctness backports vs BUG-069 + crash classes.
         # PN86 vllm#46461: TQ+APC continuation guard (prefix K/V loss -> hallucinations)
         # PN87 vllm#43650: mamba MTP cache-hit boundary (subsumed by #48361 in Wave-3 build)
@@ -491,6 +529,15 @@ services:
       # NON-ISSUE for prod: Grafana shows real input ≤4K, far under the ceiling. 0.85 (validated: 14K
       # survives, ceiling ~73K) is available if long prefills are ever needed — at ~1.2 GiB KV cost.
       - "${GPU_MEMORY_UTILIZATION:-0.90}"
+      # [cold-boot fix 2026-07-14] Pin KV bytes = the value vLLM's own profiler prints, which
+      # SKIPS the memory-profiling forward pass (cold AND warm). Root cause of the first-boot
+      # crash: on a cold boot the profiler runs the ~12s inductor compile in-line, so the ~2.3GiB
+      # compiler workspace is resident at the peak snapshot → KV budget goes negative → ValueError
+      # → restart. Pinning removes profiling so the transient can't poison KV sizing. Value is
+      # util-coupled (0.85); regenerate from a fresh boot's "to fit" line if GPU_MEMORY_UTILIZATION
+      # changes. Fused-kernel frees ~2.74GiB transient so this margin only improves.
+      - --kv-cache-memory
+      - "${KV_CACHE_MEMORY_BYTES:-1991240704}"
       # [PN83 — 2026-07-07] rerank micro-slots: PARKED after 2 OOM arms.
       # 29 seats = OOM at KV alloc (~700MB GDN/mamba state over budget);
       # 12 seats = aten::empty alloc failure during warmup (P66 capture list
@@ -509,6 +556,10 @@ services:
       - "4128"
       - --long-prefill-token-threshold
       - "4128"
+      # [2026-07-14 TODO-PLANNING] interactivity mode = fine-grained CUDA graphs + latency
+      # kernels — favors our single-shot/low-concurrency rig. Real dev1060 flag (arg_utils.py).
+      - --performance-mode
+      - interactivity
       - --kv-cache-metrics
       # Per-request inference traces -> Phoenix (request-level spans; detailed
       # phase breakdown left off to avoid per-request latency overhead).
