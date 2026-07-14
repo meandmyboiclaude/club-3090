@@ -556,16 +556,20 @@ services:
       # (10,114 reqs): max total(prompt+gen)=58.6K, zero >60K, p95=30.3K.]
       - "${MAX_MODEL_LEN:-65000}"
       - --gpu-memory-utilization
-      # [2026-07-14 un-pinned] util-mode ACTIVE: the profiler sizes KV each boot
-      # (prod ran this way and got 206,400 tokens at 0.90/75K; the hand-derived
-      # 160K byte-pin undershot — profiling measures the real residents). The
-      # COLD-boot hazard (profiler runs the inductor compile inline → ~2.3 GiB
-      # transient in the peak snapshot → negative KV → ValueError loop) only
-      # bites on a cleared compile cache: after any `rm -rf cache/torch_compile`
-      # do ONE boot with KV_CACHE_MEMORY_BYTES=<last known good> exported, then
-      # revert to util-mode. #47388 persists the profile under cache/startup_plan
-      # so warm boots reuse it.
-      - "${GPU_MEMORY_UTILIZATION:-0.90}"
+      # [2026-07-14 SHIP STATE — re-pinned after the day's full hunt] The
+      # endgame stack carries a 1.63 GiB anonymous resident tensor list
+      # (BUG-072 residual, owner hunt = next session) that lands AFTER
+      # profiling, so every util-profiled KV size starves large-prefill
+      # transients (0.90/0.87 stormed; honest-4128 profiling at 0.85 won't
+      # even boot 65K — profiled KV < 1.6 GiB minimum). The KV pin below +
+      # util 0.85 env is the validated envelope: boots deterministically
+      # (pin skips profiling), 15K prefill 6.5s, single 30K OK, and the
+      # PN31 fix (44d7ee29) removes the cumulative per-shape minting that
+      # wedged sustained storms. Kill the pin only after the 1.63 GiB list
+      # is eliminated at source.
+      - "${GPU_MEMORY_UTILIZATION:-0.85}"
+      - --kv-cache-memory
+      - "${KV_CACHE_MEMORY_BYTES:-1991240704}"
       # [PN83 — 2026-07-07] rerank micro-slots: PARKED after 2 OOM arms.
       # 29 seats = OOM at KV alloc (~700MB GDN/mamba state over budget);
       # 12 seats = aten::empty alloc failure during warmup (P66 capture list
