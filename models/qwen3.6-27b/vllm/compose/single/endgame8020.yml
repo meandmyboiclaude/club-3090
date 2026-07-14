@@ -141,8 +141,12 @@ services:
       - GENESIS_TQ_MAX_MODEL_LEN=33024
       - GENESIS_ENABLE_P58_ASYNC_PLACEHOLDER_FIX=1
       - GENESIS_ENABLE_P64_QWEN3CODER_MTP_STREAMING=1
-      - GENESIS_ENABLE_P68_AUTO_FORCE_TOOL=1
-      - GENESIS_ENABLE_P69_LONG_CTX_TOOL_REMINDER=1
+      # [2026-07-14 OFF — behavioral, canary-proven harmful] P68 forced
+      # tool_choice=required on EVERY >50K-char context (canary system =
+      # ~120K chars) -> degenerate 21+ tool-call storms + grammar-reject
+      # empty responses. Repo rule: behavioral patches never default-on.
+      - GENESIS_ENABLE_P68_AUTO_FORCE_TOOL=0
+      - GENESIS_ENABLE_P69_LONG_CTX_TOOL_REMINDER=0
       - GENESIS_P68_P69_LONG_CTX_THRESHOLD_CHARS=50000
       - GENESIS_ENABLE_P72_PROFILE_RUN_CAP=1
       - GENESIS_PROFILE_RUN_CAP_M=4128
