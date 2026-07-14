@@ -138,6 +138,96 @@ _INIT_ATTACH_NEW = (
 )
 
 
+# ── Sub-patch 3 (2026-07-14, BUG-072 kill-shot): POST-LOAD re-attach ──
+# Sub-patch 2 moved the attach in-source into __init__, but __init__
+# runs BEFORE weights land on CUDA: _guess_module_device() returns None,
+# attach_buffer() bails silently, the buffer stays None on every GDN
+# layer, and forward's torch.zeros fallback runs INSIDE the compiled
+# piecewise region — inductor lifts it into 17 persistent pow2-padded
+# statics (17 × [8192, 24, 256] fp16 = 1.63 GiB; pow2(4128)=8192).
+# dev799's measured 0.09 GiB cudagraph pool ≈ exactly ONE shared buffer,
+# i.e. the attach engaged there; the dev1060 qwen3_next refactor shifted
+# __init__/device-move ordering and the probe now always misses.
+# Fix: re-attach right after load_model()'s "Model loading took" log —
+# weights are on-device, before any compile/capture — so the shape-keyed
+# registry engages: ONE right-sized shared buffer (~51 MB @ budget 4160)
+# across all GDN layers, and the compiled region allocates nothing.
+
+GENESIS_P28_RUNNER_MARKER = "Genesis P28 post-load re-attach v7.1"
+
+_RUNNER_ATTACH_OLD = (
+    "        logger.info_once(\n"
+    "            \"Model loading took %s GiB memory and %.6f seconds\",\n"
+    "            format_gib(self.model_memory_usage),\n"
+    "            time_after_load - time_before_load,\n"
+    "        )\n"
+)
+
+_RUNNER_ATTACH_NEW = (
+    "        logger.info_once(\n"
+    "            \"Model loading took %s GiB memory and %.6f seconds\",\n"
+    "            format_gib(self.model_memory_usage),\n"
+    "            time_after_load - time_before_load,\n"
+    "        )\n"
+    "        # [Genesis P28 sub-patch 3, BUG-072] post-load re-attach: the\n"
+    "        # __init__-time attach runs before weights land on CUDA (device\n"
+    "        # probe -> None), so re-call attach_buffer here where the model\n"
+    "        # is fully on-device. Shape-keyed registry => one shared buffer\n"
+    "        # across all GDN layers; the compiled forward then uses the\n"
+    "        # prealloc branch instead of lifting torch.zeros into per-layer\n"
+    "        # pow2-padded statics.\n"
+    "        try:\n"
+    "            from vllm._genesis.kernels.gdn_core_attn_manager import (\n"
+    "                attach_buffer as _genesis_p28_attach,\n"
+    "            )\n"
+    "            _p28_names = (\n"
+    "                \"QwenGatedDeltaNetAttention\",\n"
+    "                \"GatedDeltaNetAttention\",\n"
+    "                \"GatedDeltaNet\",\n"
+    "            )\n"
+    "            _p28_live = 0\n"
+    "            _p28_roots = [self.model]\n"
+    "            _p28_drafter = getattr(\n"
+    "                getattr(self, \"drafter\", None), \"model\", None)\n"
+    "            if _p28_drafter is not None:\n"
+    "                _p28_roots.append(_p28_drafter)\n"
+    "            for _p28_root in _p28_roots:\n"
+    "                for _p28_mod in _p28_root.modules():\n"
+    "                    if type(_p28_mod).__name__ in _p28_names:\n"
+    "                        _genesis_p28_attach(_p28_mod)\n"
+    "                        if getattr(_p28_mod,\n"
+    "                                   \"_genesis_gdn_core_attn_buf\",\n"
+    "                                   None) is not None:\n"
+    "                            _p28_live += 1\n"
+    "            logger.info(\n"
+    "                \"[Genesis P28] post-load re-attach: buffer live on \"\n"
+    "                \"%d GDN module(s)\", _p28_live)\n"
+    "        except Exception as _p28_e:\n"
+    "            logger.warning(\n"
+    "                \"[Genesis P28] post-load re-attach failed: %s\", _p28_e)\n"
+)
+
+
+def _make_runner_patcher() -> TextPatcher | None:
+    target = resolve_vllm_file("v1/worker/gpu_model_runner.py")
+    if target is None:
+        return None
+    return TextPatcher(
+        patch_name="P28 post-load re-attach",
+        target_file=target,
+        marker=GENESIS_P28_RUNNER_MARKER,
+        sub_patches=[
+            TextPatch(
+                name="p28_postload_reattach",
+                anchor=_RUNNER_ATTACH_OLD,
+                replacement=_RUNNER_ATTACH_NEW,
+                required=True,
+            ),
+        ],
+        upstream_drift_markers=["_genesis_p28_attach"],
+    )
+
+
 def _make_patcher() -> TextPatcher | None:
     target = resolve_vllm_file("model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py")
     if target is None:
@@ -306,10 +396,38 @@ def apply() -> tuple[str, str]:
 
     # Step 2: wrap __init__ so new GDN instances get the buffer attached.
     init_ok = _wrap_gdn_init()
+
+    # Step 3 [2026-07-14 BUG-072]: post-load re-attach in gpu_model_runner —
+    # the ONLY attach that runs with weights on-device (see sub-patch 3
+    # comment). Non-fatal: without it P28 degrades to the eager fallback.
+    runner_note = ""
+    try:
+        runner_patcher = _make_runner_patcher()
+        if runner_patcher is None:
+            runner_note = "; runner re-attach skipped (file not found)"
+            log.warning("[Genesis P28] gpu_model_runner.py not found — "
+                        "post-load re-attach NOT installed")
+        else:
+            r_result, r_failure = runner_patcher.apply()
+            if r_result == TextPatchResult.FAILED:
+                runner_note = "; runner re-attach FAILED"
+                log.warning("[Genesis P28] post-load re-attach text-patch "
+                            "failed: %s",
+                            r_failure.reason if r_failure else "unknown")
+            elif r_result == TextPatchResult.SKIPPED:
+                runner_note = "; runner re-attach skipped"
+                log.info("[Genesis P28] post-load re-attach skipped: %s",
+                         r_failure.reason if r_failure else "unknown")
+            else:
+                runner_note = "; post-load re-attach installed"
+    except Exception as e:
+        runner_note = "; runner re-attach errored"
+        log.warning("[Genesis P28] post-load re-attach wiring errored: %s", e)
+
     if result == TextPatchResult.APPLIED:
         reason = "forward_cuda patched + __init__ wrapped" if init_ok \
             else "forward_cuda patched, __init__ wrap skipped"
     else:
         reason = "already applied (idempotent)" if init_ok \
             else "idempotent; init wrap skipped"
-    return "applied", reason
+    return "applied", reason + runner_note

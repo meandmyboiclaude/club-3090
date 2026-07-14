@@ -255,9 +255,16 @@ def attach_buffer(module: Any, hint: Optional[int] = None) -> None:
 
 
 def _guess_module_device(module: Any) -> Optional[torch.device]:
-    """Pick a device from the module's parameters / submodules."""
+    """Pick a device from the module's parameters / submodules.
+
+    CUDA only [2026-07-14 BUG-072]: the old condition
+    (`!= "cpu" or == "cuda"`) matched 'meta' too, which would hand
+    get_or_create a meta device and attach a non-storage buffer. 'cpu'
+    and 'meta' both return None so attach defers to the post-load
+    re-attach (P28 sub-patch 3) instead of allocating on a wrong device.
+    """
     for p in module.parameters(recurse=True):
-        if p.device.type != "cpu" or p.device.type == "cuda":
+        if p.device.type == "cuda":
             return p.device
     return None
 
