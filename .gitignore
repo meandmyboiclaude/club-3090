@@ -81,3 +81,9 @@ models/*/vllm/compose/single/*-aibox.yml
 # #252: curated quality-baseline corpus (committed; the trusted n>=3 aggregates
 # `quality-baseline.sh` diffs fresh runs against). Run output elsewhere stays ignored.
 !results/baselines/
+
+# Engine JIT caches (torch_compile/triton/startup_plan) — machine-specific,
+# multi-MB blobs; crashed Blackwell boots when shipped (d793bca1). Never track.
+models/*/vllm/cache/torch_compile/
+models/*/vllm/cache/triton/
+models/*/vllm/cache/startup_plan/
