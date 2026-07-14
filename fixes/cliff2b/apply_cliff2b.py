@@ -65,6 +65,10 @@ def apply_patch():
         content = import_block + content
 
     # Replace the two-kernel path with conditional dispatch
+    # [2026-07-14 re-anchor for dev1060] Live chunk.py adds PN354's
+    # `**_GENESIS_PN354_KW` to both calls and `core_attn_out=core_attn_out`
+    # to chunk_fwd_o (buffer reuse). Anchor must match verbatim or the patch
+    # silently falls through to its import-only branch (observed: 0 fused refs).
     old_vanilla = (
         "    h, v_new, final_state = chunk_gated_delta_rule_fwd_h(\n"
         "        k=k,\n"
@@ -76,6 +80,7 @@ def apply_patch():
         "        cu_seqlens=cu_seqlens,\n"
         "        chunk_indices=chunk_indices,\n"
         "        chunk_offsets=chunk_offsets,\n"
+        "        **_GENESIS_PN354_KW,\n"
         "    )\n"
         "    o = chunk_fwd_o(\n"
         "        q=q,\n"
@@ -86,6 +91,8 @@ def apply_patch():
         "        scale=scale,\n"
         "        cu_seqlens=cu_seqlens,\n"
         "        chunk_indices=chunk_indices,\n"
+        "        core_attn_out=core_attn_out,\n"
+        "        **_GENESIS_PN354_KW,\n"
         "    )\n"
         "    if SUPPRESS_LEVEL < 3:\n"
         "        return g, o, A, final_state, None, None, None\n"
@@ -105,8 +112,10 @@ def apply_patch():
         "            scale=scale,\n"
         "            initial_state=initial_state,\n"
         "            output_final_state=output_final_state,\n"
+        "            o_buf=core_attn_out,\n"
         "            cu_seqlens=cu_seqlens,\n"
         "            chunk_offsets=chunk_offsets,\n"
+        "            use_exp2=_GENESIS_PN354_USE_EXP2,\n"
         "        )\n"
         "        if SUPPRESS_LEVEL < 3:\n"
         "            return g, o, A, final_state, None, None, None\n"
@@ -122,6 +131,7 @@ def apply_patch():
         "            cu_seqlens=cu_seqlens,\n"
         "            chunk_indices=chunk_indices,\n"
         "            chunk_offsets=chunk_offsets,\n"
+        "            **_GENESIS_PN354_KW,\n"
         "        )\n"
         "        o = chunk_fwd_o(\n"
         "            q=q,\n"
@@ -132,6 +142,8 @@ def apply_patch():
         "            scale=scale,\n"
         "            cu_seqlens=cu_seqlens,\n"
         "            chunk_indices=chunk_indices,\n"
+        "            core_attn_out=core_attn_out,\n"
+        "            **_GENESIS_PN354_KW,\n"
         "        )\n"
         "        if SUPPRESS_LEVEL < 3:\n"
         "            return g, o, A, final_state, None, None, None\n"
