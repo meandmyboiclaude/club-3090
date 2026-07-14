@@ -63,8 +63,16 @@ log = logging.getLogger("genesis.sndr_lane")
 
 # Our /fixes house series numbers that also exist (as DIFFERENT patches)
 # in Sander's registry — S-prefix alias targets (policy step 3).
+# PN95/PN96 added 2026-07-14: house /fixes patch_pn95 (TQ prefill workspace
+# sizing #43357) / patch_pn96 (structured-output marker FSM #44993) collide
+# with Sander's PN95 (tier-aware KV offload) / PN96 (emergency-demote PoC).
+# The S-aliases (GENESIS_ENABLE_SPN95_TIER_AWARE_CACHE /
+# GENESIS_ENABLE_SPN96_EMERGENCY_DEMOTE) keep Sander's pair individually
+# addressable with zero collision; both remain opt-in (default_on=False,
+# offload/tiering PoCs — no-op-to-risky on a single-card rig).
 _HOUSE_COLLIDING_IDS = {
     "PN71", "PN72", "PN73", "PN79", "PN80", "PN82", "PN90", "PN91", "PN92",
+    "PN95", "PN96",
 }
 
 # Shared ids that LANE-1 hard-owns and applies (its wiring is the live form
