@@ -1,0 +1,7 @@
+libcudart.so.12 {
+    global:
+        cudaMemGetInfo;
+        cudaMalloc;
+        cudaMallocAsync;
+        cudaFree;
+};

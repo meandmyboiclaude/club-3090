@@ -74,7 +74,7 @@ results/*
 .serena/
 
 # Local aibox files
-fixes/
+# fixes/ tracked first-class (2026-07-14: one-repo ruling, nothing dark)
 firecrawl-benchmarks-output.txt
 models/*/vllm/compose/single/*-aibox.yml
 
