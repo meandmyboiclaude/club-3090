@@ -212,7 +212,12 @@ services:
       # - GENESIS_ENABLE_PN292_REVERT_FUSED_MAMBA_POSTPROCESS=1
       - GENESIS_ENABLE_PN293_MAMBA_ATTN_PREFILL_FASTPATH=1
       - GENESIS_ENABLE_PN294_UNSPLIT_MTP_ATTN_GROUPS=1
-      - GENESIS_ENABLE_PN31_FA_VARLEN_PERSISTENT_OUT=1
+      # [2026-07-14] DROPPED — ALLOC-IN-REPLAY (bisect-convicted, 5-round auto-bisect):
+      # PN31 acquires per-shape persistent FA-varlen out buffers AT FIRST USE — first
+      # unseen shape after cudagraph capture allocates inside replay -> stable-ABI
+      # aten::empty RuntimeError (same class as PN50 wrapper). Needs capture-time
+      # preallocation to return. Final config w/o PN31: preflight+tool canary GREEN.
+      # - GENESIS_ENABLE_PN31_FA_VARLEN_PERSISTENT_OUT=1
       - GENESIS_ENABLE_PN340=1
       - GENESIS_ENABLE_PN341=1
       - GENESIS_ENABLE_PN350=1
