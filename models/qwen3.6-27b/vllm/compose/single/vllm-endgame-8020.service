@@ -10,7 +10,7 @@ WorkingDirectory=/home/user/club-3090/models/qwen3.6-27b/vllm/compose/single
 # Ship envelope (2026-07-14, post BUG-072 kill): util 0.95 + KV pin 150,967 tok
 # (profiler fit-value; gated by storm6 x3 + burst4 x2). See compose comments.
 Environment=GPU_MEMORY_UTILIZATION=0.95
-Environment=KV_CACHE_MEMORY_BYTES=2952790016
+Environment=KV_CACHE_MEMORY_BYTES=3489660928
 Environment=MAX_MODEL_LEN=65000
 Environment=MAX_NUM_SEQS=4
 # up -d: creates the container if missing, starts it if stopped (env from

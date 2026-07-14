@@ -582,7 +582,7 @@ services:
       # decode buffers deferred — IMA-history in the TQ workspace stack).
       - "${GPU_MEMORY_UTILIZATION:-0.95}"
       - --kv-cache-memory
-      - "${KV_CACHE_MEMORY_BYTES:-2952790016}"
+      - "${KV_CACHE_MEMORY_BYTES:-3489660928}"
       # [PN83 — 2026-07-07] rerank micro-slots: PARKED after 2 OOM arms.
       # 29 seats = OOM at KV alloc (~700MB GDN/mamba state over budget);
       # 12 seats = aten::empty alloc failure during warmup (P66 capture list
