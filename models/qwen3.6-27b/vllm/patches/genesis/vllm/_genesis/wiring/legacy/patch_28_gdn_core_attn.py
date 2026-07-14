@@ -93,6 +93,51 @@ _NEW_ALLOC = (
 )
 
 
+# ── Sub-patch 2 (2026-07-14, BUG-072 root fix): IN-SOURCE attach ──────
+# The runtime __init__ wrap (_wrap_gdn_init) is a process-local
+# monkeypatch: it lives only in the ENTRYPOINT python process, while
+# EngineCore spawns fresh and re-imports vllm from the patched FILES —
+# so engine-side instances never got _genesis_gdn_core_attn_buf, the
+# torch.zeros else-branch ran INSIDE the compiled piecewise region, and
+# inductor's static planning lifted it into 17 persistent pow2-padded
+# buffers (17 × [8192, 24, 256] fp16 = 1.63 GiB — the BUG-072 residual
+# resident list; pow2(4128)=8192). Appending the attach IN-SOURCE at the
+# end of __init__ makes it run in every process; the manager registry is
+# shape-keyed, so all 17 GDN layers SHARE one right-sized buffer
+# (~48 MB at the 4160 budget) and the compiled region allocates nothing.
+# Bonus: __init__ runs inside the vLLM config context (the line above
+# the anchor uses get_current_vllm_config), so the P73 resolver sees the
+# real max_num_batched_tokens. Anchor byte-verified count==1 on the
+# installed dev1060 file (2026-07-14).
+
+_INIT_ATTACH_OLD = (
+    "        compilation_config = get_current_vllm_config().compilation_config\n"
+    "        if prefix in compilation_config.static_forward_context:\n"
+    "            raise ValueError(f\"Duplicate layer name: {prefix}\")\n"
+    "        compilation_config.static_forward_context[prefix] = self\n"
+)
+
+_INIT_ATTACH_NEW = (
+    "        compilation_config = get_current_vllm_config().compilation_config\n"
+    "        if prefix in compilation_config.static_forward_context:\n"
+    "            raise ValueError(f\"Duplicate layer name: {prefix}\")\n"
+    "        compilation_config.static_forward_context[prefix] = self\n"
+    "        # [Genesis P28] in-source attach — must run in EVERY process\n"
+    "        # (EngineCore spawns fresh; a runtime __init__ wrap does not\n"
+    "        # survive). Shape-keyed registry => one shared buffer across\n"
+    "        # all GDN layers; the forward's prealloc branch then engages\n"
+    "        # and the compiled region stops lifting torch.zeros into\n"
+    "        # persistent pow2-padded statics (BUG-072).\n"
+    "        try:\n"
+    "            from vllm._genesis.kernels.gdn_core_attn_manager import (\n"
+    "                attach_buffer as _genesis_p28_attach,\n"
+    "            )\n"
+    "            _genesis_p28_attach(self)\n"
+    "        except Exception:\n"
+    "            pass  # degraded: forward falls back to eager torch.zeros\n"
+)
+
+
 def _make_patcher() -> TextPatcher | None:
     target = resolve_vllm_file("model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py")
     if target is None:
@@ -107,6 +152,12 @@ def _make_patcher() -> TextPatcher | None:
                 anchor=_OLD_ALLOC,
                 replacement=_NEW_ALLOC,
                 required=True,
+            ),
+            TextPatch(
+                name="p28_init_attach_in_source",
+                anchor=_INIT_ATTACH_OLD,
+                replacement=_INIT_ATTACH_NEW,
+                required=False,
             ),
         ],
         upstream_drift_markers=UPSTREAM_DRIFT_MARKERS,
