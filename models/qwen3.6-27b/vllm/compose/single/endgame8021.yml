@@ -242,8 +242,12 @@ services:
       - GENESIS_ENABLE_PN79_V2_MD5_CHUNK=1
       - GENESIS_ENABLE_PN79_V2_MD5_CHUNK_DELTA_H=1
       - GENESIS_ENABLE_PN91_DEVELOPER_ROLE=1
-      # [2026-07-14 USER: "anything that's an improvement is a go" — unheld]
-      - GENESIS_ENABLE_PN77_FP8_LM_HEAD=1
+      # [2026-07-14] PN77 MEASURED REGRESSION on Qwopus GPTQ-Pro: FP8 lm_head swap ->
+      # grammar canary 11/12 RED (boot 14; engine alive, pure quality). Not an
+      # improvement on this checkpoint+grammar+MTP stack — evidence-based off.
+      - GENESIS_ENABLE_PN77_FP8_LM_HEAD=0
+      # PN127 inert as flagged (installs template asset only; serving keeps explicit
+      # froggeric --chat-template). Asset staged for the deliberate template A/B.
       - GENESIS_ENABLE_PN127_AUTO_CHAT_TEMPLATE=1
       # [2026-07-14 NA-RIG audit] /sleep + /wake_up ARE exposed (VLLM_SERVER_DEV_MODE=1);
       # stock wake path AttributeErrors on hybrid GDN nested KV — near-free guard.
