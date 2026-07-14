@@ -70,6 +70,26 @@ def _vt_trace_step():
                         _vt_log.info(f"[VRAM]   GPB {_vt_e['size_human']:>10}  {_vt_e['namespace']}  {_vt_e['shape']}")
             except Exception as _vt_ex:
                 _vt_log.info(f"[VRAM] GPB dump failed: {_vt_ex}")
+            # [2026-07-14] the promised gc tensor dump — top CUDA tensors by
+            # size; shapes identify the holder (KV pool / weights excluded by
+            # the >64MB-and-not-seen-at-baseline filter being impractical, so
+            # just print top-15 and diff by eye across dumps).
+            try:
+                _vt_seen = {}
+                for _vt_o in _vt_gc.get_objects():
+                    try:
+                        if _vt_torch.is_tensor(_vt_o) and _vt_o.is_cuda:
+                            _vt_nb = _vt_o.element_size() * _vt_o.numel()
+                            if _vt_nb > 64 * 1024 * 1024:
+                                _vt_k = (tuple(_vt_o.shape), str(_vt_o.dtype))
+                                _vt_c, _vt_b = _vt_seen.get(_vt_k, (0, 0))
+                                _vt_seen[_vt_k] = (_vt_c + 1, _vt_b + _vt_nb)
+                    except Exception:
+                        pass
+                for _vt_k, (_vt_c, _vt_b) in sorted(_vt_seen.items(), key=lambda x: -x[1][1])[:15]:
+                    _vt_log.info(f"[VRAM]   TENSOR {_vt_b//1024**2:>6}MB x{_vt_c}  shape={list(_vt_k[0])} {_vt_k[1]}")
+            except Exception as _vt_ex:
+                _vt_log.info(f"[VRAM] tensor dump failed: {_vt_ex}")
 
     _vt_last_reserved = _vt_torch.cuda.memory_reserved()
 '''
