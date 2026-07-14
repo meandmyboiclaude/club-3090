@@ -113,6 +113,16 @@ services:
       # P73 resolver fixed 2026-07-14 (fallback no longer cached) so P28's
       # buffer sizes to the real max_num_batched_tokens (4128) once the vLLM
       # config context exists — every chunk stays on the fast prealloc path.
+      # [BUG-072 2026-07-14] Global prealloc budget pinned to the real 4128 max
+      # chunk (+32 slack) so every P28/P73-resolver consumer sizes to reality
+      # (the resolver caches its FIRST resolution; before this pin it could
+      # cache a wrong value). NOTE: the 17 x [8192,24,256] fp16 = 1.63 GiB
+      # resident tensor LIST found by the tracer is NOT P28's (unchanged by
+      # this pin; owner = an anonymous list — piecewise/workspace class,
+      # gc-referrer walk got to 'list held by list'; NEXT-SESSION thread).
+      # A/B-acquitted: prefix-cache, GPB pools (registry empty), warmup trio,
+      # PN31 (its own unbounded-pool bug was real and is fixed separately).
+      - GENESIS_PREALLOC_TOKEN_BUDGET=4160
       - GENESIS_ENABLE_VRAM_TRACER=${GENESIS_ENABLE_VRAM_TRACER:-0}
       # [BUG-072 FIX 2026-07-14] P38 TQ-continuation pools are lazily allocated on
       # the FIRST long prefill, sized to max_model_len, AFTER the profiler already
@@ -128,7 +138,7 @@ services:
       - GENESIS_ENABLE_P69_LONG_CTX_TOOL_REMINDER=1
       - GENESIS_P68_P69_LONG_CTX_THRESHOLD_CHARS=50000
       - GENESIS_ENABLE_P72_PROFILE_RUN_CAP=1
-      - GENESIS_PROFILE_RUN_CAP_M=2048
+      - GENESIS_PROFILE_RUN_CAP_M=4128
       - GENESIS_ENABLE_P74_CHUNK_CLAMP=1
       - GENESIS_ENABLE_P94=1
       #- GENESIS_ENABLE_PN8_MTP_DRAFT_ONLINE_QUANT=1
