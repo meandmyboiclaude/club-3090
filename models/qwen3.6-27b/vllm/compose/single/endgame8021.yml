@@ -532,7 +532,12 @@ services:
       - --tensor-parallel-size
       - "1"
       - --max-model-len
-      - "${MAX_MODEL_LEN:-75000}"
+      # [2026-07-14 sized from 6-day Phoenix prod traffic (10,114 reqs): max
+      # total(prompt+gen)=58.6K, zero >60K, p95=30.3K — 60K covers 100% of
+      # observed usage (user: 4 slots × ~15K). Was 75000 (paper capacity: >30K
+      # prefills aborted under load anyway); the KV freed by the trim
+      # (~424 MiB) goes to scratch headroom > the 276 MiB chunk peak.]
+      - "${MAX_MODEL_LEN:-60000}"
       - --gpu-memory-utilization
       # [MOOT 2026-07-14] With --kv-cache-memory pinned below, vLLM SKIPS memory
       # profiling entirely — no util value caps anything on this compose; the flag
@@ -550,7 +555,8 @@ services:
       # util-coupled (0.85); regenerate from a fresh boot's "to fit" line if GPU_MEMORY_UTILIZATION
       # changes. Fused-kernel frees ~2.74GiB transient so this margin only improves.
       - --kv-cache-memory
-      - "${KV_CACHE_MEMORY_BYTES:-1991240704}"
+      # [2026-07-14] rescaled for 60K model-len (25,791.6 B/tok TQ3): 1.44 GiB.
+      - "${KV_CACHE_MEMORY_BYTES:-1547496175}"
       # [PN83 — 2026-07-07] rerank micro-slots: PARKED after 2 OOM arms.
       # 29 seats = OOM at KV alloc (~700MB GDN/mamba state over budget);
       # 12 seats = aten::empty alloc failure during warmup (P66 capture list
