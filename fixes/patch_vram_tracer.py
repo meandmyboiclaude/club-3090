@@ -88,6 +88,26 @@ def _vt_trace_step():
                         pass
                 for _vt_k, (_vt_c, _vt_b) in sorted(_vt_seen.items(), key=lambda x: -x[1][1])[:15]:
                     _vt_log.info(f"[VRAM]   TENSOR {_vt_b//1024**2:>6}MB x{_vt_c}  shape={list(_vt_k[0])} {_vt_k[1]}")
+                # [2026-07-14] name the OWNER of the biggest repeated tensor:
+                # walk referrers of one instance (dict -> owning object attr).
+                if _vt_seen:
+                    _vt_top = max(_vt_seen.items(), key=lambda x: x[1][1])[0]
+                    for _vt_o in _vt_gc.get_objects():
+                        try:
+                            if (_vt_torch.is_tensor(_vt_o) and _vt_o.is_cuda
+                                    and tuple(_vt_o.shape) == _vt_top[0]
+                                    and str(_vt_o.dtype) == _vt_top[1]):
+                                for _vt_r in _vt_gc.get_referrers(_vt_o):
+                                    if isinstance(_vt_r, dict):
+                                        _vt_keys = [k for k, v in _vt_r.items() if v is _vt_o]
+                                        for _vt_r2 in _vt_gc.get_referrers(_vt_r):
+                                            _vt_log.info(f"[VRAM]   OWNER keys={_vt_keys} holder={type(_vt_r2).__name__} {getattr(_vt_r2, '__qualname__', '')}"[:220])
+                                    elif isinstance(_vt_r, (list, tuple)):
+                                        for _vt_r2 in _vt_gc.get_referrers(_vt_r):
+                                            _vt_log.info(f"[VRAM]   OWNER via {type(_vt_r).__name__} holder={type(_vt_r2).__name__}"[:220])
+                                break
+                        except Exception:
+                            pass
             except Exception as _vt_ex:
                 _vt_log.info(f"[VRAM] tensor dump failed: {_vt_ex}")
 
