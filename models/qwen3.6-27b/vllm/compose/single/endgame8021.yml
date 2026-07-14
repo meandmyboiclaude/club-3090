@@ -128,12 +128,9 @@ services:
       # Performance
       - GENESIS_ENABLE_P40=1
       - GENESIS_ENABLE_P82=1
-      # [2026-07-14] PN50=0 FINAL for this wave: kernel arange fixed (b23b704) but the
-      # WRAPPER torch.empty()s 4 outputs per call inside the compiled region -> inductor
-      # bakes the alloc into the captured graph -> aten::empty stable-ABI failure on replay
-      # (boots 8/9/12 signature; boot 10 green with PN50=0). Needs out-tensor pooling or
-      # capture-time preallocation — A/B basket item, not a flag flip.
-      - GENESIS_ENABLE_PN50_GDN_FUSED_PROJ=0
+      # [2026-07-14] PN50=1: kernel arange fixed (b23b704) + wrapper compile-safe
+      # (is_compiling -> stock chain; eager keeps fused kernel). Parity green both modes.
+      - GENESIS_ENABLE_PN50_GDN_FUSED_PROJ=1
       # Correctness
       - GENESIS_ENABLE_P91=1
       - GENESIS_ENABLE_P107_MTP_TRUNCATION_DETECTOR=1
@@ -187,9 +184,9 @@ services:
       # survived BISECT-9 because it sits in turboquant_attn not the bisected cluster).
       # WorkspaceManager is the PREREQUISITE for /fixes PN79 cudagraph-safe scratch + FULL CG.
       # - GENESIS_ENABLE_P98=1
-      # P99 memoizes WorkspaceManager.get_simultaneous — held with P98 for the clean boot;
-      # re-eval standalone after the gate is green (pure memoization, likely safe alone).
-      # - GENESIS_ENABLE_P99=1
+      # [2026-07-14] P99 standalone (pure memoization of WorkspaceManager.get_simultaneous;
+      # P98's revert stays dropped — the manager is load-bearing for PN79/FULL-CG).
+      - GENESIS_ENABLE_P99=1
       - GENESIS_ENABLE_PN106_GDN_H_POOL=1
       - GENESIS_ENABLE_PN118=1
       - GENESIS_ENABLE_PN118_V2_MD5_TURBOQUANT_ATTN=1
@@ -212,12 +209,9 @@ services:
       # - GENESIS_ENABLE_PN292_REVERT_FUSED_MAMBA_POSTPROCESS=1
       - GENESIS_ENABLE_PN293_MAMBA_ATTN_PREFILL_FASTPATH=1
       - GENESIS_ENABLE_PN294_UNSPLIT_MTP_ATTN_GROUPS=1
-      # [2026-07-14] DROPPED — ALLOC-IN-REPLAY (bisect-convicted, 5-round auto-bisect):
-      # PN31 acquires per-shape persistent FA-varlen out buffers AT FIRST USE — first
-      # unseen shape after cudagraph capture allocates inside replay -> stable-ABI
-      # aten::empty RuntimeError (same class as PN50 wrapper). Needs capture-time
-      # preallocation to return. Final config w/o PN31: preflight+tool canary GREEN.
-      # - GENESIS_ENABLE_PN31_FA_VARLEN_PERSISTENT_OUT=1
+      # [2026-07-14] PN31=1: pool now is_compiling-gated (compiled graph = stock,
+      # eager keeps pooled buffer) — the traced dict-cache alloc was the replay crash.
+      - GENESIS_ENABLE_PN31_FA_VARLEN_PERSISTENT_OUT=1
       - GENESIS_ENABLE_PN340=1
       - GENESIS_ENABLE_PN341=1
       - GENESIS_ENABLE_PN350=1
@@ -248,6 +242,9 @@ services:
       - GENESIS_ENABLE_PN79_V2_MD5_CHUNK=1
       - GENESIS_ENABLE_PN79_V2_MD5_CHUNK_DELTA_H=1
       - GENESIS_ENABLE_PN91_DEVELOPER_ROLE=1
+      # [2026-07-14 USER: "anything that's an improvement is a go" — unheld]
+      - GENESIS_ENABLE_PN77_FP8_LM_HEAD=1
+      - GENESIS_ENABLE_PN127_AUTO_CHAT_TEMPLATE=1
       # [2026-07-14 NA-RIG audit] /sleep + /wake_up ARE exposed (VLLM_SERVER_DEV_MODE=1);
       # stock wake path AttributeErrors on hybrid GDN nested KV — near-free guard.
       - GENESIS_ENABLE_PN55_WAKE_UP_HYBRID_KV=1
