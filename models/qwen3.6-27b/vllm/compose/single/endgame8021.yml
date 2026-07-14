@@ -532,12 +532,10 @@ services:
       - --tensor-parallel-size
       - "1"
       - --max-model-len
-      # [2026-07-14 sized from 6-day Phoenix prod traffic (10,114 reqs): max
-      # total(prompt+gen)=58.6K, zero >60K, p95=30.3K — 60K covers 100% of
-      # observed usage (user: 4 slots × ~15K). Was 75000 (paper capacity: >30K
-      # prefills aborted under load anyway); the KV freed by the trim
-      # (~424 MiB) goes to scratch headroom > the 276 MiB chunk peak.]
-      - "${MAX_MODEL_LEN:-60000}"
+      # [2026-07-14 USER spec: 65K — 15K caps on most callers (hindsight etc),
+      # 60K for something big, 4-5K buffer. 6-day Phoenix prod traffic
+      # (10,114 reqs): max total(prompt+gen)=58.6K, zero >60K, p95=30.3K.]
+      - "${MAX_MODEL_LEN:-65000}"
       - --gpu-memory-utilization
       # [MOOT 2026-07-14] With --kv-cache-memory pinned below, vLLM SKIPS memory
       # profiling entirely — no util value caps anything on this compose; the flag
@@ -555,8 +553,15 @@ services:
       # util-coupled (0.85); regenerate from a fresh boot's "to fit" line if GPU_MEMORY_UTILIZATION
       # changes. Fused-kernel frees ~2.74GiB transient so this margin only improves.
       - --kv-cache-memory
-      # [2026-07-14] rescaled for 60K model-len (25,791.6 B/tok TQ3): 1.44 GiB.
-      - "${KV_CACHE_MEMORY_BYTES:-1547496175}"
+      # [2026-07-14] KV = 160K tokens (4.03 GiB @ 25,791.6 B/tok TQ3) — the
+      # measured physical max for 4-slot concurrency headroom: torch cap
+      # 23.31 GiB − 17.4 weights − 0.55 CUDA ctx − 1.25 steady scratch/graphs
+      # (fresh-boot measured) = ~4.1 GiB KV-able; ~620 MiB burst margin kept
+      # (2× the 276 MiB MLP chunk peak). USER asked 200K+ (5.16 GiB) — does
+      # NOT fit these weights: it would eat the scratch the warmup + chunk
+      # peaks need and abort-storm immediately. 4×15K callers = 60K
+      # concurrent KV → 100K tokens spare at 160K.
+      - "${KV_CACHE_MEMORY_BYTES:-4126656000}"
       # [PN83 — 2026-07-07] rerank micro-slots: PARKED after 2 OOM arms.
       # 29 seats = OOM at KV alloc (~700MB GDN/mamba state over budget);
       # 12 seats = aten::empty alloc failure during warmup (P66 capture list
