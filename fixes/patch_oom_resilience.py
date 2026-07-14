@@ -56,8 +56,15 @@ def apply():
         log.info("[oom_resilience] already applied (v7)")
         return
 
-    # Ensure torch import (idempotent).
-    if "import torch\n" not in text and "import torch " not in text:
+    # Ensure a MODULE-LEVEL bare `import torch` binds the name `torch`.
+    # [BUG 2026-07-14] The old substring check ("import torch " in text)
+    # false-matched vram_tracer's `import torch as _vt_torch` (and would
+    # match any indented local import), skipping the insert -> the guard's
+    # isinstance(_oom_e, torch.cuda.OutOfMemoryError) NameError'd -> the
+    # OOM HANDLER ITSELF killed EngineCore. Require an exact top-level
+    # binding line instead.
+    import re as _re
+    if not _re.search(r"^import torch\s*(#.*)?$", text, _re.M):
         lines = text.split("\n")
         last_import = 0
         for i, line in enumerate(lines):
