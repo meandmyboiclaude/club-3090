@@ -53,6 +53,24 @@ SAFETY MODEL
   * Upper range bound capped <0.24.0 pending the #47562 merge (drift
     markers self-skip earlier if it lands within the window).
 
+================================================================
+DEV1060 RE-ANCHOR (2026-07-14; pin 0.23.1rc1.dev1060 club-dev1060-cherry)
+================================================================
+
+The historical 3-line else-anchor is count==0 on dev1060: upstream
+expanded the else-branch with a required/named empty-content guard
+(``return [], None``) BEFORE the raw-content return. That guard is a
+DIFFERENT fix — the PN525 bug persists: the closing
+``return None, content`` still ignores ``tool_call_info.content`` on
+the auto path, so truncated ``<tool_call>`` markup still reaches the
+client. The dev1060 sub-patch keys on the guard-tail + raw-return pair
+(byte-verified count==1 against the installed dev1060 source; the
+20-space ``return [], None`` alone appears 2x, the pair is unique) and
+inserts the same cleaned-content preference between them.
+``tool_call_info`` is in scope (assigned in the is_auto_tool_choice
+arm). Historical + dev1060 anchors are mutually exclusive (the guard
+block does not exist on dev748), so the pair can never double-apply.
+
 Author backport: Sandermage (Sander) Barzov Aleksandr, Ukraine, Odessa.
 Original PR: vllm#47562 (OPEN as of 2026-07-05); fixes issue #47137.
 """
@@ -101,6 +119,32 @@ PN525_NO_TOOLCALL_NEW = (
     "                return None, content\n"
 )
 
+# ── Sub-patch (dev1060): guard-tail + raw-return pair ────────────────
+# Anchor: the required/named empty-content guard's return (20-space)
+# followed by the closing raw-content return (16-space). Byte-verified
+# count==1 on installed dev1060 (`return [], None` alone is 2x; the
+# pair is unique). Mutually exclusive with the historical anchor.
+
+PN525_NO_TOOLCALL_DEV1060_OLD = (
+    "                    return [], None\n"
+    "                return None, content\n"
+)
+
+PN525_NO_TOOLCALL_DEV1060_NEW = (
+    "                    return [], None\n"
+    "                # [Genesis PN525 vendor of vllm#47562] No complete\n"
+    "                # tool call was promoted. Prefer the parser's cleaned\n"
+    "                # text: it drops incomplete tool-call markup (a\n"
+    "                # <tool_call> opener truncated by max_tokens or a stop\n"
+    "                # string), so the non-streaming result matches\n"
+    "                # streaming (#47137). Fall back to the raw content\n"
+    "                # when the parser returned no result object.\n"
+    "                if tool_call_info is not None:\n"
+    "                    cleaned = tool_call_info.content\n"
+    "                    return None, cleaned if cleaned else None\n"
+    "                return None, content\n"
+)
+
 # Drift markers — #47562's exact comment head and code line (from
 # `gh pr diff 47562`, 2026-07-05). Byte-verified absent in pristine
 # dev748 (count 0). Our replacement rewords the comment and uses the
@@ -126,11 +170,23 @@ def _make_patcher() -> TextPatcher | None:
         target_file=str(target),
         marker=GENESIS_PN525_MARKER,
         sub_patches=[
+            # Historical anchor (dev748 shape). dev1060 re-anchor
+            # (2026-07-14): count==0 there (else-branch expanded with the
+            # required/named guard), so it is now required=False and
+            # soft-skips; on the historical pin it still lands. Exactly
+            # one of the pair matches per pin (the guard block does not
+            # exist pre-dev1060), so they can never double-apply.
             TextPatch(
                 name="pn525_no_toolcall_cleaned_content",
                 anchor=PN525_NO_TOOLCALL_OLD,
                 replacement=PN525_NO_TOOLCALL_NEW,
-                required=True,
+                required=False,
+            ),
+            TextPatch(
+                name="pn525_no_toolcall_cleaned_content_dev1060",
+                anchor=PN525_NO_TOOLCALL_DEV1060_OLD,
+                replacement=PN525_NO_TOOLCALL_DEV1060_NEW,
+                required=False,
             ),
         ],
         upstream_drift_markers=list(_DRIFT_MARKERS),
