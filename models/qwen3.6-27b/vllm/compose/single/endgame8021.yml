@@ -537,31 +537,16 @@ services:
       # (10,114 reqs): max total(prompt+gen)=58.6K, zero >60K, p95=30.3K.]
       - "${MAX_MODEL_LEN:-65000}"
       - --gpu-memory-utilization
-      # [MOOT 2026-07-14] With --kv-cache-memory pinned below, vLLM SKIPS memory
-      # profiling entirely — no util value caps anything on this compose; the flag
-      # is inert either way. Kept only so a future un-pinning has a sane default.
-      # The live container was brought up with GPU_MEMORY_UTILIZATION=0.85 at `up`
-      # time (a plain `podman restart` keeps it; a fresh `up` without the env falls
-      # back to this default). If you ever DROP the --kv-cache-memory pin: 0.85 is
-      # the validated long-prefill value (14K survives, ceiling ~73K), 0.90 is max-KV.
+      # [2026-07-14 un-pinned] util-mode ACTIVE: the profiler sizes KV each boot
+      # (prod ran this way and got 206,400 tokens at 0.90/75K; the hand-derived
+      # 160K byte-pin undershot — profiling measures the real residents). The
+      # COLD-boot hazard (profiler runs the inductor compile inline → ~2.3 GiB
+      # transient in the peak snapshot → negative KV → ValueError loop) only
+      # bites on a cleared compile cache: after any `rm -rf cache/torch_compile`
+      # do ONE boot with KV_CACHE_MEMORY_BYTES=<last known good> exported, then
+      # revert to util-mode. #47388 persists the profile under cache/startup_plan
+      # so warm boots reuse it.
       - "${GPU_MEMORY_UTILIZATION:-0.90}"
-      # [cold-boot fix 2026-07-14] Pin KV bytes = the value vLLM's own profiler prints, which
-      # SKIPS the memory-profiling forward pass (cold AND warm). Root cause of the first-boot
-      # crash: on a cold boot the profiler runs the ~12s inductor compile in-line, so the ~2.3GiB
-      # compiler workspace is resident at the peak snapshot → KV budget goes negative → ValueError
-      # → restart. Pinning removes profiling so the transient can't poison KV sizing. Value is
-      # util-coupled (0.85); regenerate from a fresh boot's "to fit" line if GPU_MEMORY_UTILIZATION
-      # changes. Fused-kernel frees ~2.74GiB transient so this margin only improves.
-      - --kv-cache-memory
-      # [2026-07-14] KV = 160K tokens (4.03 GiB @ 25,791.6 B/tok TQ3) — the
-      # measured physical max for 4-slot concurrency headroom: torch cap
-      # 23.31 GiB − 17.4 weights − 0.55 CUDA ctx − 1.25 steady scratch/graphs
-      # (fresh-boot measured) = ~4.1 GiB KV-able; ~620 MiB burst margin kept
-      # (2× the 276 MiB MLP chunk peak). USER asked 200K+ (5.16 GiB) — does
-      # NOT fit these weights: it would eat the scratch the warmup + chunk
-      # peaks need and abort-storm immediately. 4×15K callers = 60K
-      # concurrent KV → 100K tokens spare at 160K.
-      - "${KV_CACHE_MEMORY_BYTES:-4126656000}"
       # [PN83 — 2026-07-07] rerank micro-slots: PARKED after 2 OOM arms.
       # 29 seats = OOM at KV alloc (~700MB GDN/mamba state over budget);
       # 12 seats = aten::empty alloc failure during warmup (P66 capture list
