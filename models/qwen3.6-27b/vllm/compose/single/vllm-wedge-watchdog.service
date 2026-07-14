@@ -1,0 +1,5 @@
+[Unit]
+Description=vLLM wedge watchdog probe (BUG-072 abort-wedge auto-restart)
+[Service]
+Type=oneshot
+ExecStart=/home/user/club-3090/models/qwen3.6-27b/vllm/compose/single/vllm-wedge-watchdog.sh 8020
