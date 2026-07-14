@@ -700,9 +700,13 @@ class TurboQuantBufferManager:
     ) -> torch.Tensor:
         """P44 forward-path entry for the MIXED-BATCH attn_out tensor.
 
-        Replaces `torch.zeros(N, Hq, D, device, dtype)` in the mixed
-        decode+prefill branch of `TurboQuantAttentionImpl._forward`.
-        Returns a zeroed `[:num_tokens]` slice of a pointer-stable pool.
+        Replaces the mixed decode+prefill attn_out alloc in
+        `TurboQuantAttentionImpl._forward`. Returns a `[:num_tokens]`
+        slice of a pointer-stable pool WITHOUT zeroing: upstream switched
+        this alloc `torch.zeros -> torch.empty` (the kernel overwrites
+        every `[:num_tokens]` cell before read), so the per-call memset
+        (~80 MB/forward at 4096x40x256 bf16) was dead work. The rare
+        fallback paths keep `torch.zeros` (byte-conservative).
 
         On platform incompatibility OR overflow (num_tokens > budget),
         falls back to fresh `torch.zeros` — correctness preserved.
@@ -737,9 +741,11 @@ class TurboQuantBufferManager:
                 (num_tokens, num_q_heads, head_size),
                 device=device, dtype=dtype,
             )
-        slice_ = buf[:num_tokens]
-        slice_.zero_()
-        return slice_
+        # [Genesis P44 2026-07-14] no .zero_(): the TQ mixed-batch kernel
+        # overwrites every [:num_tokens] cell before read (upstream moved
+        # this alloc torch.zeros -> torch.empty); the per-call memset was
+        # ~80 MB of dead work per mixed-batch forward.
+        return buf[:num_tokens]
 
     # ═══════════════════════════════════════════════════════════════════
     # P38 — Continuation-prefill K/V dequant + full-workspace buffers
