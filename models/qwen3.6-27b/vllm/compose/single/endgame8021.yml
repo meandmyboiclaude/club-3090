@@ -559,20 +559,22 @@ services:
       # (10,114 reqs): max total(prompt+gen)=58.6K, zero >60K, p95=30.3K.]
       - "${MAX_MODEL_LEN:-65000}"
       - --gpu-memory-utilization
-      # [2026-07-14 SHIP STATE — re-pinned after the day's full hunt] The
-      # endgame stack carries a 1.63 GiB anonymous resident tensor list
-      # (BUG-072 residual, owner hunt = next session) that lands AFTER
-      # profiling, so every util-profiled KV size starves large-prefill
-      # transients (0.90/0.87 stormed; honest-4128 profiling at 0.85 won't
-      # even boot 65K — profiled KV < 1.6 GiB minimum). The KV pin below +
-      # util 0.85 env is the validated envelope: boots deterministically
-      # (pin skips profiling), 15K prefill 6.5s, single 30K OK, and the
-      # PN31 fix (44d7ee29) removes the cumulative per-shape minting that
-      # wedged sustained storms. Kill the pin only after the 1.63 GiB list
-      # is eliminated at source.
-      - "${GPU_MEMORY_UTILIZATION:-0.85}"
+      # [2026-07-14 BUG-072 KILLED — pin RAISED 73K -> 150,967 tok] The
+      # 1.63 GiB resident list was PN31 v1's own per-layer big-buf (17
+      # full-attn layers x 96MiB, memory-history-traced); fixed by PN31
+      # v2/v3 (class-level shared buffer + capture-only exact pool,
+      # e7f78b6c + b8dcae8f) and P28 post-load re-attach. Honest re-profile
+      # after the fix: 150,967 tok @0.95 / 161K @0.96 / 170K @0.97 / 180K
+      # @0.98. Gate results (storm6 x3 + 4-slot concurrent burst4 x2):
+      # 0.98 = 0/6, 0.97 = 0-1/6, 0.96 = serial-green but CONCURRENT
+      # bursts abort round 2, 0.95 = ALL GREEN both. Ship = util 0.95 +
+      # pin 4088487424 (the profiler's own fit-value at 0.95; pin skips
+      # profiling -> deterministic boots). ~1.2 GiB device slack absorbs
+      # the remaining runtime transients (mid_o 17x11.3MiB per-layer
+      # decode buffers deferred — IMA-history in the TQ workspace stack).
+      - "${GPU_MEMORY_UTILIZATION:-0.95}"
       - --kv-cache-memory
-      - "${KV_CACHE_MEMORY_BYTES:-1991240704}"
+      - "${KV_CACHE_MEMORY_BYTES:-4088487424}"
       # [PN83 — 2026-07-07] rerank micro-slots: PARKED after 2 OOM arms.
       # 29 seats = OOM at KV alloc (~700MB GDN/mamba state over budget);
       # 12 seats = aten::empty alloc failure during warmup (P66 capture list

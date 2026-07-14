@@ -8,8 +8,8 @@ Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=/home/user/club-3090/models/qwen3.6-27b/vllm/compose/single
 # Ship envelope (2026-07-14): util 0.85 + KV pin — see compose comments / BUG-072.
-Environment=GPU_MEMORY_UTILIZATION=0.85
-Environment=KV_CACHE_MEMORY_BYTES=1991240704
+Environment=GPU_MEMORY_UTILIZATION=0.95
+Environment=KV_CACHE_MEMORY_BYTES=4088487424
 Environment=MAX_MODEL_LEN=65000
 Environment=MAX_NUM_SEQS=4
 # up -d: creates the container if missing, starts it if stopped (env from
