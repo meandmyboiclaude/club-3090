@@ -94,15 +94,14 @@ services:
       - VLLM_MARLIN_USE_ATOMIC_ADD=1
       - TRITON_CACHE_DIR=/root/.triton/cache
       # Genesis opt-ins
-      # [BUG-071 fix 2026-07-14] The long-prefill "aten::empty" is a MASKED CUDA OOM:
-      # a ~14K prefill's core_attn_out (~276 MiB) can't allocate at RUNTIME under
-      # util=0.91 VRAM pressure (255 MiB free at the peak). P28's fix = PREALLOCATE that
-      # buffer at BOOT so the runtime path is a slice (no 276 MiB runtime alloc). Size it
-      # to cover realistic long prefills; the resolver reads GENESIS_PREALLOC_TOKEN_BUDGET
-      # (priority 2, before the domain env). 16384 → ~316 MiB reserved at boot (idle has
-      # ~1.9 GiB free). Prefills > this still OOM (rig VRAM ceiling — single 24GB @ 75K is
-      # beyond the blessed envelope; bump this + lower util for larger prefills).
-      - GENESIS_PREALLOC_TOKEN_BUDGET=16384
+      # [BUG-071 CORRECTED 2026-07-14] GENESIS_PREALLOC_TOKEN_BUDGET=16384 REMOVED —
+      # that was the disproven first theory (long-prefill aten::empty blamed on a
+      # core_attn_out runtime-alloc OOM; the real cause was the traced torch.zeros
+      # in P28's over-capacity fallback lowering to aten::empty inside the
+      # PIECEWISE-compiled GDN graph). The real fix is P28's dynamo-disabled eager
+      # fallback (patch_28_gdn_core_attn.py, validated by longprefill.py on a cold
+      # cache). The 16384 budget just reserved ~316 MiB at boot for nothing;
+      # prefills >4096 take the eager fallback path (dynamo-opaque runtime alloc).
       - GENESIS_ENABLE_P58_ASYNC_PLACEHOLDER_FIX=1
       - GENESIS_ENABLE_P64_QWEN3CODER_MTP_STREAMING=1
       - GENESIS_ENABLE_P68_AUTO_FORCE_TOOL=1
@@ -524,10 +523,13 @@ services:
       - --max-model-len
       - "${MAX_MODEL_LEN:-75000}"
       - --gpu-memory-utilization
-      # [BUG-071 2026-07-14] Kept at 0.90 (max KV — user's KV-over-throughput pref). BUG-071 (a 14K
-      # prefill OOM, core_attn_out ~276 MiB / ~19.7 KiB/tok → ~12.8K prefill ceiling at 0.90) is a
-      # NON-ISSUE for prod: Grafana shows real input ≤4K, far under the ceiling. 0.85 (validated: 14K
-      # survives, ceiling ~73K) is available if long prefills are ever needed — at ~1.2 GiB KV cost.
+      # [MOOT 2026-07-14] With --kv-cache-memory pinned below, vLLM SKIPS memory
+      # profiling entirely — no util value caps anything on this compose; the flag
+      # is inert either way. Kept only so a future un-pinning has a sane default.
+      # The live container was brought up with GPU_MEMORY_UTILIZATION=0.85 at `up`
+      # time (a plain `podman restart` keeps it; a fresh `up` without the env falls
+      # back to this default). If you ever DROP the --kv-cache-memory pin: 0.85 is
+      # the validated long-prefill value (14K survives, ceiling ~73K), 0.90 is max-KV.
       - "${GPU_MEMORY_UTILIZATION:-0.90}"
       # [cold-boot fix 2026-07-14] Pin KV bytes = the value vLLM's own profiler prints, which
       # SKIPS the memory-profiling forward pass (cold AND warm). Root cause of the first-boot
