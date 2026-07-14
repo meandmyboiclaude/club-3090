@@ -135,6 +135,18 @@ class PatchStats:
             "retired",            # explicitly retired patches (P8 → 2026-05-04)
             "kernel disabled",    # P67b when P67 kernel disabled (companion patch design)
             "dispatch unused",    # ditto
+            # [2026-07-14 boot-triage] expected-skip classes that were
+            # mislabeled as partial-apply warnings. NOTE: bare "anchor not
+            # found in <existing file>" stays a WARNING — that is real drift;
+            # only whole-file-removed / delegated / flag-off are benign.
+            "delegated to",       # lane hand-off (PN65 → sndr lane-2)
+            "self-retire",        # patch verified its fix absorbed (PN56)
+            ".py not found",      # target FILE removed upstream (old parser
+                                  # files: P12/P27/P29/P59/P64/PN54 class)
+            "target file not found",
+            "target files not found",
+            "null on this pin",   # PN61 model-class absent on this pin
+            "not set or platform",  # flag-off / platform-gate combined skip (P103)
         )
         warnings = []
         for r in self.skipped:
