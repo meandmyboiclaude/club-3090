@@ -1,0 +1,22 @@
+[Unit]
+Description=vLLM Qwopus3.6-27B endgame (:8021, club-3090 endgame8021.yml)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/user/club-3090/models/qwen3.6-27b/vllm/compose/single
+# Ship envelope (2026-07-14): util 0.85 + KV pin — see compose comments / BUG-072.
+Environment=GPU_MEMORY_UTILIZATION=0.85
+Environment=KV_CACHE_MEMORY_BYTES=1991240704
+Environment=MAX_MODEL_LEN=65000
+Environment=MAX_NUM_SEQS=4
+# up -d: creates the container if missing, starts it if stopped (env from
+# creation is preserved on plain restarts; a recreate re-reads this unit's env).
+ExecStart=/usr/bin/podman-compose -f endgame8021.yml up -d
+ExecStop=/usr/bin/podman stop -t 30 vllm-qwen36-endgame
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target

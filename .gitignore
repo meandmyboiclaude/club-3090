@@ -87,3 +87,9 @@ models/*/vllm/compose/single/*-aibox.yml
 models/*/vllm/cache/torch_compile/
 models/*/vllm/cache/triton/
 models/*/vllm/cache/startup_plan/
+
+# git-history bundles (binary backups; content already lives in-tree)
+*.bundle
+# Built wheels (reproducible from CI) + torch profiler traces — GB-class binaries
+models/*/vllm/wheels/
+models/*/vllm/diagnostics/torch_profiles/
