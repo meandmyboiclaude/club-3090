@@ -546,7 +546,7 @@ services:
       # Next arm (own window): 8-10 seats + max_cudagraph_capture_size=40
       # (+ maybe util 0.89). Enable = seqs up + env to 5.
       - --max-num-seqs
-      - "${MAX_NUM_SEQS:-5}"
+      - "${MAX_NUM_SEQS:-4}"
       # No num-gpu-blocks-override: profiler auto-sizes KV (~174K at util 0.91 / 75K model-len).
       # 75K model-len (not 90K) shrinks each seq's KV reservation so 5x15K peaks ~87% KV (no
       # 100% pin -> no capacity-queue throttle) AND drops the prefill VRAM spike under guardian
