@@ -243,10 +243,10 @@ services:
       - GENESIS_ENABLE_PN79_V2_MD5_CHUNK=1
       - GENESIS_ENABLE_PN79_V2_MD5_CHUNK_DELTA_H=1
       - GENESIS_ENABLE_PN91_DEVELOPER_ROLE=1
-      # [2026-07-14 01:09] PN77=0 — rowwise fix (genesis ad609ba, offline-validated) but
-      # boot 17 died on the tool canary with PN31v3+PN77 both live; unattributed between
-      # them. Fix lane task #12: re-gate PN77 ALONE next session (3-min fast gate).
-      - GENESIS_ENABLE_PN77_FP8_LM_HEAD=0
+      # [2026-07-14 01:15] PN77=1 ALONE (PN31 stays 0) — attribution boot 18. Rowwise fix
+      # ad609ba, offline top-1 0.385->0.948; boot-17 crash trace runs through model forward
+      # (not lm_head), consistent with PN31-pool VRAM exhaustion, not PN77.
+      - GENESIS_ENABLE_PN77_FP8_LM_HEAD=1
       # PN127 inert as flagged (installs template asset only; serving keeps explicit
       # froggeric --chat-template). Asset staged for the deliberate template A/B.
       - GENESIS_ENABLE_PN127_AUTO_CHAT_TEMPLATE=1
