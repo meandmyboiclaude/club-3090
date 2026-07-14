@@ -120,6 +120,8 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
     },
     "P60": {
         "title": "GDN+ngram state recovery (Phase 1: SSM pre-copy)",
+        "lifecycle": "retired",  # 2026-07-14 verified vs live dev1060
+        "superseded_by": "vllm#40738 merged upstream — verified live 2026-07-14: gdn_attn.py num_accepted_tokens/spec_state_indices_tensor metadata native; gdn_linear_attn.py renamed to mamba/gdn/qwen_gdn_linear_attn.py with native call sites (:1401,:1528)",
         "env_flag": "GENESIS_ENABLE_P60_GDN_NGRAM_FIX",
         "default_on": False,
         "category": "spec_decode",
@@ -129,6 +131,8 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
     },
     "P60b": {
         "title": "GDN+ngram Triton kernel offset (Phase 2)",
+        "lifecycle": "retired",  # 2026-07-14 verified vs live dev1060
+        "superseded_by": "vllm#40738 merged upstream — causal_conv1d.py num_accepted_tokens_ptr (:756,:851) + IS_SPEC_DECODING wrapper (:1232) native",
         "env_flag": "GENESIS_ENABLE_P60B_TRITON_KERNEL",
         "default_on": False,
         "category": "spec_decode",
@@ -149,6 +153,8 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
     },
     "P62": {
         "title": "Structured-output spec-decode reasoning-end timing fix",
+        "lifecycle": "retired",  # 2026-07-14 verified vs live dev1060
+        "superseded_by": "upstream grammar_bitmask rewrite (per-spec-position fill + tentative advance + rollback, structured_output/__init__.py:306-361) + PN96 vendor of vllm#44993 (should_advance(new_token_ids), scheduler.py:1792). Verified 0/40 HTTP-500 under MTP+structured-output",
         "env_flag": "GENESIS_ENABLE_P62_STRUCT_OUT_SPEC_TIMING",
         "default_on": False,
         "category": "structured_output",
@@ -238,6 +244,8 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
     },
     "P67": {
         "title": "TurboQuant multi-query kernel for spec-decode K+1",
+        "lifecycle": "retired",  # 2026-07-14 verified vs live dev1060
+        "superseded_by": "P67b (live-applied, turboquant_attn.py:629-680) intercepts uniform K+1 spec-verify at forward() top and bypasses _prefill_attention entirely — re-anchoring P67 there would double-dispatch. Shared env flag + kernels/p67_multi_query_kernel.py KEPT (P67b imports is_active/call_p67_attention)",
         "env_flag": "GENESIS_ENABLE_P67_TQ_MULTI_QUERY_KERNEL",
         "default_on": False,
         "category": "spec_decode",
@@ -399,6 +407,8 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
     },
     "P87": {
         "title": "Marlin W4A16/W8A16 sub-tile output dim pad-on-load (vllm#40361)",
+        "lifecycle": "retired",  # 2026-07-14 verified vs live dev1060
+        "superseded_by": "absorbed natively, generalized: mixed_precision/marlin.py can_implement pad-acceptance (:40-83) + marlin_padded_nk/pad_qweight/pad_scales (:104-215) + apply-path unpad (marlin_utils.py:672-739) — pads K as well as N",
         "env_flag": "GENESIS_ENABLE_P87",
         "default_on": False,
         "category": "kernel",
@@ -1562,6 +1572,8 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
     },
     "P3": {
         "title": "TurboQuant BF16→FP8 cast (Ampere fix)",
+        "lifecycle": "retired",  # 2026-07-14 verified vs live dev1060
+        "superseded_by": "absorbed natively: triton_turboquant_store.py:191-192 loads with .to(tl.float32) before the FP8 cast (PR#39988 staircase form) — BF16 never reaches the cast. Doubly moot on sm_89: e4b15 branch selected only when cap<(8,9)",
         "env_flag": "GENESIS_LEGACY_P3",
         "default_on": True,
         "lifecycle": "legacy",
@@ -1587,6 +1599,8 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
     },
     "P5": {
         "title": "KV cache page size unification",
+        "lifecycle": "retired",  # 2026-07-14 verified vs live dev1060
+        "superseded_by": "absorbed natively by the better algorithm: v1/core/kv_cache_utils.py:1068 unify_kv_cache_spec_page_size implements pad-smaller-to-max (P5 v2 design) with indexes_kv_by_block_stride backend opt-in; shipped P5 v1 LCM would be a regression",
         "env_flag": "GENESIS_LEGACY_P5",
         "default_on": True,
         "lifecycle": "legacy",
@@ -1595,6 +1609,8 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
     },
     "P5b": {
         "title": "KV page-size pad-smaller-to-max (env opt-in)",
+        "lifecycle": "retired",  # 2026-07-14 verified vs live dev1060
+        "superseded_by": "retired with P5 — native unify_kv_cache_spec_page_size covers the hybrid page-size condition",
         # Audit P2 fix 2026-05-05: registry was `GENESIS_ENABLE_P5B_PAGE_PAD`
         # but wiring code + docstrings use `GENESIS_ENABLE_P5B`. Aligned.
         "env_flag": "GENESIS_ENABLE_P5B",
