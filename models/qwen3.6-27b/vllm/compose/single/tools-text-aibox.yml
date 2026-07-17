@@ -175,6 +175,8 @@ services:
       - GENESIS_ENABLE_PN54_GDN_CONTIGUOUS_DEDUP=1
       # OTEL tracing -> Phoenix (host net, gRPC OTLP :4317). Lands in "vllm" project.
       - OTEL_RESOURCE_ATTRIBUTES=openinference.project.name=vllm,service.name=vllm-qwen36
+      # [PN99 2026-07-17] prompt/completion text on llm_request spans (0 = off).
+      - VLLM_TRACE_CONTENT_MAX_CHARS=8192
       # VRAM Guardian thresholds, fitted to util. SOFT must sit ABOVE the under-load
       # steady (% of torch-total 24109MB) or it gc-thrashes every poll. Measured:
       # 0.90 steady ~96.7% (SOFT 97 ok), 0.92 steady ~98.9% (SOFT 97 thrashed).
@@ -285,6 +287,10 @@ services:
         # (BUG-070 `{{` fix; supersedes never-applying P62 on dev1060+). Gate:
         # canary_grammar_mtp.py 0/12 doubled tokens.
         python3 /fixes/patch_pn96_44993_structured_output_marker_step_fsm.py
+        # [PN99 2026-07-17] V0-parity gen_ai.prompt/gen_ai.completion on trace
+        # spans (Phoenix per-trace prompt visibility; otelcol maps -> input.value).
+        # Knob: VLLM_TRACE_CONTENT_MAX_CHARS. Self-retires if upstream re-adds.
+        python3 /fixes/patch_pn99_trace_content_prompt_completion.py
         # [PN81 — 2026-07-07] /rerank on :8020 (USER: reranker lives IN vLLM).
         # Adapts TEI + Cohere wire formats onto upstream /generative_scoring
         # (yes/no-logit scoring on the generate engine). Requires PN82.
