@@ -177,6 +177,12 @@ services:
       - OTEL_RESOURCE_ATTRIBUTES=openinference.project.name=vllm,service.name=vllm-qwen36
       # [PN99 2026-07-17] prompt/completion text on llm_request spans (0 = off).
       - VLLM_TRACE_CONTENT_MAX_CHARS=8192
+      # [PN100 2026-07-18] auto thinking-budget router: engine self-classifies
+      # difficulty 0-3 per budget-less request -> thinking_token_budget tier
+      # (0=off,1024,4096,10240). Explicit client params always win; requests
+      # with max_tokens<=128 exempt. See _genesis/middleware/auto_budget.py.
+      - GENESIS_ENABLE_PN100_AUTO_BUDGET=1
+      - GENESIS_PN100_AUTO_DEFAULT=1
       # VRAM Guardian thresholds, fitted to util. SOFT must sit ABOVE the under-load
       # steady (% of torch-total 24109MB) or it gc-thrashes every poll. Measured:
       # 0.90 steady ~96.7% (SOFT 97 ok), 0.92 steady ~98.9% (SOFT 97 thrashed).
@@ -291,6 +297,9 @@ services:
         # spans (Phoenix per-trace prompt visibility; otelcol maps -> input.value).
         # Knob: VLLM_TRACE_CONTENT_MAX_CHARS. Self-retires if upstream re-adds.
         python3 /fixes/patch_pn99_trace_content_prompt_completion.py
+        # [PN100 2026-07-18] await-site for the auto thinking-budget router
+        # (classify pass; module rides the mounted _genesis tree).
+        python3 /fixes/patch_pn100_auto_thinking_budget.py
         # [PN81 — 2026-07-07] /rerank on :8020 (USER: reranker lives IN vLLM).
         # Adapts TEI + Cohere wire formats onto upstream /generative_scoring
         # (yes/no-logit scoring on the generate engine). Requires PN82.
