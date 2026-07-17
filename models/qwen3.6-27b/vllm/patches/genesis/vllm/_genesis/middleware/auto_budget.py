@@ -41,10 +41,12 @@ Env knobs:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import re
 import time
+from collections import OrderedDict
 from typing import Any
 
 from vllm._genesis.middleware.lazy_reasoner import _extract_text_from_message
@@ -112,9 +114,15 @@ _STATS: dict[str, int] = {
     "tier_3": 0,
     "explicit_skip": 0,
     "tiny_skip": 0,
+    "cache_hits": 0,
     "fallbacks": 0,
     "errors": 0,
 }
+
+# Tier cache: retries and template-identical callers skip the classify call.
+# Keyed by sha256 of the flattened conversation; asyncio single-thread safe.
+_TIER_CACHE: OrderedDict[str, int] = OrderedDict()
+_TIER_CACHE_MAX = 256
 
 
 def get_stats() -> dict[str, int]:
@@ -131,6 +139,10 @@ def _completion_cap(request: Any) -> int | None:
 
 def _flatten_messages(request: Any, cap: int = 8000) -> str:
     parts: list[str] = []
+    tools = getattr(request, "tools", None)
+    if tools:
+        # Tool orchestration is a reasoning signal the raw text may not carry.
+        parts.append(f"[note] request includes {len(tools)} callable tool(s)")
     for msg in getattr(request, "messages", None) or []:
         role = (
             msg.get("role", "?") if isinstance(msg, dict) else getattr(msg, "role", "?")
@@ -218,7 +230,9 @@ def _apply_tier(request: Any, tier: int, allow_disable: bool) -> int:
     if tier == 0 and not allow_disable:
         tier = 1
     ctk = dict(getattr(request, "chat_template_kwargs", None) or {})
-    if tier == 0:
+    # tier 0 disables thinking only when budgets[0]==0 (the default); an
+    # operator who sets a non-zero tier-0 budget gets a small budget instead.
+    if tier == 0 and budgets[0] <= 0:
         ctk["enable_thinking"] = False
         request.chat_template_kwargs = ctk
         return 0
@@ -257,6 +271,19 @@ async def apply_hook_async(serving: Any, request: Any) -> None:
         return
 
     t0 = time.monotonic()
+    key = hashlib.sha256(_flatten_messages(request).encode()).hexdigest()
+    cached = _TIER_CACHE.get(key)
+    if cached is not None:
+        _TIER_CACHE.move_to_end(key)
+        _STATS["cache_hits"] += 1
+        applied = _apply_tier(request, cached, allow_disable)
+        log.info(
+            "PN100: tier=%d -> %s (cached)",
+            cached,
+            "thinking off" if applied == 0 else f"budget={applied}",
+        )
+        return
+
     tier = None
     try:
         tier = await _classify(serving, request)
@@ -266,6 +293,10 @@ async def apply_hook_async(serving: Any, request: Any) -> None:
     if tier is None:
         tier = _env_int("GENESIS_PN100_FALLBACK_TIER", 2)
         _STATS["fallbacks"] += 1
+    else:
+        _TIER_CACHE[key] = max(0, min(3, tier))
+        if len(_TIER_CACHE) > _TIER_CACHE_MAX:
+            _TIER_CACHE.popitem(last=False)
     tier = max(0, min(3, tier))
     _STATS["classified"] += 1
     _STATS[f"tier_{tier}"] += 1

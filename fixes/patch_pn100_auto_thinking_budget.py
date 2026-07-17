@@ -13,6 +13,12 @@ pass must await the engine.
 Fail-open: the inserted block swallows every exception — a router failure
 serves the request exactly as today. Gate: GENESIS_ENABLE_PN100_AUTO_BUDGET.
 Self-retires if upstream ever ships a native per-request auto budget.
+
+DEPENDENCY: the anchor is the PN16 comment line that genesis apply_all
+writes into serving.py — apply_all must run before /fixes (entrypoint order
+guarantees this). If the PN16 lane is ever removed from genesis, this patch
+FATALs at boot (fail-loud, house style) and needs re-anchoring onto the
+upstream "# Streaming response" line instead.
 """
 import pathlib
 import sys
