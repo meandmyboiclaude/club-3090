@@ -24,10 +24,6 @@
 #   cd <repo>/models/qwen3.6-27b/vllm/compose
 #   podman-compose -f single/tools-text-qwopus.yml up -d
 # ===========================================================================
-# [2026-07-14 END STATE] PROMOTED TO PROD :8020 (was endgame bench :8021).
-# Rollback: systemctl disable vllm-endgame-8020 && systemctl enable --now vllm-qwen36
-# (old prod tools-text-aibox.yml + boot-guard, dev799 image). Callers untouched:
-# served aliases identical to old prod.
 services:
   vllm-qwen36-27b:
     # [2026-07-13 bump candidate] nightly-9e57de71 (main 07-13) — UNPROVEN until
@@ -35,10 +31,10 @@ services:
     # brings 481e481b hybrid partial prefix-cache). Rollback: validated dev799 image
     # nightly-69715823... via git tag validated-qwopus-69715823.
     image: localhost/vllm-qwen36-endgame:dev1060cherry-2204-20260713
-    container_name: vllm-qwen36-endgame
+    container_name: vllm-tcgptq-8021
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8020/health"]
+      test: ["CMD", "curl", "-sf", "http://localhost:8021/health"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -396,8 +392,6 @@ services:
       - GENESIS_ENABLE_PN54_GDN_CONTIGUOUS_DEDUP=1
       # OTEL tracing -> Phoenix (host net, gRPC OTLP :4317). Lands in "vllm" project.
       - OTEL_RESOURCE_ATTRIBUTES=openinference.project.name=vllm,service.name=vllm-qwen36
-      # [PN99 2026-07-17] prompt/completion text on llm_request spans (0 = off).
-      - VLLM_TRACE_CONTENT_MAX_CHARS=8192
       # VRAM Guardian thresholds, fitted to util. SOFT must sit ABOVE the under-load
       # steady (% of torch-total 24109MB) or it gc-thrashes every poll. Measured:
       # 0.90 steady ~96.7% (SOFT 97 ok), 0.92 steady ~98.9% (SOFT 97 thrashed).
@@ -521,10 +515,6 @@ services:
         # (BUG-070 `{{` fix; supersedes never-applying P62 on dev1060+). Gate:
         # canary_grammar_mtp.py 0/12 doubled tokens.
         python3 /fixes/patch_pn96_44993_structured_output_marker_step_fsm.py
-        # [PN99 2026-07-17] V0-parity gen_ai.prompt/gen_ai.completion on trace
-        # spans (Phoenix per-trace prompt visibility; otelcol maps -> input.value).
-        # Knob: VLLM_TRACE_CONTENT_MAX_CHARS. Self-retires if upstream re-adds.
-        python3 /fixes/patch_pn99_trace_content_prompt_completion.py
         # [PN98 2026-07-14] BUG-069 residual: drop text-form tool-tag fragments
         # demoted to content (strict-demotion + end-of-output lexer flush).
         # Must run AFTER PN76 (deferred toolcall commit). Gate: canary_47194 0/15.
@@ -553,10 +543,10 @@ services:
       - --profiler-config
       - '{"profiler": "torch", "torch_profiler_dir": "/profiles"}'
       - --model
-      # [2026-07-18 promote] was: XReyRobert/Qwopus3.6-27B-v2-GPTQ-Pro-MTP-BF16 (rollback = restore that line)
       - /root/.cache/huggingface/thinkingcap-gptq-pro-v2
       - --served-model-name
       - qwen3.6
+      - thinkingcap
       - qwen3.6-autoround
       - qwen3.6-27b-autoround
       - qwen3.6-hindsight
@@ -589,7 +579,7 @@ services:
       # decode buffers deferred — IMA-history in the TQ workspace stack).
       - "${GPU_MEMORY_UTILIZATION:-0.95}"
       - --kv-cache-memory
-      - "${KV_CACHE_MEMORY_BYTES:-3489660928}"
+      - "${KV_CACHE_MEMORY_BYTES:-4088487424}"
       # [PN83 — 2026-07-07] rerank micro-slots: PARKED after 2 OOM arms.
       # 29 seats = OOM at KV alloc (~700MB GDN/mamba state over budget);
       # 12 seats = aten::empty alloc failure during warmup (P66 capture list
@@ -623,8 +613,6 @@ services:
       - "${KV_CACHE_DTYPE:-turboquant_3bit_nc}"
       - --language-model-only
       - --trust-remote-code
-      - --chat-template
-      - /chat_template.jinja
       - --reasoning-parser
       - qwen3
       # [endgame 2026-07-13] kills the whitespace degenerate-loop failure inside
@@ -634,8 +622,7 @@ services:
       - '{"backend": "xgrammar", "disable_any_whitespace": true}'
       - --enable-auto-tool-choice
       - --tool-call-parser
-      # [2026-07-14] hermes pairs with Jackrong's v2 template (JSON-in-<tool_call>);
-      # qwen3_coder/qwen3_xml = engine parser, parses only the XML <function=> dialect
+      # [2026-07-14] hermes pairs with Jackrong v2 template (JSON-in-<tool_call>)
       - hermes
       - --enable-chunked-prefill
       - --enable-prefix-caching
@@ -646,4 +633,4 @@ services:
       - --host
       - 0.0.0.0
       - --port
-      - "8020"
+      - "8021"
