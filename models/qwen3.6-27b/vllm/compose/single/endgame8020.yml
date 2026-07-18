@@ -413,6 +413,26 @@ services:
       # (self-counted steps), planner-router steps, p75=193 tok/step calib.
       - GENESIS_ENABLE_PN102_CONTRACT=1
       - GENESIS_PN100_AUTO_DEFAULT=1
+      # [v4 2026-07-18] auto-mode convergence. The -5pt vs bare-10240 is TWO
+      # orthogonal defects: compression (~-4pt, silent — the router's per-item
+      # step estimate ran below what the budget afforded and the model complied)
+      # and starvation (~-1.5pt, observable — think block never closed).
+      # Escalation cannot fix compression (nothing fires); the banner cannot fix
+      # starvation. Hence both, plus one generous budget instead of a ladder.
+      #
+      # COUPLED — enable together or neither. Under the v3 sized banner a 10240
+      # budget renders "wrap up around Step 53" with the headroom gate failing,
+      # i.e. a 53-step implied scope with no early-stop license on requests that
+      # need three. The static banner states no budget at all: N is a CHECKPOINT
+      # ("around Step N, check whether your answer is settled"), so continuing is
+      # framed as normal rather than as an exception.
+      - GENESIS_PN100_TIER_BUDGETS=0,10240,10240,10240
+      - GENESIS_PN102_STATIC_BANNER=1
+      # Starvation backstop: one continuation resuming INSIDE the think region.
+      # Non-streaming, bounded to one pass, every failure path returns the
+      # original response unchanged. Reaches above the generous cap only for the
+      # ~8% that exhaust it — the sweep curve was still rising at 10240.
+      - GENESIS_PN101_ESCALATE=1
       # VRAM Guardian thresholds, fitted to util. SOFT must sit ABOVE the under-load
       # steady (% of torch-total 24109MB) or it gc-thrashes every poll. Measured:
       # 0.90 steady ~96.7% (SOFT 97 ok), 0.92 steady ~98.9% (SOFT 97 thrashed).
@@ -620,14 +640,26 @@ services:
       # after the fix: 150,967 tok @0.95 / 161K @0.96 / 170K @0.97 / 180K
       # @0.98. Gate results (storm6 x3 + 4-slot concurrent burst4 x2):
       # 0.98 = 0/6, 0.97 = 0-1/6, 0.96 = serial-green but CONCURRENT
-      # bursts abort round 2, 0.95 = ALL GREEN both. Ship = util 0.95 +
-      # pin 4088487424 (the profiler's own fit-value at 0.95; pin skips
-      # profiling -> deterministic boots). ~1.2 GiB device slack absorbs
-      # the remaining runtime transients (mid_o 17x11.3MiB per-layer
-      # decode buffers deferred — IMA-history in the TQ workspace stack).
+      # bursts abort round 2, 0.95 = ALL GREEN both.
+      #
+      # [2026-07-18] --kv-cache-memory REMOVED; KV is profiled again.
+      # The pin (last 3489660928, hand-lowered from the profiler's own 0.95
+      # fit-value 4088487424) made vLLM skip memory profiling entirely and,
+      # in its own words, "does not respect the gpu_memory_utilization
+      # config" — so the ceiling above was never the safety net it looks
+      # like. The "~1.2 GiB device slack" this config assumed was a
+      # 2026-07-14 hand-estimate that expired: measured free at OOM was
+      # 194 MiB against a 256 MiB activation, i.e. three CUDA OOM aborts
+      # (oom_resilience caught them; health stayed green, requests died).
+      # It also silently inherited the OLD model's KV geometry — the same
+      # 3.25 GiB buys 150,967 tok pre-TC but only 130,000 on
+      # thinkingcap-gptq-pro-v2 (~16% more per token), while weights are
+      # unchanged at 17.44 GiB. Profiling measures the real activation peak
+      # on THIS stack and sizes KV beneath it, so headroom is guaranteed by
+      # construction instead of by a stale constant. VLLM_ENABLE_STARTUP_PLAN
+      # (already set) persists the result, which is what the pin was
+      # supposed to buy: deterministic, fast boots.
       - "${GPU_MEMORY_UTILIZATION:-0.95}"
-      - --kv-cache-memory
-      - "${KV_CACHE_MEMORY_BYTES:-3489660928}"
       # [PN83 — 2026-07-07] rerank micro-slots: PARKED after 2 OOM arms.
       # 29 seats = OOM at KV alloc (~700MB GDN/mamba state over budget);
       # 12 seats = aten::empty alloc failure during warmup (P66 capture list
