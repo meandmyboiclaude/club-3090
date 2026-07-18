@@ -158,7 +158,14 @@ def maybe_add_answer_hint(request: Any) -> None:
     # items ride to the cap ("never conclude while uncertain" alone =
     # rumination trap). Gated to real budgets so prod trivia never gets an
     # invitation to elaborate.
-    if budget >= _env_int("GENESIS_PN102_PERMISSION_MIN", 4096):
+    # Review-loop F2 (2026-07-18): permission requires REAL headroom, not just a
+    # big budget — fallback plans (steps = budget/tps) already fill the budget,
+    # so "keep reasoning past Step N" there is an instruction to sail into the
+    # forced-</think> cliff. Planner lowballs pass the headroom test by
+    # construction. Both gates needed: headroom alone would grant tier-1
+    # trivia a "generous budget" license.
+    has_headroom = steps * tps < 0.7 * budget
+    if budget >= _env_int("GENESIS_PN102_PERMISSION_MIN", 4096) and has_headroom:
         pace_clause = (
             f"Number your steps and wrap up around Step {steps} once your "
             "answer is settled; if the problem proves deeper than planned, "
@@ -167,16 +174,21 @@ def maybe_add_answer_hint(request: Any) -> None:
             "you have genuinely exhausted your approaches, commit to your "
             "best answer. Do not let the budget cut you off. "
         )
+        # F4: under permission the step count is a PLAN (the budget is the
+        # cap); the seed must not assert it as the budget. Invariant: both
+        # variants end "Step 1:" (BUG-075 — seed must end mid-reasoning).
+        seed_label = "Plan"
     else:
         pace_clause = (
             f"Number your steps and wrap up around Step {steps} yourself — "
             "do not let the budget cut you off. "
         )
+        seed_label = "Budget"
     ctk["pn_env_banner"] = (
         f"[envelope] Thinking budget: about {steps} short reasoning steps "
         f"({size_clause}). " + pace_clause + answer_clause
     )
-    ctk["pn_env_seed"] = f"Budget: ~{steps} short steps.\nStep 1:"
+    ctk["pn_env_seed"] = f"{seed_label}: ~{steps} short steps.\nStep 1:"
     request.chat_template_kwargs = ctk
     _STATS["hints_added"] += 1
     log.info("PN102: contract set (steps=%d budget=%d)", steps, budget)
