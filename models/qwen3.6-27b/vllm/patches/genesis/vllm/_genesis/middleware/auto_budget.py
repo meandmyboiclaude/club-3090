@@ -80,6 +80,33 @@ _RUBRIC = (
     "hard and long prompts can be trivial. When unsure pick 2."
 )
 
+# Depth-variant rubric (GENESIS_PN100_RUBRIC=depth): the rewindow bench showed
+# the default rubric rates task CATEGORY, not per-item DEPTH — on uniformly-hard
+# GPQA it sent 91% tier-2 / 10% tier-3 where the top tier earns +6pt. This
+# variant drops the "1 in 40" frequency prior entirely and rates depth signals
+# per item. Default rubric unchanged (prod traffic is mixed; rarity prior is
+# right there) — flip only after the A/B leg validates.
+_RUBRIC_DEPTH = (
+    "You rate how much hidden reasoning an AI assistant needs to answer THIS "
+    "specific request well. Reply with the tier digit, a pipe, and your "
+    "estimate of how many short reasoning steps (each a few sentences) it "
+    "needs — nothing else. Example replies: 0|0  1|4  2|12  3|30\n"
+    "Tiers — judge by the DEPTH signals in the item itself:\n"
+    "0 = none: greetings, formatting, copy/transform, single-fact lookup.\n"
+    "1 = brief: one clean inference or lookup-plus-arithmetic; you can see "
+    "the whole solution path immediately.\n"
+    "2 = real reasoning: a clear multi-step path exists but needs care — "
+    "standard methods, moderate case analysis, routine debugging.\n"
+    "3 = deep: ANY of — multiple interacting constraints; a proof or "
+    "derivation chain longer than a few steps; specialized domain knowledge "
+    "combined with calculation; competing candidate answers that each need "
+    "checking; you cannot see the full solution path from the question "
+    "alone. If genuinely torn between 2 and 3, pick 3 — an unused budget "
+    "costs nothing when the answer comes early.\n"
+    "Judge the TASK's need, not the prompt's length. When unsure between "
+    "0/1/2 pick 2."
+)
+
 
 def _env_int(name: str, default: int) -> int:
     try:
@@ -202,10 +229,15 @@ async def _classify(serving: Any, request: Any) -> tuple[int, int | None] | None
     """One thinking-off self-call -> (tier, steps|None), or None on failure."""
     req_cls = type(request)
     fields = getattr(req_cls, "model_fields", {}) or {}
+    rubric = (
+        _RUBRIC_DEPTH
+        if os.environ.get("GENESIS_PN100_RUBRIC", "").strip().lower() == "depth"
+        else _RUBRIC
+    )
     kwargs: dict[str, Any] = {
         "model": getattr(request, "model", None),
         "messages": [
-            {"role": "system", "content": _RUBRIC},
+            {"role": "system", "content": rubric},
             {"role": "user", "content": _flatten_messages(request)},
         ],
         "temperature": 0.0,
