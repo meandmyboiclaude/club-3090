@@ -76,7 +76,7 @@ log = logging.getLogger("genesis.wiring.pn358_full_cg_context_refresh")
 
 GENESIS_PN358_MARKER = (
     "Genesis PN358 FULL cudagraph forward-context refresh "
-    "(vendor of vllm#44868)"
+    "(vendor of vllm#44868) v2-fallback"
 )
 
 _CUDA_GRAPH_REL = "compilation/cuda_graph.py"
@@ -146,14 +146,19 @@ PN358_REPLAY_NEW = (
     "        # tree from the live context before FULL replay (vllm#44868).\n"
     "        # data_ptr-pruned: leaves whose live tensor still aliases the\n"
     "        # captured storage are skipped (the graph reads them as-is);\n"
-    "        # GENESIS_PN358_MODE=detect logs hazards without mutating.\n"
+    "        # GENESIS_PN358_MODE=detect logs hazards without mutating;\n"
+    "        # GENESIS_PN358_MODE=fallback additionally SKIPS the replay and\n"
+    "        # runs the step eagerly when the refresh saw a shape/structural\n"
+    "        # mismatch (mis-keyed entry: replaying would read stale spec\n"
+    "        # metadata — BUG-076 corruption class).\n"
     "        if entry.genesis_pn358_captured_fc is not None:\n"
     "            from sndr.engines.vllm.patches.compile_safety import (\n"
     "                pn358_full_cg_context_refresh as _g_pn358,\n"
     "            )\n"
-    "            _g_pn358.genesis_pn358_refresh(\n"
+    "            if _g_pn358.genesis_pn358_refresh(\n"
     "                forward_context, entry.genesis_pn358_captured_fc\n"
-    "            )\n"
+    "            ) and _g_pn358.genesis_pn358_should_fallback():\n"
+    "                return self.runnable(*args, **kwargs)\n"
     "        entry.cudagraph.replay()\n"
 )
 
@@ -162,6 +167,14 @@ PN358_REPLAY_NEW = (
 _ENV_MODE = "GENESIS_PN358_MODE"
 MODE_REFRESH = "refresh"
 MODE_DETECT = "detect"
+# fallback (BUG-076, 2026-07-18): refresh semantics PLUS the replay hook
+# skips the FULL-graph replay and runs the step eagerly whenever this
+# call's refresh saw a shape/structural mismatch — a mis-keyed entry
+# (e.g. mixed spec/non-spec batch dispatched onto an all-spec-captured
+# graph at equal num_tokens) would otherwise replay against stale GDN
+# spec metadata: garbage hidden states, token-0 completions, scatter-
+# gather device asserts.
+MODE_FALLBACK = "fallback"
 
 # Forward-context fields walked, in upstream #44868's order.
 _CONTEXT_FIELDS = (
@@ -231,11 +244,14 @@ def _resolve_mode() -> str:
         _mode_cache = MODE_REFRESH
     elif raw == MODE_DETECT:
         _mode_cache = MODE_DETECT
+    elif raw == MODE_FALLBACK:
+        _mode_cache = MODE_FALLBACK
     else:
         log.warning(
             "[Genesis PN358] unknown %s value %r — falling back to "
-            "%r (valid: %r, %r)",
+            "%r (valid: %r, %r, %r)",
             _ENV_MODE, raw, MODE_REFRESH, MODE_REFRESH, MODE_DETECT,
+            MODE_FALLBACK,
         )
         _mode_cache = MODE_REFRESH
     return _mode_cache
@@ -442,15 +458,21 @@ def _refresh_tree(
             _stats["structural_mismatch"] += 1
 
 
-def genesis_pn358_refresh(forward_context: Any, captured: Any) -> None:
+def genesis_pn358_refresh(forward_context: Any, captured: Any) -> bool:
     """Refresh (or, in detect mode, audit) the captured forward-context
     tensor tree against the live context before a FULL replay.
+
+    Returns True when THIS call saw a shape or structural mismatch —
+    i.e. the entry's captured metadata cannot represent the live batch
+    and a replay would compute against stale tensors. The replay hook
+    uses this (in MODE_FALLBACK) to run the step eagerly instead.
 
     Never raises into the replay path: the first internal error logs a
     WARNING and self-disables the refresh until reset_pn358_state()."""
     global _disabled
     if _disabled or not captured:
-        return
+        return False
+    _pre_hazards = _stats["shape_mismatch"] + _stats["structural_mismatch"]
     try:
         mode = _resolve_mode()
         visited: set[int] = set()
@@ -467,6 +489,15 @@ def genesis_pn358_refresh(forward_context: Any, captured: Any) -> None:
             "pre-patch behavior); reset via reset_pn358_state()",
             type(e).__name__, e,
         )
+        return False
+    return (
+        _stats["shape_mismatch"] + _stats["structural_mismatch"]
+    ) > _pre_hazards
+
+
+def genesis_pn358_should_fallback() -> bool:
+    """True iff MODE_FALLBACK is active (replay hook keeps its text dumb)."""
+    return _resolve_mode() == MODE_FALLBACK
 
 
 # ── Wiring ───────────────────────────────────────────────────────────
