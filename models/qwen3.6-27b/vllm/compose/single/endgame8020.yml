@@ -103,6 +103,8 @@ services:
       - CUDA_DEVICE_MAX_CONNECTIONS=8
       - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
       - VLLM_MARLIN_USE_ATOMIC_ADD=1
+      # [PN105 2026-07-18] per-request NaN-logits counts (abort wiring)
+      - VLLM_COMPUTE_NANS_IN_LOGITS=1
       - TRITON_CACHE_DIR=/root/.triton/cache
       # Genesis opt-ins
       # [BUG-071 CORRECTED 2026-07-14] GENESIS_PREALLOC_TOKEN_BUDGET=16384 REMOVED —
@@ -139,7 +141,7 @@ services:
       # ceiling (6-day Phoenix p99 total = 30.8K; zero >60K): 33024 = 30.8K + margin,
       # block-rounded. Prefills >33K take P38 transient-alloc fallback (guard :461).
       - GENESIS_TQ_MAX_MODEL_LEN=33024
-      - GENESIS_ENABLE_P58_ASYNC_PLACEHOLDER_FIX=1
+      - GENESIS_ENABLE_P58_ASYNC_PLACEHOLDER_FIX=0
       - GENESIS_ENABLE_P64_QWEN3CODER_MTP_STREAMING=1
       # [2026-07-14 OFF — behavioral, canary-proven harmful] P68 forced
       # tool_choice=required on EVERY >50K-char context (canary system =
@@ -178,7 +180,7 @@ services:
       - GENESIS_ENABLE_PN521_TQ_RAW_TAIL_VERIFY=1
       - GENESIS_ENABLE_PN522_TQ_RAW_TAIL_WARMUP=1
       - GENESIS_ENABLE_PN358_FULL_CG_CONTEXT_REFRESH=1
-      - GENESIS_PN358_MODE=enforce
+      - GENESIS_PN358_MODE=fallback
       - GENESIS_ENABLE_P78_TOLIST_CAPTURE_GUARD=1
       - GENESIS_ENABLE_PN14_TQ_DECODE_OOB_CLAMP=1
       - GENESIS_ENABLE_PN70_TOOL_SCHEMA_FILTER=1
@@ -543,6 +545,24 @@ services:
         python3 /fixes/patch_pn100_auto_thinking_budget.py
         # [PN101 2026-07-18] answer-rescue call sites (inert while flag=0).
         python3 /fixes/patch_pn101_answer_rescue.py
+        # [PN103 2026-07-18] BUG-076: spec entry vs final schedule reconcile at
+        # SchedulerOutput emission (mamba block-aligned split can shrink
+        # num_scheduled after the spec window is sized -> [-1,-1,-1] entry with
+        # 1 scheduled token -> bitmask-row/GDN-metadata/rejection desync ->
+        # token-0 "!" completions + FSM 500s + scatter-gather engine death).
+        # Gate: 150-req hindsight drain replay green + canary_grammar_mtp 12/12.
+        python3 /fixes/patch_pn103_spec_entry_schedule_reconcile.py
+        # [PN105 2026-07-18] BUG-076 damage isolation: NaN-logits requests
+        # abort with a clean error instead of sampling token-0 garbage and
+        # feeding poisoned GDN state forward. Needs VLLM_COMPUTE_NANS_IN_LOGITS=1.
+        python3 /fixes/patch_pn105_nan_logits_abort.py
+        # [PN104 2026-07-18] BUG-076 tier-1: clamp align-mode mamba state-slot
+        # gather (async-skewed seq_lens OOB -> ScatterGather device assert ->
+        # engine death). Wrong-but-valid slot degrades to PN105 per-request abort.
+        python3 /fixes/patch_pn104_mamba_align_gather_clamp.py
+        # [PN106D 2026-07-18] NaN-event state-slot audit (zero cost until an
+        # event; dumps the align-slot arithmetic that names the root).
+        python3 /fixes/patch_pn106d_bug076_nan_slot_audit.py
         # [PN98 2026-07-14] BUG-069 residual: drop text-form tool-tag fragments
         # demoted to content (strict-demotion + end-of-output lexer flush).
         # Must run AFTER PN76 (deferred toolcall commit). Gate: canary_47194 0/15.
