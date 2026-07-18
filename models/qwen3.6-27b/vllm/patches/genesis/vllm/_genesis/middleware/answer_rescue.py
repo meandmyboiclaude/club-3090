@@ -134,33 +134,28 @@ def maybe_add_answer_hint(request: Any) -> None:
     planner_steps = ctk.pop("pn100_steps", None)  # planner-router suggestion
     if isinstance(planner_steps, int) and planner_steps > 0:
         steps = planner_steps
-        # planner estimates per-item need; budget is the CAP — phrase them as
-        # such instead of implying steps*193 == budget (they usually differ)
-        size_clause = f"(budget allows up to ~{budget} thinking tokens)"
+        size_clause = f"budget allows up to ~{budget} thinking tokens"
     else:
         steps = max(3, round(budget / tps))
-        size_clause = f"(~{budget} tokens)"
+        size_clause = f"~{budget} tokens"
+    # BUG-075 (2026-07-18): the OLD >number_max branch emitted a seed ending on a
+    # COMPLETED sentence ("Budget: ~10240 thinking tokens available.\n"), a natural
+    # stopping point → the model closed </think> instantly and guessed (31/37 rows
+    # rtok=0 @10240; proven from Phoenix rendered prompts). INVARIANT: the seed MUST
+    # end mid-reasoning ("Step 1:") so generation continues INTO the think region,
+    # for every budget. One code path now; the stated step count is a loose ceiling
+    # ("wrap up AROUND Step N"), which reads fine at 5 or 53 and needs no cutoff.
     sentences = max(1, _env_int("GENESIS_PN102_SENTENCES", 3))
-    number_max = _env_int("GENESIS_PN102_NUMBER_MAX", 24)
     answer_clause = (
         "Unless the user asked for longer form, put your final answer in the "
         f"FIRST sentence of your reply, then at most {sentences} sentences total."
     )
-    if steps <= number_max:
-        ctk["pn_env_banner"] = (
-            f"[envelope] Thinking budget: about {steps} short steps "
-            f"{size_clause}. Number your steps and conclude by "
-            f"Step {steps} yourself — do not let the budget cut you off. "
-            + answer_clause
-        )
-        ctk["pn_env_seed"] = f"Budget: ~{steps} short steps.\nStep 1:"
-    else:
-        ctk["pn_env_banner"] = (
-            f"[envelope] You have a substantial thinking budget (~{budget} "
-            "tokens). Conclude your reasoning yourself, well before the budget "
-            "forces a cut. " + answer_clause
-        )
-        ctk["pn_env_seed"] = f"Budget: ~{budget} thinking tokens available.\n"
+    ctk["pn_env_banner"] = (
+        f"[envelope] Thinking budget: about {steps} short reasoning steps "
+        f"({size_clause}). Number your steps and wrap up around Step {steps} "
+        f"yourself — do not let the budget cut you off. " + answer_clause
+    )
+    ctk["pn_env_seed"] = f"Budget: ~{steps} short steps.\nStep 1:"
     request.chat_template_kwargs = ctk
     _STATS["hints_added"] += 1
     log.info("PN102: contract set (steps=%d budget=%d)", steps, budget)
