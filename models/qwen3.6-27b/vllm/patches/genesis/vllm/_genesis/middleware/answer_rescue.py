@@ -150,10 +150,31 @@ def maybe_add_answer_hint(request: Any) -> None:
         "Unless the user asked for longer form, put your final answer in the "
         f"FIRST sentence of your reply, then at most {sentences} sentences total."
     )
+    # Plan-and-permit (2026-07-18 tuning loop): the planner's small per-item
+    # plans are the speed engine but compressed deep items (auto 76% vs
+    # fixed-with-contract ~80 at the SAME caps). The permission clause makes a
+    # lowball plan harmless: finish when settled, continue when not. The
+    # exhaustion escape is load-bearing for SPEND — without it, unsolvable
+    # items ride to the cap ("never conclude while uncertain" alone =
+    # rumination trap). Gated to real budgets so prod trivia never gets an
+    # invitation to elaborate.
+    if budget >= _env_int("GENESIS_PN102_PERMISSION_MIN", 4096):
+        pace_clause = (
+            f"Number your steps and wrap up around Step {steps} once your "
+            "answer is settled; if the problem proves deeper than planned, "
+            f"keep reasoning past Step {steps} — the budget is generous — "
+            "and do not conclude while your answer is still uncertain. If "
+            "you have genuinely exhausted your approaches, commit to your "
+            "best answer. Do not let the budget cut you off. "
+        )
+    else:
+        pace_clause = (
+            f"Number your steps and wrap up around Step {steps} yourself — "
+            "do not let the budget cut you off. "
+        )
     ctk["pn_env_banner"] = (
         f"[envelope] Thinking budget: about {steps} short reasoning steps "
-        f"({size_clause}). Number your steps and wrap up around Step {steps} "
-        f"yourself — do not let the budget cut you off. " + answer_clause
+        f"({size_clause}). " + pace_clause + answer_clause
     )
     ctk["pn_env_seed"] = f"Budget: ~{steps} short steps.\nStep 1:"
     request.chat_template_kwargs = ctk
