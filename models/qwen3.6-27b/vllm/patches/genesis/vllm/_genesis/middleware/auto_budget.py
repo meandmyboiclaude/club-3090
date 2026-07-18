@@ -144,6 +144,7 @@ _STATS: dict[str, int] = {
     "tier_3": 0,
     "explicit_skip": 0,
     "tiny_skip": 0,
+    "prefilter_default": 0,
     "cache_hits": 0,
     "fallbacks": 0,
     "errors": 0,
@@ -221,8 +222,59 @@ def _decide_mode(request: Any) -> tuple[str, bool]:
         return "tiny", True
 
     if _env_bool("GENESIS_PN100_AUTO_DEFAULT"):
+        if _skip_classify_by_length(request):
+            return "default", explicit_thinking is not True
         return "classify", explicit_thinking is not True
     return "skip", True
+
+
+def _default_tier() -> int:
+    """Tier used when we skip the classify call. Same value the classifier
+    falls open to, so a skipped question and a failed one behave identically."""
+    return max(0, min(3, _env_int("GENESIS_PN100_FALLBACK_TIER", 2)))
+
+
+def _prompt_chars(request: Any) -> int:
+    total = 0
+    for m in (getattr(request, "messages", None) or []):
+        c = m.get("content") if isinstance(m, dict) else getattr(m, "content", None)
+        if isinstance(c, str):
+            total += len(c)
+        elif isinstance(c, list):  # multimodal content parts
+            for part in c:
+                t = part.get("text") if isinstance(part, dict) else None
+                if isinstance(t, str):
+                    total += len(t)
+    return total
+
+
+def _skip_classify_by_length(request: Any) -> bool:
+    """Long prompts skip the classify call and take the default budget.
+
+    The classify call only ever changes the outcome by detecting TRIVIALITY
+    (thinking off). Measured on real traffic that is ~5% of requests, while the
+    call is charged on 100% — 0.18-0.60s typical, 2.7s worst, plus a second
+    prefill and double trace volume. It does not pay for itself.
+
+    Inverting who pays works because the call is a prefill, so its cost scales
+    with prompt length — and length also predicts the answer:
+      long  -> expensive to classify AND never trivial  -> skip
+      short -> cheap to classify AND the only place triviality lives -> ask
+    The expensive calls are exactly the ones dropped.
+
+    This is NOT the PN16 regex failure mode. A regex that decides the OUTCOME
+    kills thinking on short-hard prompts; this decides only WHO GETS ASKED, so
+    a wrong threshold costs at most one unnecessary (cheap) question, never a
+    wrong budget. "Prove there are infinitely many primes of the form 4k+3" is
+    short, gets asked, and is correctly rated non-trivial.
+
+    Accepted trade: a long-but-trivial request ("reformat this JSON") skips the
+    question, takes a budget, and self-stops after brief thinking.
+    """
+    limit = _env_int("GENESIS_PN100_CLASSIFY_MAX_CHARS", 0)
+    if limit <= 0:
+        return False  # ships off; opt in per deployment
+    return _prompt_chars(request) > limit
 
 
 async def _classify(serving: Any, request: Any) -> tuple[int, int | None] | None:
@@ -307,6 +359,14 @@ async def apply_hook_async(serving: Any, request: Any) -> None:
         return
     if mode == "tiny":
         _STATS["tiny_skip"] += 1
+        return
+    if mode == "default":
+        # Prefilter: too long to be trivial, so the classify call could only
+        # have confirmed what we already assume. Take the default tier without
+        # paying for the question.
+        _STATS["prefilter_default"] += 1
+        applied = _apply_tier(request, _default_tier(), allow_disable)
+        log.info("PN100: prefilter -> default tier (budget=%d, no classify)", applied)
         return
     if mode != "classify":  # direct numeric via chat_template_kwargs.thinking_budget
         budget = int(mode)
