@@ -135,12 +135,20 @@
     {%- endif %}
     {%- endif %}
 {%- endfor %}
+{%- if pn_env_banner is defined and pn_env_banner %}
+    {#- PN102 Envelope Contract: late-system banner (post-prefix = APC-clean). -#}
+    {{- '<|im_start|>system\n' + pn_env_banner + '<|im_end|>\n' }}
+{%- endif %}
 {%- if add_generation_prompt %}
     {{- '<|im_start|>assistant\n' }}
     {%- if enable_thinking is defined and enable_thinking is false %}
         {{- '<think>\n\n</think>\n\n' }}
     {%- else %}
         {{- '<think>\n' }}
+        {%- if pn_env_seed is defined and pn_env_seed %}
+            {#- PN102: think-seed — the model continues its own budget statement. -#}
+            {{- pn_env_seed }}
+        {%- endif %}
     {%- endif %}
 {%- endif %}
 {#- Unsloth fixes - developer role, tool calling #}

@@ -63,7 +63,10 @@ _CONTROL_KEY = "thinking_budget"
 
 _RUBRIC = (
     "You rate how much hidden reasoning an AI assistant needs to answer a "
-    "request well. Reply with ONE digit only, nothing else:\n"
+    "request well. Reply with the tier digit, a pipe, and your estimate of "
+    "how many short reasoning steps (each a few sentences) it needs — "
+    "nothing else. Example replies: 0|0  1|4  2|12  3|30\n"
+    "Tiers:\n"
     "0 = none: greetings, acknowledgments, formatting, copy/transform, "
     "single-fact lookup, classification with obvious answer.\n"
     "1 = brief: simple single-step tasks, short summaries, routine "
@@ -195,8 +198,8 @@ def _decide_mode(request: Any) -> tuple[str, bool]:
     return "skip", True
 
 
-async def _classify(serving: Any, request: Any) -> int | None:
-    """One thinking-off self-call -> tier int, or None on any failure."""
+async def _classify(serving: Any, request: Any) -> tuple[int, int | None] | None:
+    """One thinking-off self-call -> (tier, steps|None), or None on failure."""
     req_cls = type(request)
     fields = getattr(req_cls, "model_fields", {}) or {}
     kwargs: dict[str, Any] = {
@@ -210,7 +213,7 @@ async def _classify(serving: Any, request: Any) -> int | None:
         "chat_template_kwargs": {"enable_thinking": False, _MARKER_KEY: True},
     }
     cap_field = "max_completion_tokens" if "max_completion_tokens" in fields else "max_tokens"
-    kwargs[cap_field] = 6
+    kwargs[cap_field] = 8
     synthetic = req_cls(**kwargs)
 
     timeout = _env_int("GENESIS_PN100_TIMEOUT_S", 20)
@@ -221,8 +224,20 @@ async def _classify(serving: Any, request: Any) -> int | None:
     if not choices:
         return None
     content = getattr(choices[0].message, "content", "") or ""
+    # planner form "T|S" (tier + suggested short-step count); bare "T" accepted
+    m = re.search(r"([0-3])\s*\|\s*(\d{1,3})", content)
+    if m:
+        return int(m.group(1)), max(0, min(120, int(m.group(2))))
     m = re.search(r"[0-3]", content)
-    return int(m.group(0)) if m else None
+    return (int(m.group(0)), None) if m else None
+
+
+def _stash_steps(request: Any, steps: int) -> None:
+    """Hand the planner's step estimate to the PN102 contract injector
+    (which pops it from chat_template_kwargs downstream)."""
+    ctk = dict(getattr(request, "chat_template_kwargs", None) or {})
+    ctk["pn100_steps"] = steps
+    request.chat_template_kwargs = ctk
 
 
 def _apply_tier(request: Any, tier: int, allow_disable: bool) -> int:
@@ -276,17 +291,23 @@ async def apply_hook_async(serving: Any, request: Any) -> None:
     if cached is not None:
         _TIER_CACHE.move_to_end(key)
         _STATS["cache_hits"] += 1
-        applied = _apply_tier(request, cached, allow_disable)
+        c_tier, c_steps = cached
+        applied = _apply_tier(request, c_tier, allow_disable)
+        if applied > 0 and c_steps:
+            _stash_steps(request, c_steps)
         log.info(
             "PN100: tier=%d -> %s (cached)",
-            cached,
+            c_tier,
             "thinking off" if applied == 0 else f"budget={applied}",
         )
         return
 
     tier = None
+    steps = None
     try:
-        tier = await _classify(serving, request)
+        verdict = await _classify(serving, request)
+        if verdict is not None:
+            tier, steps = verdict
     except Exception as exc:  # timeout, engine error, schema drift
         log.warning("PN100: classify failed (%s) — falling back", exc)
         _STATS["errors"] += 1
@@ -294,16 +315,19 @@ async def apply_hook_async(serving: Any, request: Any) -> None:
         tier = _env_int("GENESIS_PN100_FALLBACK_TIER", 2)
         _STATS["fallbacks"] += 1
     else:
-        _TIER_CACHE[key] = max(0, min(3, tier))
+        _TIER_CACHE[key] = (max(0, min(3, tier)), steps)
         if len(_TIER_CACHE) > _TIER_CACHE_MAX:
             _TIER_CACHE.popitem(last=False)
     tier = max(0, min(3, tier))
     _STATS["classified"] += 1
     _STATS[f"tier_{tier}"] += 1
     applied = _apply_tier(request, tier, allow_disable)
+    if applied > 0 and steps:
+        _stash_steps(request, steps)
     log.info(
-        "PN100: tier=%d -> %s (%dms)",
+        "PN100: tier=%d -> %s%s (%dms)",
         tier,
         "thinking off" if applied == 0 else f"budget={applied}",
+        f" steps~{steps}" if steps else "",
         int((time.monotonic() - t0) * 1000),
     )

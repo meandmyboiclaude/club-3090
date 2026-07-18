@@ -406,7 +406,10 @@ services:
       # [PN101 2026-07-18] answer rescue (hint + repair for bounded requests
       # guillotined by max_tokens). BEHAVIORAL -> ships OFF; flip to 1 after
       # the 30-item regression validates (design doc DESIGN-pn101-*.md).
-      - GENESIS_ENABLE_PN101_ANSWER_RESCUE=0
+      - GENESIS_ENABLE_PN101_ANSWER_RESCUE=1
+      # [PN102 2026-07-18] Envelope Contract: template banner + think-seed
+      # (self-counted steps), planner-router steps, p75=193 tok/step calib.
+      - GENESIS_ENABLE_PN102_CONTRACT=1
       - GENESIS_PN100_AUTO_DEFAULT=1
       # VRAM Guardian thresholds, fitted to util. SOFT must sit ABOVE the under-load
       # steady (% of torch-total 24109MB) or it gc-thrashes every poll. Measured:

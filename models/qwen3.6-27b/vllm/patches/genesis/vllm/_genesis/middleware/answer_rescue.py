@@ -107,53 +107,63 @@ def _completion_cap(request: Any) -> int | None:
     return None
 
 
-# ─── Leg 1: answer-first envelope hint (sync, pre-render) ────────────────────
+# ─── Leg 1: PN102 Envelope Contract injector (sync, pre-render) ──────────────
+# v2 (2026-07-18, post-sweep design rounds): the user-message hint is replaced
+# by TEMPLATE-rendered contract pieces — a late-system banner (rules) + a
+# think-seed (the model continues its own budget statement; self-emitted step
+# numbers become the execution-time counter a transformer lacks). This function
+# keeps its name (the deployed /fixes call site imports it) but now only sets
+# chat_template_kwargs variables; chat_template_v2json.jinja renders them.
+# Calibration: p75 tokens-per-step = 193 (436 real TC GPQA traces, 2026-07-18).
+# Numbering clause gated to N <= GENESIS_PN102_NUMBER_MAX (default 24): at 53
+# steps (tier 3) numbering is meta-noise — large budgets get a sizing banner.
 
 
 def maybe_add_answer_hint(request: Any) -> None:
-    if not _master_on() or not _env_bool("GENESIS_PN101_HINT", True):
+    if not _env_bool("GENESIS_ENABLE_PN102_CONTRACT"):
         return
     if not _bounded(request) or _skip_common(request):
         return
-    messages = getattr(request, "messages", None)
-    if not messages:
+    ctk = dict(getattr(request, "chat_template_kwargs", None) or {})
+    if ctk.get("pn_env_banner"):
+        return  # idempotent
+    if ctk.get("enable_thinking") is False:
         return
-    # find last user message
-    idx = None
-    for i in range(len(messages) - 1, -1, -1):
-        m = messages[i]
-        role = m.get("role") if isinstance(m, dict) else getattr(m, "role", None)
-        if role == "user":
-            idx = i
-            break
-    if idx is None:
-        return
-    msg = messages[idx]
-    if not isinstance(msg, dict):
-        return
-    cap = _completion_cap(request)
     budget = getattr(request, "thinking_token_budget", 0)
-    allowance = (cap - budget) if (cap and cap > budget) else None
-    approx = f" of roughly {allowance} tokens" if allowance else ""
-    hint = (
-        f"\n\n{_HINT_SENTINEL} Your reply after any hidden reasoning has a "
-        f"limited window{approx}. State your final answer in the FIRST "
-        "sentence, then add brief justification only if room remains."
-    )
-    content = msg.get("content")
-    if isinstance(content, str):
-        if _HINT_SENTINEL in content:
-            return
-        msg["content"] = content + hint
-    elif isinstance(content, list):
-        for part in content:
-            if isinstance(part, dict) and _HINT_SENTINEL in str(part.get("text", "")):
-                return
-        content.append({"type": "text", "text": hint})
+    tps = max(50, _env_int("GENESIS_PN102_TOKENS_PER_STEP", 193))
+    planner_steps = ctk.pop("pn100_steps", None)  # planner-router suggestion
+    if isinstance(planner_steps, int) and planner_steps > 0:
+        steps = planner_steps
+        # planner estimates per-item need; budget is the CAP — phrase them as
+        # such instead of implying steps*193 == budget (they usually differ)
+        size_clause = f"(budget allows up to ~{budget} thinking tokens)"
     else:
-        return
+        steps = max(3, round(budget / tps))
+        size_clause = f"(~{budget} tokens)"
+    sentences = max(1, _env_int("GENESIS_PN102_SENTENCES", 3))
+    number_max = _env_int("GENESIS_PN102_NUMBER_MAX", 24)
+    answer_clause = (
+        "Unless the user asked for longer form, put your final answer in the "
+        f"FIRST sentence of your reply, then at most {sentences} sentences total."
+    )
+    if steps <= number_max:
+        ctk["pn_env_banner"] = (
+            f"[envelope] Thinking budget: about {steps} short steps "
+            f"{size_clause}. Number your steps and conclude by "
+            f"Step {steps} yourself — do not let the budget cut you off. "
+            + answer_clause
+        )
+        ctk["pn_env_seed"] = f"Budget: ~{steps} short steps.\nStep 1:"
+    else:
+        ctk["pn_env_banner"] = (
+            f"[envelope] You have a substantial thinking budget (~{budget} "
+            "tokens). Conclude your reasoning yourself, well before the budget "
+            "forces a cut. " + answer_clause
+        )
+        ctk["pn_env_seed"] = f"Budget: ~{budget} thinking tokens available.\n"
+    request.chat_template_kwargs = ctk
     _STATS["hints_added"] += 1
-    log.debug("PN101: answer-first hint added (allowance=%s)", allowance)
+    log.info("PN102: contract set (steps=%d budget=%d)", steps, budget)
 
 
 # ─── Leg 2: post-hoc repair pass (async, post-response) ──────────────────────
@@ -171,27 +181,53 @@ async def maybe_rescue_answer(serving: Any, request: Any, result: Any) -> Any:
         return result
     if hasattr(result, "__aiter__"):  # streaming generator — cannot repair
         return result
-    if getattr(request, "stream", False):
-        return result
-    if not _bounded(request) or _skip_common(request):
-        return result
     choice = _extract_choice(result)
-    if choice is None or getattr(choice, "finish_reason", None) != "length":
+    fr = getattr(choice, "finish_reason", None) if choice is not None else None
+    if fr != "length":
         return result
+    if getattr(request, "stream", False):
+        log.info("PN101: guillotine observed on streaming request — cannot repair")
+        return result
+    if not _bounded(request):
+        log.info("PN101: guillotine observed but request not bounded-shaped — skip")
+        return result
+    if _skip_common(request):
+        log.info("PN101: guillotine observed but skip-gates hit (marker/tools/structured)")
+        return result
+    # From here every exit is logged — silent gate-outs on a guillotined
+    # bounded response are exactly the failure mode we must be able to see.
     message = getattr(choice, "message", None)
     content = (getattr(message, "content", None) or "") if message else ""
     if not content.strip():
+        log.info("PN101: guillotine observed but content empty — no repair basis")
         return result  # guillotined inside think — nothing to continue from
     if getattr(message, "tool_calls", None):
+        log.info("PN101: guillotine observed but tool_calls present — skip")
         return result
     if _ANSWER_TAIL_RE.search(content[-200:]):
-        return result  # commit already present; cut hit the justification
+        log.info("PN101: guillotine observed but answer marker present — skip")
+        return result
+    log.info("PN101: guillotine observed (bounded, finish=length) — repairing")
 
     _STATS["repairs_attempted"] += 1
     try:
         req_cls = type(request)
         fields = getattr(req_cls, "model_fields", {}) or {}
-        partial = content.rstrip() + "\nFinal answer:"
+        # TC's assistant format REQUIRES a think block — a continuation partial
+        # without one is off-distribution and the model EOS's instantly
+        # (live-diagnosed 2026-07-18: probe with no think -> empty @ temp 0;
+        # with a minimal think block the model completes correctly). The
+        # template drops EMPTY think blocks (jinja gate on truthy reasoning),
+        # so the primer text is load-bearing, not cosmetic.
+        # .strip() BOTH ends: the template lstrips newlines between </think>
+        # and content — leading \n in content would make the rendered message
+        # diverge from the raw one and trip vLLM's continue_final_message
+        # containment check (live-diagnosed 2026-07-18).
+        partial = (
+            "<think>\nBudget spent; committing the final answer now.\n</think>\n\n"
+            + content.strip()
+            + "\nFinal answer:"
+        )
         messages = list(getattr(request, "messages", None) or [])
         messages.append({"role": "assistant", "content": partial})
         kwargs: dict[str, Any] = {
@@ -219,12 +255,20 @@ async def maybe_rescue_answer(serving: Any, request: Any, result: Any) -> Any:
         resp = await asyncio.wait_for(
             serving.create_chat_completion(synthetic, raw_request=None), timeout
         )
-        rchoice = _extract_choice(resp)
-        tail = (getattr(getattr(rchoice, "message", None), "reasoning", None) or "") if rchoice else ""
-        text = (getattr(getattr(rchoice, "message", None), "content", None) or "") if rchoice else ""
-        text = (text or tail).strip()
+        rmsg = getattr(rchoice, "message", None) if (rchoice := _extract_choice(resp)) else None
+        # The continuation's output lands in message.reasoning on this stack:
+        # the reasoning parser assumes generation starts inside <think> (the
+        # normal generation prompt opens it), and a continue_final_message
+        # request never emits the markers — so read all three fields.
+        text = ""
+        for attr in ("content", "reasoning", "reasoning_content"):
+            text = (getattr(rmsg, attr, None) or "").strip() if rmsg else ""
+            if text:
+                break
         if not text:
+            log.info("PN101: repair continuation returned empty — keeping original")
             return result
+        text = text.split("\n")[0].strip()  # the committed answer line only
         message.content = content.rstrip() + "\nFinal answer: " + text
         _STATS["repairs_succeeded"] += 1
         log.info(
