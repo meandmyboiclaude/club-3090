@@ -63,6 +63,9 @@ _STATS: dict[str, int] = {
     "repairs_attempted": 0,
     "repairs_succeeded": 0,
     "repair_errors": 0,
+    "escalations_attempted": 0,
+    "escalations_succeeded": 0,
+    "escalation_errors": 0,
 }
 
 
@@ -108,15 +111,111 @@ def _completion_cap(request: Any) -> int | None:
 
 
 # ─── Leg 1: PN102 Envelope Contract injector (sync, pre-render) ──────────────
-# v2 (2026-07-18, post-sweep design rounds): the user-message hint is replaced
-# by TEMPLATE-rendered contract pieces — a late-system banner (rules) + a
-# think-seed (the model continues its own budget statement; self-emitted step
-# numbers become the execution-time counter a transformer lacks). This function
-# keeps its name (the deployed /fixes call site imports it) but now only sets
-# chat_template_kwargs variables; chat_template_v2json.jinja renders them.
-# Calibration: p75 tokens-per-step = 193 (436 real TC GPQA traces, 2026-07-18).
-# Numbering clause gated to N <= GENESIS_PN102_NUMBER_MAX (default 24): at 53
-# steps (tier 3) numbering is meta-noise — large budgets get a sizing banner.
+# v4 (2026-07-18, 30-round convergence): the banner is now STATIC — one string
+# for every budgeted request, with no step arithmetic and no budget reference.
+#
+# Why v3's budget-sized banner had to go. The contract carried TWO functions
+# fused together: numbering (self-location, which a transformer genuinely
+# cannot do — it cannot feel token burn but can read labels it wrote itself)
+# and a step TARGET derived from the budget. The target was the defect:
+#   - auto scored ~4pt below a fixed arm AT IDENTICAL CAPS, purely because the
+#     router's per-item step estimate ran below what the budget afforded and
+#     the model complied with the smaller number ("compression").
+#   - the arithmetic (steps = budget / p75) fed on a constant fitted to a
+#     PREVIOUS quant, with no drift detection — a silent liability across
+#     checkpoint swaps, and the origin of BUG-075's seed-path split.
+# Externalize what the serving layer KNOWS (that reasoning happened, via the
+# model's own step labels); never externalize what it merely GUESSES (how hard
+# the task is — the classifier is the same model with less context and one shot).
+#
+# So N stops being a bound and becomes a CHECKPOINT: a scheduled moment to ask
+# "am I done?", with continuing framed as normal rather than as an exception.
+# Two consequences that make this safe to ship without calibration:
+#   - N's value barely affects behaviour. Too low costs one cheap self-check;
+#     too high and the item has already self-stopped. It is not a threshold.
+#   - it self-targets. Easy requests finish before Step N and never reach the
+#     checkpoint, so the banner is inert on exactly the traffic that must not
+#     be perturbed and active on exactly the long reasoning that needs it.
+# The number is kept (rather than "every few steps") deliberately: an immediate
+# cadence asks "are you done?" at step two or three, biasing toward stopping —
+# which IS the compression defect. "Around Step N" is a DELAY, not a target.
+#
+# Answer-shape steering ("answer-first, <=N sentences") is gone. Its job was
+# prevention — keep the answer short enough to fit before the cap — and the
+# escalation leg below replaces prevention with cure, which does not depend on
+# the model complying with a number. Dropping it also retires the standing
+# watch-item that bare prod callers were receiving response-format instructions
+# they never asked for. The banner now governs reasoning cadence only and says
+# nothing about answer form.
+#
+# COUPLING (do not ship half): this banner assumes a generous budget
+# (GENESIS_PN100_TIER_BUDGETS=0,10240,10240,10240). Conversely the generous
+# budget MUST NOT ship under the v3 banner — at 10240 the old arithmetic
+# produced "wrap up around Step 53" with the headroom gate failing, i.e. an
+# implied 53-step scope with no early-stop license on requests needing three.
+# Rollback is both together: GENESIS_ENABLE_PN102_CONTRACT=0 + restore the
+# tier-budget ladder. No redeploy required for either.
+#
+# INVARIANT (BUG-075): the seed MUST end mid-reasoning ("Step 1:"). A seed
+# ending on a completed sentence reads as a natural stopping point and the
+# model closes </think> instantly (31/37 rows rtok=0 @10240, proven from
+# Phoenix rendered prompts). Now structurally safe: the seed no longer varies.
+
+
+def _contract_v4_static(ctk: dict, budget: int) -> bool:
+    """v4: one static banner for every budgeted request. Returns True if set."""
+    ctk.pop("pn100_steps", None)  # planner estimate deliberately unused
+    checkpoint = max(2, _env_int("GENESIS_PN102_CHECKPOINT_STEP", 10))
+    ctk["pn_env_banner"] = (
+        "[envelope] Work through your reasoning in numbered steps. Around "
+        f"Step {checkpoint} — and every few steps after — pause and check "
+        "whether your answer is settled. If it is, stop reasoning and give "
+        "it. If not, keep going."
+    )
+    ctk["pn_env_seed"] = "Step 1:"
+    log.info("PN102: contract set (v4 static, checkpoint=%d budget=%d)", checkpoint, budget)
+    return True
+
+
+def _contract_v3_sized(ctk: dict, budget: int) -> bool:
+    """v3: budget/planner-sized banner. The validated prod path (072fff66)."""
+    tps = max(50, _env_int("GENESIS_PN102_TOKENS_PER_STEP", 193))
+    planner_steps = ctk.pop("pn100_steps", None)
+    if isinstance(planner_steps, int) and planner_steps > 0:
+        steps = planner_steps
+        size_clause = f"budget allows up to ~{budget} thinking tokens"
+    else:
+        steps = max(3, round(budget / tps))
+        size_clause = f"~{budget} tokens"
+    sentences = max(1, _env_int("GENESIS_PN102_SENTENCES", 3))
+    answer_clause = (
+        "Unless the user asked for longer form, put your final answer in the "
+        f"FIRST sentence of your reply, then at most {sentences} sentences total."
+    )
+    has_headroom = steps * tps < 0.7 * budget
+    if budget >= _env_int("GENESIS_PN102_PERMISSION_MIN", 4096) and has_headroom:
+        pace_clause = (
+            f"Number your steps and wrap up around Step {steps} once your "
+            "answer is settled; if the problem proves deeper than planned, "
+            f"keep reasoning past Step {steps} — the budget is generous — "
+            "and do not conclude while your answer is still uncertain. If "
+            "you have genuinely exhausted your approaches, commit to your "
+            "best answer. Do not let the budget cut you off. "
+        )
+        seed_label = "Plan"
+    else:
+        pace_clause = (
+            f"Number your steps and wrap up around Step {steps} yourself — "
+            "do not let the budget cut you off. "
+        )
+        seed_label = "Budget"
+    ctk["pn_env_banner"] = (
+        f"[envelope] Thinking budget: about {steps} short reasoning steps "
+        f"({size_clause}). " + pace_clause + answer_clause
+    )
+    ctk["pn_env_seed"] = f"{seed_label}: ~{steps} short steps.\nStep 1:"
+    log.info("PN102: contract set (v3 sized, steps=%d budget=%d)", steps, budget)
+    return True
 
 
 def maybe_add_answer_hint(request: Any) -> None:
@@ -130,68 +229,17 @@ def maybe_add_answer_hint(request: Any) -> None:
     if ctk.get("enable_thinking") is False:
         return
     budget = getattr(request, "thinking_token_budget", 0)
-    tps = max(50, _env_int("GENESIS_PN102_TOKENS_PER_STEP", 193))
-    planner_steps = ctk.pop("pn100_steps", None)  # planner-router suggestion
-    if isinstance(planner_steps, int) and planner_steps > 0:
-        steps = planner_steps
-        size_clause = f"budget allows up to ~{budget} thinking tokens"
+    if not isinstance(budget, int) or budget <= 0:
+        return  # gated on "we actually assigned a thinking budget"
+    # v4 ships OFF: it replaces a prod-validated banner and must not become the
+    # live path until a bench window says so. It is also COUPLED to the
+    # generous-budget env (see the v4 note above) — enable both or neither.
+    if _env_bool("GENESIS_PN102_STATIC_BANNER", False):
+        _contract_v4_static(ctk, budget)
     else:
-        steps = max(3, round(budget / tps))
-        size_clause = f"~{budget} tokens"
-    # BUG-075 (2026-07-18): the OLD >number_max branch emitted a seed ending on a
-    # COMPLETED sentence ("Budget: ~10240 thinking tokens available.\n"), a natural
-    # stopping point → the model closed </think> instantly and guessed (31/37 rows
-    # rtok=0 @10240; proven from Phoenix rendered prompts). INVARIANT: the seed MUST
-    # end mid-reasoning ("Step 1:") so generation continues INTO the think region,
-    # for every budget. One code path now; the stated step count is a loose ceiling
-    # ("wrap up AROUND Step N"), which reads fine at 5 or 53 and needs no cutoff.
-    sentences = max(1, _env_int("GENESIS_PN102_SENTENCES", 3))
-    answer_clause = (
-        "Unless the user asked for longer form, put your final answer in the "
-        f"FIRST sentence of your reply, then at most {sentences} sentences total."
-    )
-    # Plan-and-permit (2026-07-18 tuning loop): the planner's small per-item
-    # plans are the speed engine but compressed deep items (auto 76% vs
-    # fixed-with-contract ~80 at the SAME caps). The permission clause makes a
-    # lowball plan harmless: finish when settled, continue when not. The
-    # exhaustion escape is load-bearing for SPEND — without it, unsolvable
-    # items ride to the cap ("never conclude while uncertain" alone =
-    # rumination trap). Gated to real budgets so prod trivia never gets an
-    # invitation to elaborate.
-    # Review-loop F2 (2026-07-18): permission requires REAL headroom, not just a
-    # big budget — fallback plans (steps = budget/tps) already fill the budget,
-    # so "keep reasoning past Step N" there is an instruction to sail into the
-    # forced-</think> cliff. Planner lowballs pass the headroom test by
-    # construction. Both gates needed: headroom alone would grant tier-1
-    # trivia a "generous budget" license.
-    has_headroom = steps * tps < 0.7 * budget
-    if budget >= _env_int("GENESIS_PN102_PERMISSION_MIN", 4096) and has_headroom:
-        pace_clause = (
-            f"Number your steps and wrap up around Step {steps} once your "
-            "answer is settled; if the problem proves deeper than planned, "
-            f"keep reasoning past Step {steps} — the budget is generous — "
-            "and do not conclude while your answer is still uncertain. If "
-            "you have genuinely exhausted your approaches, commit to your "
-            "best answer. Do not let the budget cut you off. "
-        )
-        # F4: under permission the step count is a PLAN (the budget is the
-        # cap); the seed must not assert it as the budget. Invariant: both
-        # variants end "Step 1:" (BUG-075 — seed must end mid-reasoning).
-        seed_label = "Plan"
-    else:
-        pace_clause = (
-            f"Number your steps and wrap up around Step {steps} yourself — "
-            "do not let the budget cut you off. "
-        )
-        seed_label = "Budget"
-    ctk["pn_env_banner"] = (
-        f"[envelope] Thinking budget: about {steps} short reasoning steps "
-        f"({size_clause}). " + pace_clause + answer_clause
-    )
-    ctk["pn_env_seed"] = f"{seed_label}: ~{steps} short steps.\nStep 1:"
+        _contract_v3_sized(ctk, budget)
     request.chat_template_kwargs = ctk
     _STATS["hints_added"] += 1
-    log.info("PN102: contract set (steps=%d budget=%d)", steps, budget)
 
 
 # ─── Leg 2: post-hoc repair pass (async, post-response) ──────────────────────
@@ -204,11 +252,157 @@ def _extract_choice(result: Any):
     return choices[0]
 
 
+def _read_reasoning(message: Any) -> str:
+    for attr in ("reasoning", "reasoning_content"):
+        val = getattr(message, attr, None) or ""
+        if val.strip():
+            return val
+    return ""
+
+
+def _sum_usage(base: Any, extra: Any) -> None:
+    """Fold the continuation's token counts into the returned response."""
+    if base is None or extra is None:
+        return
+    for field in ("completion_tokens", "total_tokens"):
+        b, e = getattr(base, field, None), getattr(extra, field, None)
+        if isinstance(b, int) and isinstance(e, int):
+            try:
+                setattr(base, field, b + e)
+            except Exception:  # pragma: no cover - frozen models
+                pass
+
+
+async def _maybe_escalate(serving: Any, request: Any, result: Any) -> bool:
+    """Extend a request that consumed its whole budget still reasoning.
+
+    This is the STARVATION half of the auto-budget system, and the signal it
+    keys on has no false positives by construction: a response whose think
+    block never closed did not choose to stop, it was stopped. Until v4 that
+    case was detected, logged, and discarded ("no repair basis") — the single
+    highest-value branch in the module was a no-op.
+
+    Why a backstop and not the primary allocator: token spend is set by what an
+    item NEEDS, not by what its cap allows (the model never learns its cap), so
+    escalating from a small budget costs the same decode as one generous budget
+    plus an extra prefill and, worse, a re-queue. Generous-first dominates. What
+    escalation uniquely buys is reach ABOVE the generous cap for the ~8% that
+    exhaust it — the accuracy curve was still monotone rising at 10240 with no
+    knee, so that region is untested and cheap to probe only for items that
+    prove they need it.
+
+    Every failure path returns False and leaves the original response
+    untouched, so the worst case is exactly today's behaviour. Non-streaming
+    only (a streaming splice would mean owning SSE framing, finish_reason
+    semantics and usage accounting across the splice); bounded to one pass.
+    """
+    if not _env_bool("GENESIS_PN101_ESCALATE", False):
+        return False
+    choice = _extract_choice(result)
+    if choice is None:
+        return False
+    message = getattr(choice, "message", None)
+    if message is None:
+        return False
+    content = (getattr(message, "content", None) or "").strip()
+    reasoning = _read_reasoning(message)
+    fr = getattr(choice, "finish_reason", None)
+    # Two shapes, one cause — the answer never arrived:
+    #   length + empty content = stopped mid-reasoning (classic starvation)
+    #   stop   + empty content = closed the think block and emitted nothing
+    if content or not reasoning.strip():
+        return False
+    if fr not in ("length", "stop"):
+        return False
+
+    _STATS["escalations_attempted"] += 1
+    budget = _env_int("GENESIS_PN101_ESCALATE_BUDGET", 10240)
+    try:
+        req_cls = type(request)
+        fields = getattr(req_cls, "model_fields", {}) or {}
+        # Resume INSIDE the think region: an unclosed <think> is exactly the
+        # grain this stack already runs with (the reasoning parser assumes
+        # generation starts inside <think>, which is why PN101's continuations
+        # land in message.reasoning). .strip() guards the containment check —
+        # the template lstrips newlines, and any rendered-vs-raw divergence
+        # makes vLLM reject continue_final_message.
+        partial = "<think>\n" + reasoning.strip()
+        messages = list(getattr(request, "messages", None) or [])
+        messages.append({"role": "assistant", "content": partial})
+        kwargs: dict[str, Any] = {
+            "model": getattr(request, "model", None),
+            "messages": messages,
+            "temperature": getattr(request, "temperature", 0.0) or 0.0,
+            "stream": False,
+            "thinking_token_budget": budget,
+            "chat_template_kwargs": {_MARKER_KEY: True},
+        }
+        cap_field = (
+            "max_completion_tokens" if "max_completion_tokens" in fields else "max_tokens"
+        )
+        original_cap = _completion_cap(request)
+        kwargs[cap_field] = max(original_cap or 0, budget + 512)
+        for fname, val in (("continue_final_message", True), ("add_generation_prompt", False)):
+            if fname in fields:
+                kwargs[fname] = val
+            else:
+                kwargs["chat_template_kwargs"][fname] = val
+        synthetic = req_cls(**kwargs)
+        timeout = _env_int("GENESIS_PN101_ESCALATE_TIMEOUT_S", 180)
+        resp = await asyncio.wait_for(
+            serving.create_chat_completion(synthetic, raw_request=None), timeout
+        )
+        rchoice = _extract_choice(resp)
+        rmsg = getattr(rchoice, "message", None) if rchoice else None
+        if rmsg is None:
+            log.info("PN101: escalation returned no choice — keeping original")
+            return False
+        new_content = (getattr(rmsg, "content", None) or "").strip()
+        new_reasoning = _read_reasoning(rmsg)
+        if not new_content and not new_reasoning.strip():
+            log.info("PN101: escalation returned empty — keeping original")
+            return False
+        # The continuation may itself end inside the think region; in that case
+        # its text lands in reasoning and there is still no answer. Hand that
+        # to the repair leg rather than escalating again.
+        for attr in ("reasoning", "reasoning_content"):
+            if getattr(rmsg, attr, None) is not None:
+                try:
+                    setattr(message, attr, (reasoning + new_reasoning))
+                except Exception:  # pragma: no cover
+                    pass
+                break
+        if new_content:
+            message.content = new_content
+            try:
+                choice.finish_reason = getattr(rchoice, "finish_reason", None) or "stop"
+            except Exception:  # pragma: no cover
+                pass
+        _sum_usage(getattr(result, "usage", None), getattr(resp, "usage", None))
+        _STATS["escalations_succeeded"] += 1
+        log.info(
+            "PN101: escalated starved request (prior_rtok~%d, +%d budget, answer=%s)",
+            len(reasoning) // 4, budget, "yes" if new_content else "no",
+        )
+        return bool(new_content)
+    except Exception as exc:
+        _STATS["escalation_errors"] += 1
+        log.warning("PN101: escalation failed (%s) — returning original response", exc)
+        return False
+
+
 async def maybe_rescue_answer(serving: Any, request: Any, result: Any) -> Any:
     if not _master_on() or not _env_bool("GENESIS_PN101_REPAIR", True):
         return result
     if hasattr(result, "__aiter__"):  # streaming generator — cannot repair
         return result
+    if getattr(request, "stream", False):
+        return result
+    if _bounded(request) and not _skip_common(request):
+        # Starvation first: a request that never reached an answer gets more
+        # room before we consider forcing one out of a truncated think block.
+        if await _maybe_escalate(serving, request, result):
+            return result
     choice = _extract_choice(result)
     fr = getattr(choice, "finish_reason", None) if choice is not None else None
     if fr != "length":
