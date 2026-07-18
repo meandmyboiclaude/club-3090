@@ -403,6 +403,10 @@ services:
       # (0=off,1024,4096,10240). Explicit client params always win; requests
       # with max_tokens<=128 exempt. See _genesis/middleware/auto_budget.py.
       - GENESIS_ENABLE_PN100_AUTO_BUDGET=1
+      # [PN101 2026-07-18] answer rescue (hint + repair for bounded requests
+      # guillotined by max_tokens). BEHAVIORAL -> ships OFF; flip to 1 after
+      # the 30-item regression validates (design doc DESIGN-pn101-*.md).
+      - GENESIS_ENABLE_PN101_ANSWER_RESCUE=0
       - GENESIS_PN100_AUTO_DEFAULT=1
       # VRAM Guardian thresholds, fitted to util. SOFT must sit ABOVE the under-load
       # steady (% of torch-total 24109MB) or it gc-thrashes every poll. Measured:
@@ -534,6 +538,8 @@ services:
         # [PN100 2026-07-18] await-site for the auto thinking-budget router
         # (classify pass; module rides the mounted _genesis tree).
         python3 /fixes/patch_pn100_auto_thinking_budget.py
+        # [PN101 2026-07-18] answer-rescue call sites (inert while flag=0).
+        python3 /fixes/patch_pn101_answer_rescue.py
         # [PN98 2026-07-14] BUG-069 residual: drop text-form tool-tag fragments
         # demoted to content (strict-demotion + end-of-output lexer flush).
         # Must run AFTER PN76 (deferred toolcall commit). Gate: canary_47194 0/15.
