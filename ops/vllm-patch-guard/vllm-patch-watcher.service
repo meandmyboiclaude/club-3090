@@ -1,0 +1,18 @@
+[Unit]
+Description=vLLM patch-set recorder — watches podman events, records every boot's applied patches
+Documentation=file:///home/user/shared/tools/vllm-patch-record.py
+After=network-online.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+ExecStart=/home/user/shared/tools/vllm-patch-watcher.sh
+Restart=always
+RestartSec=10
+# Root: the vLLM containers are root-owned, so podman events/inspect need it.
+User=root
+Environment=VLLM_WATCH_MATCH=vllm
+Environment=VLLM_WATCH_SETTLE=150
+
+[Install]
+WantedBy=multi-user.target
