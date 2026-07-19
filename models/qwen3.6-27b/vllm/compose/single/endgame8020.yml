@@ -428,6 +428,13 @@ services:
       # framed as normal rather than as an exception.
       - GENESIS_PN100_TIER_BUDGETS=0,10240,10240,10240
       - GENESIS_PN102_STATIC_BANNER=1
+      # [v5 ADOPTED 2026-07-19, RID aibox-20260719-v5auto] floorless stop +
+      # progress-conditional continue. Paired n=100 vs bare-10240: net +7
+      # (9 conv / 2 regr), 88% @ 2867 mean rtok / 47s vs v4 80% @ 3297 / 56s —
+      # Pareto-dominates v4 on all axes; clears the pre-committed prod bar
+      # (acc up, mean rtok <= oracle's 3139). Deep band 60% -> 84.8% acc.
+      # Rollback: delete this line (v4 static banner resumes underneath).
+      - GENESIS_PN102_BANNER_V5=1
       # Starvation backstop: one continuation resuming INSIDE the think region.
       # Non-streaming, bounded to one pass, every failure path returns the
       # original response unchanged. Reaches above the generous cap only for the
