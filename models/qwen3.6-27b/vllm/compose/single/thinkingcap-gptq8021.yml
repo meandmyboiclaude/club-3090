@@ -392,6 +392,10 @@ services:
       - GENESIS_ENABLE_PN54_GDN_CONTIGUOUS_DEDUP=1
       # OTEL tracing -> Phoenix (host net, gRPC OTLP :4317). Lands in "vllm" project.
       - OTEL_RESOURCE_ATTRIBUTES=openinference.project.name=vllm,service.name=vllm-qwen36
+      # [PN100 2026-07-18] auto thinking-budget router — ON for the auto-mode
+      # bench arm (thinkingcap_auto). Pinned-budget arms bypass it by design.
+      - GENESIS_ENABLE_PN100_AUTO_BUDGET=1
+      - GENESIS_PN100_AUTO_DEFAULT=1
       # VRAM Guardian thresholds, fitted to util. SOFT must sit ABOVE the under-load
       # steady (% of torch-total 24109MB) or it gc-thrashes every poll. Measured:
       # 0.90 steady ~96.7% (SOFT 97 ok), 0.92 steady ~98.9% (SOFT 97 thrashed).
@@ -515,6 +519,8 @@ services:
         # (BUG-070 `{{` fix; supersedes never-applying P62 on dev1060+). Gate:
         # canary_grammar_mtp.py 0/12 doubled tokens.
         python3 /fixes/patch_pn96_44993_structured_output_marker_step_fsm.py
+        # [PN100 2026-07-18] auto thinking-budget router await-site.
+        python3 /fixes/patch_pn100_auto_thinking_budget.py
         # [PN98 2026-07-14] BUG-069 residual: drop text-form tool-tag fragments
         # demoted to content (strict-demotion + end-of-output lexer flush).
         # Must run AFTER PN76 (deferred toolcall commit). Gate: canary_47194 0/15.

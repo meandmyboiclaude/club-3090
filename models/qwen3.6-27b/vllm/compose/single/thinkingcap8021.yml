@@ -24,10 +24,6 @@
 #   cd <repo>/models/qwen3.6-27b/vllm/compose
 #   podman-compose -f single/tools-text-qwopus.yml up -d
 # ===========================================================================
-# [2026-07-14 END STATE] PROMOTED TO PROD :8020 (was endgame bench :8021).
-# Rollback: systemctl disable vllm-endgame-8020 && systemctl enable --now vllm-qwen36
-# (old prod tools-text-aibox.yml + boot-guard, dev799 image). Callers untouched:
-# served aliases identical to old prod.
 services:
   vllm-qwen36-27b:
     # [2026-07-13 bump candidate] nightly-9e57de71 (main 07-13) — UNPROVEN until
@@ -35,10 +31,10 @@ services:
     # brings 481e481b hybrid partial prefix-cache). Rollback: validated dev799 image
     # nightly-69715823... via git tag validated-qwopus-69715823.
     image: localhost/vllm-qwen36-endgame:dev1060cherry-2204-20260713
-    container_name: vllm-qwen36-endgame
+    container_name: vllm-tc-8021
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8020/health"]
+      test: ["CMD", "curl", "-sf", "http://localhost:8021/health"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -103,8 +99,6 @@ services:
       - CUDA_DEVICE_MAX_CONNECTIONS=8
       - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
       - VLLM_MARLIN_USE_ATOMIC_ADD=1
-      # [PN105 2026-07-18] per-request NaN-logits counts (abort wiring)
-      - VLLM_COMPUTE_NANS_IN_LOGITS=1
       - TRITON_CACHE_DIR=/root/.triton/cache
       # Genesis opt-ins
       # [BUG-071 CORRECTED 2026-07-14] GENESIS_PREALLOC_TOKEN_BUDGET=16384 REMOVED —
@@ -141,7 +135,7 @@ services:
       # ceiling (6-day Phoenix p99 total = 30.8K; zero >60K): 33024 = 30.8K + margin,
       # block-rounded. Prefills >33K take P38 transient-alloc fallback (guard :461).
       - GENESIS_TQ_MAX_MODEL_LEN=33024
-      - GENESIS_ENABLE_P58_ASYNC_PLACEHOLDER_FIX=0
+      - GENESIS_ENABLE_P58_ASYNC_PLACEHOLDER_FIX=1
       - GENESIS_ENABLE_P64_QWEN3CODER_MTP_STREAMING=1
       # [2026-07-14 OFF — behavioral, canary-proven harmful] P68 forced
       # tool_choice=required on EVERY >50K-char context (canary system =
@@ -180,7 +174,7 @@ services:
       - GENESIS_ENABLE_PN521_TQ_RAW_TAIL_VERIFY=1
       - GENESIS_ENABLE_PN522_TQ_RAW_TAIL_WARMUP=1
       - GENESIS_ENABLE_PN358_FULL_CG_CONTEXT_REFRESH=1
-      - GENESIS_PN358_MODE=fallback
+      - GENESIS_PN358_MODE=enforce
       - GENESIS_ENABLE_P78_TOLIST_CAPTURE_GUARD=1
       - GENESIS_ENABLE_PN14_TQ_DECODE_OOB_CLAMP=1
       - GENESIS_ENABLE_PN70_TOOL_SCHEMA_FILTER=1
@@ -398,41 +392,6 @@ services:
       - GENESIS_ENABLE_PN54_GDN_CONTIGUOUS_DEDUP=1
       # OTEL tracing -> Phoenix (host net, gRPC OTLP :4317). Lands in "vllm" project.
       - OTEL_RESOURCE_ATTRIBUTES=openinference.project.name=vllm,service.name=vllm-qwen36
-      # [PN99 2026-07-17] prompt/completion text on llm_request spans (0 = off).
-      - VLLM_TRACE_CONTENT_MAX_CHARS=8192
-      # [PN100 2026-07-18] auto thinking-budget router: engine self-classifies
-      # difficulty 0-3 per budget-less request -> thinking_token_budget tier
-      # (0=off,1024,4096,10240). Explicit client params always win; requests
-      # with max_tokens<=128 exempt. See _genesis/middleware/auto_budget.py.
-      - GENESIS_ENABLE_PN100_AUTO_BUDGET=1
-      # [PN101 2026-07-18] answer rescue (hint + repair for bounded requests
-      # guillotined by max_tokens). BEHAVIORAL -> ships OFF; flip to 1 after
-      # the 30-item regression validates (design doc DESIGN-pn101-*.md).
-      - GENESIS_ENABLE_PN101_ANSWER_RESCUE=1
-      # [PN102 2026-07-18] Envelope Contract: template banner + think-seed
-      # (self-counted steps), planner-router steps, p75=193 tok/step calib.
-      - GENESIS_ENABLE_PN102_CONTRACT=1
-      - GENESIS_PN100_AUTO_DEFAULT=1
-      # [v4 2026-07-18] auto-mode convergence. The -5pt vs bare-10240 is TWO
-      # orthogonal defects: compression (~-4pt, silent — the router's per-item
-      # step estimate ran below what the budget afforded and the model complied)
-      # and starvation (~-1.5pt, observable — think block never closed).
-      # Escalation cannot fix compression (nothing fires); the banner cannot fix
-      # starvation. Hence both, plus one generous budget instead of a ladder.
-      #
-      # COUPLED — enable together or neither. Under the v3 sized banner a 10240
-      # budget renders "wrap up around Step 53" with the headroom gate failing,
-      # i.e. a 53-step implied scope with no early-stop license on requests that
-      # need three. The static banner states no budget at all: N is a CHECKPOINT
-      # ("around Step N, check whether your answer is settled"), so continuing is
-      # framed as normal rather than as an exception.
-      - GENESIS_PN100_TIER_BUDGETS=0,10240,10240,10240
-      - GENESIS_PN102_STATIC_BANNER=1
-      # Starvation backstop: one continuation resuming INSIDE the think region.
-      # Non-streaming, bounded to one pass, every failure path returns the
-      # original response unchanged. Reaches above the generous cap only for the
-      # ~8% that exhaust it — the sweep curve was still rising at 10240.
-      - GENESIS_PN101_ESCALATE=1
       # VRAM Guardian thresholds, fitted to util. SOFT must sit ABOVE the under-load
       # steady (% of torch-total 24109MB) or it gc-thrashes every poll. Measured:
       # 0.90 steady ~96.7% (SOFT 97 ok), 0.92 steady ~98.9% (SOFT 97 thrashed).
@@ -556,33 +515,6 @@ services:
         # (BUG-070 `{{` fix; supersedes never-applying P62 on dev1060+). Gate:
         # canary_grammar_mtp.py 0/12 doubled tokens.
         python3 /fixes/patch_pn96_44993_structured_output_marker_step_fsm.py
-        # [PN99 2026-07-17] V0-parity gen_ai.prompt/gen_ai.completion on trace
-        # spans (Phoenix per-trace prompt visibility; otelcol maps -> input.value).
-        # Knob: VLLM_TRACE_CONTENT_MAX_CHARS. Self-retires if upstream re-adds.
-        python3 /fixes/patch_pn99_trace_content_prompt_completion.py
-        # [PN100 2026-07-18] await-site for the auto thinking-budget router
-        # (classify pass; module rides the mounted _genesis tree).
-        python3 /fixes/patch_pn100_auto_thinking_budget.py
-        # [PN101 2026-07-18] answer-rescue call sites (inert while flag=0).
-        python3 /fixes/patch_pn101_answer_rescue.py
-        # [PN103 2026-07-18] BUG-076: spec entry vs final schedule reconcile at
-        # SchedulerOutput emission (mamba block-aligned split can shrink
-        # num_scheduled after the spec window is sized -> [-1,-1,-1] entry with
-        # 1 scheduled token -> bitmask-row/GDN-metadata/rejection desync ->
-        # token-0 "!" completions + FSM 500s + scatter-gather engine death).
-        # Gate: 150-req hindsight drain replay green + canary_grammar_mtp 12/12.
-        python3 /fixes/patch_pn103_spec_entry_schedule_reconcile.py
-        # [PN105 2026-07-18] BUG-076 damage isolation: NaN-logits requests
-        # abort with a clean error instead of sampling token-0 garbage and
-        # feeding poisoned GDN state forward. Needs VLLM_COMPUTE_NANS_IN_LOGITS=1.
-        python3 /fixes/patch_pn105_nan_logits_abort.py
-        # [PN104 2026-07-18] BUG-076 tier-1: clamp align-mode mamba state-slot
-        # gather (async-skewed seq_lens OOB -> ScatterGather device assert ->
-        # engine death). Wrong-but-valid slot degrades to PN105 per-request abort.
-        python3 /fixes/patch_pn104_mamba_align_gather_clamp.py
-        # [PN106D 2026-07-18] NaN-event state-slot audit (zero cost until an
-        # event; dumps the align-slot arithmetic that names the root).
-        python3 /fixes/patch_pn106d_bug076_nan_slot_audit.py
         # [PN98 2026-07-14] BUG-069 residual: drop text-form tool-tag fragments
         # demoted to content (strict-demotion + end-of-output lexer flush).
         # Must run AFTER PN76 (deferred toolcall commit). Gate: canary_47194 0/15.
@@ -611,16 +543,16 @@ services:
       - --profiler-config
       - '{"profiler": "torch", "torch_profiler_dir": "/profiles"}'
       - --model
-      # [2026-07-18 promote] was: XReyRobert/Qwopus3.6-27B-v2-GPTQ-Pro-MTP-BF16 (rollback = restore that line)
-      - /root/.cache/huggingface/thinkingcap-gptq-pro-v2
+      - josefprusa/ThinkingCap-Qwen3.6-27B-int4-AutoRound-v1
       - --served-model-name
       - qwen3.6
+      - thinkingcap
       - qwen3.6-autoround
       - qwen3.6-27b-autoround
       - qwen3.6-hindsight
       - qwen3.5-9b-hindsight
       - --quantization
-      - gptq_marlin
+      - auto_round
       - --dtype
       - float16
       - --disable-custom-all-reduce
@@ -640,38 +572,14 @@ services:
       # after the fix: 150,967 tok @0.95 / 161K @0.96 / 170K @0.97 / 180K
       # @0.98. Gate results (storm6 x3 + 4-slot concurrent burst4 x2):
       # 0.98 = 0/6, 0.97 = 0-1/6, 0.96 = serial-green but CONCURRENT
-      # bursts abort round 2, 0.95 = ALL GREEN both.
-      #
-      # [2026-07-18] --kv-cache-memory REMOVED; KV is profiled again.
-      # The pin (last 3489660928, hand-lowered from the profiler's own 0.95
-      # fit-value 4088487424) made vLLM skip memory profiling entirely and,
-      # in its own words, "does not respect the gpu_memory_utilization
-      # config" — so the ceiling above was never the safety net it looks
-      # like. The "~1.2 GiB device slack" this config assumed was a
-      # 2026-07-14 hand-estimate that expired: measured free at OOM was
-      # 194 MiB against a 256 MiB activation, i.e. three CUDA OOM aborts
-      # (oom_resilience caught them; health stayed green, requests died).
-      # It also silently inherited the OLD model's KV geometry — the same
-      # 3.25 GiB buys 150,967 tok pre-TC but only 130,000 on
-      # thinkingcap-gptq-pro-v2 (~16% more per token), while weights are
-      # unchanged at 17.44 GiB. Profiling measures the real activation peak
-      # on THIS stack and sizes KV beneath it, so headroom is guaranteed by
-      # construction instead of by a stale constant. VLLM_ENABLE_STARTUP_PLAN
-      # (already set) persists the result, which is what the pin was
-      # supposed to buy: deterministic, fast boots.
+      # bursts abort round 2, 0.95 = ALL GREEN both. Ship = util 0.95 +
+      # pin 4088487424 (the profiler's own fit-value at 0.95; pin skips
+      # profiling -> deterministic boots). ~1.2 GiB device slack absorbs
+      # the remaining runtime transients (mid_o 17x11.3MiB per-layer
+      # decode buffers deferred — IMA-history in the TQ workspace stack).
       - "${GPU_MEMORY_UTILIZATION:-0.95}"
-      # [2026-07-19] Pin RESTORED to the endgame-validated value.
-      # Removing it on 07-18 let the profiler re-fit 150,967 tok — the exact
-      # figure commit 22920e0e records as "gated green on synthetic serial+
-      # concurrent tests but OOM'd under REAL traffic", because steady-state
-      # live alloc carries a ~1.3 GiB bounded lazy set (P38 pools, mid_o, PN31
-      # shared, allocator reserve) that synthetic gates under-provoke against
-      # the 23.31 GiB per-process cap. The profiler CANNOT see that load, so
-      # "let it profile" is not the principled fix here — this pin IS the
-      # empirical correction. 2952790016 = 2.75 GiB / 111,129 tok is the only
-      # value with live-caller evidence (storm6 x3 + burst4 x2, zero aborts).
-      # The 3.25 GiB raise at the TC promote (f682faa1) was never re-validated
-      # under live load and was what OOM'd on 07-18.
+      - --kv-cache-memory
+      - "${KV_CACHE_MEMORY_BYTES:-4088487424}"
       # [PN83 — 2026-07-07] rerank micro-slots: PARKED after 2 OOM arms.
       # 29 seats = OOM at KV alloc (~700MB GDN/mamba state over budget);
       # 12 seats = aten::empty alloc failure during warmup (P66 capture list
@@ -705,8 +613,6 @@ services:
       - "${KV_CACHE_DTYPE:-turboquant_3bit_nc}"
       - --language-model-only
       - --trust-remote-code
-      - --chat-template
-      - /chat_template.jinja
       - --reasoning-parser
       - qwen3
       # [endgame 2026-07-13] kills the whitespace degenerate-loop failure inside
@@ -716,8 +622,7 @@ services:
       - '{"backend": "xgrammar", "disable_any_whitespace": true}'
       - --enable-auto-tool-choice
       - --tool-call-parser
-      # [2026-07-14] hermes pairs with Jackrong's v2 template (JSON-in-<tool_call>);
-      # qwen3_coder/qwen3_xml = engine parser, parses only the XML <function=> dialect
+      # [2026-07-14] hermes pairs with Jackrong v2 template (JSON-in-<tool_call>)
       - hermes
       - --enable-chunked-prefill
       - --enable-prefix-caching
@@ -728,4 +633,4 @@ services:
       - --host
       - 0.0.0.0
       - --port
-      - "8020"
+      - "8021"
