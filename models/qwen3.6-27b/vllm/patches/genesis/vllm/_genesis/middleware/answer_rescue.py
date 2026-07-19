@@ -203,6 +203,65 @@ def _contract_v5_settled(ctk: dict, budget: int) -> bool:
     return True
 
 
+# v6 CANDIDATES (2026-07-19, post-v5 latency push — SHIP DARK, bench-gated):
+# Target: hold v5's 88% while cutting mean rtok 2867 -> ~2000-2300 (mean lat
+# 47s -> ~33-38s). The spend anatomy says the only lever that can move the
+# MEAN is the deep band: n=33 items hold 74.0% of all tokens (~6.4K rtok
+# ~105s each); cheap+mid together are 26%. The accuracy residual is the
+# OPPOSITE cohort: 12 wrongs with median 1630 rtok — confident-wrong EARLY
+# stops (gpqa-174/170 class), not deep grinders.
+# Two candidates, one mechanism each (never both changes in one arm —
+# unattributable):
+#   v6a "prove-it exit": v5 text + (1) continue-license tightened from "real
+#       progress" (self-certifiable indefinitely) to "each step must resolve
+#       something new; a step that adds nothing means settled -> commit";
+#       (2) quick answers must survive ONE short break-it step before being
+#       given (taxes early exits ~100-200 rtok on ~1/3 of items ≈ +50 mean,
+#       aims to convert the confident-wrong earlies).
+#   v6b "named-unresolved": stop-side unchanged from v5; continue licensed
+#       only while the model can NAME, in one line, what is still unresolved.
+#       Naming is checkable-by-self each step; vaguer than-v5 grinding gets
+#       no license. No break-check tax (isolates the deep-band lever).
+# Pre-committed bars (V6-BANNER-CANDIDATES-RUNBOOK-20260719.md): survive =
+# mean rtok <=2300 AND paired-net vs v5 >= -2; promote = <=2200 AND net >= 0;
+# kill = net <= -4 or truncation/parse anomalies. INVARIANT (BUG-075): seed
+# still ends mid-reasoning ("Step 1:"). Precedence v6a -> v6b -> v5 -> v4 -> v3.
+
+
+def _contract_v6a_proveit(ctk: dict, budget: int) -> bool:
+    """v6a: v5 + resolve-something-new continue license + break-it guard."""
+    ctk.pop("pn100_steps", None)  # planner estimate deliberately unused
+    ctk["pn_env_banner"] = (
+        "[envelope] Work through your reasoning in numbered steps. The moment "
+        "your answer is settled — at any step, even the first — stop reasoning "
+        "and give it. An answer that arrived quickly counts as settled only "
+        "after one short step spent trying to break it; if it survives, give "
+        "it and do not verify further. Keep going only while each step "
+        "resolves something new; a step that adds nothing new means your "
+        "current best answer IS settled — commit to it."
+    )
+    ctk["pn_env_seed"] = "Step 1:"
+    log.info("PN102: contract set (v6a prove-it, budget=%d)", budget)
+    return True
+
+
+def _contract_v6b_named(ctk: dict, budget: int) -> bool:
+    """v6b: v5 stop-side + continue licensed only by naming the unresolved."""
+    ctk.pop("pn100_steps", None)  # planner estimate deliberately unused
+    ctk["pn_env_banner"] = (
+        "[envelope] Work through your reasoning in numbered steps. The moment "
+        "your answer is settled — at any step, even the first — stop reasoning "
+        "and give it; do not re-verify a settled answer. Continue only while "
+        "you can state, in one line at the start of the step, what is still "
+        "unresolved. When you can no longer name anything unresolved — or "
+        "what you name would not change your answer — commit to your best "
+        "answer."
+    )
+    ctk["pn_env_seed"] = "Step 1:"
+    log.info("PN102: contract set (v6b named-unresolved, budget=%d)", budget)
+    return True
+
+
 def _contract_v4_static(ctk: dict, budget: int) -> bool:
     """v4: one static banner for every budgeted request. Returns True if set."""
     ctk.pop("pn100_steps", None)  # planner estimate deliberately unused
@@ -275,7 +334,11 @@ def maybe_add_answer_hint(request: Any) -> None:
     # v4 ships OFF: it replaces a prod-validated banner and must not become the
     # live path until a bench window says so. It is also COUPLED to the
     # generous-budget env (see the v4 note above) — enable both or neither.
-    if _env_bool("GENESIS_PN102_BANNER_V5", False):
+    if _env_bool("GENESIS_PN102_BANNER_V6A", False):
+        _contract_v6a_proveit(ctk, budget)
+    elif _env_bool("GENESIS_PN102_BANNER_V6B", False):
+        _contract_v6b_named(ctk, budget)
+    elif _env_bool("GENESIS_PN102_BANNER_V5", False):
         _contract_v5_settled(ctk, budget)
     elif _env_bool("GENESIS_PN102_STATIC_BANNER", False):
         _contract_v4_static(ctk, budget)
