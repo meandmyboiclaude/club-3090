@@ -19,13 +19,24 @@ Design constraints inherited from the bench data:
 - Pure CPU/python on the eager ``sample_tokens`` path (outside cudagraph
   capture); cost ≈ a few µs per seat per step.
 
+OFFLINE CALIBRATION VERDICT (2026-07-19, ~/shared/pn108/CALIBRATION-20260719.md,
+454/500 items via Phoenix spans): genuine deep reasoning does NOT plateau —
+deep-correct tail novelty median 0.89, 0/102 under the floor; only 2/44 deep
+problems trip any threshold, and one (gpqa-127, DNA transcription) is CORRECT
+low-novelty content a pure-novelty detector would kill. Consequences baked in
+here: (1) fires additionally require PERIODICITY — a repeated 8-gram within
+the window (tight loops repeat phrases; transcription/copying does not);
+(2) default mode is SHADOW — would-fires are logged and counted, nothing is
+mutated; enforce only via env after a live-capture arm proves post-close
+accuracy. Expected role: runaway guard (gpqa-131 class), NOT a latency lever
+(safe configs save ~223 tok / 100 items in this data).
+
 Gate: ``GENESIS_ENABLE_PN108_PLATEAU_CAP`` (ship-dark). Knobs (env):
+``GENESIS_PN108_MODE`` (shadow|enforce, default shadow),
 ``GENESIS_PN108_ARM_AFTER_TOKENS`` (2048), ``GENESIS_PN108_WINDOW_TOKENS``
 (256), ``GENESIS_PN108_NOVELTY_FLOOR`` (0.20), ``GENESIS_PN108_CONSEC_WINDOWS``
-(3), ``GENESIS_PN108_GRACE_TOKENS`` (0).
-
-Calibration: ~/shared/pn108/CALIBRATION-20260719.md (offline pass over the
-v5r2/v6a/v6b run artifacts; thresholds here are the pre-calibration defaults).
+(2), ``GENESIS_PN108_REPEAT_MIN`` (3 — max same-8-gram count per window),
+``GENESIS_PN108_GRACE_TOKENS`` (0).
 """
 
 from __future__ import annotations
@@ -36,7 +47,7 @@ from typing import Any
 
 log = logging.getLogger("genesis.plateau.pn108")
 
-_STATS = {"observed_requests": 0, "windows_scored": 0, "fires": 0}
+_STATS = {"observed_requests": 0, "windows_scored": 0, "fires": 0, "shadow_fires": 0}
 _STATE_KEY = "pn108"
 
 
@@ -70,8 +81,13 @@ def _config() -> dict[str, Any]:
         "arm_after": max(0, _env_int("GENESIS_PN108_ARM_AFTER_TOKENS", 2048)),
         "window": max(32, _env_int("GENESIS_PN108_WINDOW_TOKENS", 256)),
         "floor": min(1.0, max(0.0, _env_float("GENESIS_PN108_NOVELTY_FLOOR", 0.20))),
-        "consec": max(1, _env_int("GENESIS_PN108_CONSEC_WINDOWS", 3)),
+        "consec": max(1, _env_int("GENESIS_PN108_CONSEC_WINDOWS", 2)),
+        "repeat_min": max(2, _env_int("GENESIS_PN108_REPEAT_MIN", 3)),
         "grace": max(0, _env_int("GENESIS_PN108_GRACE_TOKENS", 0)),
+        "enforce": (
+            os.environ.get("GENESIS_PN108_MODE", "shadow").strip().lower()
+            == "enforce"
+        ),
     }
 
 
@@ -108,12 +124,23 @@ class PlateauDetector:
                 if tri not in self.seen:
                     fresh += 1
                     self.seen.add(tri)
+            # Periodicity gate (calibration 07-19): tight loops repeat the
+            # SAME 8-gram many times inside one window; low-novelty-but-
+            # legitimate content (sequence transcription, tables) does not.
+            gram_counts: dict[tuple[int, ...], int] = {}
+            max_rep = 0
+            for i in range(0, max(0, len(chunk) - 7)):
+                g = tuple(chunk[i : i + 8])
+                c = gram_counts.get(g, 0) + 1
+                gram_counts[g] = c
+                if c > max_rep:
+                    max_rep = c
             self.scored_tokens += window
             _STATS["windows_scored"] += 1
             if self.scored_tokens <= self.cfg["arm_after"]:
                 continue  # trigram memory builds, but no verdicts pre-arm
             novelty = (fresh / total) if total else 1.0
-            if novelty < self.cfg["floor"]:
+            if novelty < self.cfg["floor"] and max_rep >= self.cfg["repeat_min"]:
                 self.low_streak += 1
             else:
                 self.low_streak = 0
@@ -168,16 +195,25 @@ def observe_state(state: dict[str, Any], think_start_len: int) -> None:
     if fired and not state.get(_STATE_KEY + "_applied", False):
         grace = det.cfg["grace"]
         think_count = int(state.get("think_count", 0) or 0)
-        state["thinking_token_budget"] = think_count + grace
-        state["check_count_down"] = grace
         state[_STATE_KEY + "_applied"] = True
-        _STATS["fires"] += 1
-        log.info(
-            "PN108: plateau fire — capping think at %d(+%d grace) after %d scored "
-            "tokens (streak=%d, window=%d, floor=%.2f)",
-            think_count, grace, det.scored_tokens, det.low_streak,
-            det.cfg["window"], det.cfg["floor"],
-        )
+        if det.cfg["enforce"]:
+            state["thinking_token_budget"] = think_count + grace
+            state["check_count_down"] = grace
+            _STATS["fires"] += 1
+            log.info(
+                "PN108: plateau ENFORCE fire — capping think at %d(+%d grace) "
+                "after %d scored tokens (window=%d, floor=%.2f, repeat_min=%d)",
+                think_count, grace, det.scored_tokens,
+                det.cfg["window"], det.cfg["floor"], det.cfg["repeat_min"],
+            )
+        else:
+            _STATS["shadow_fires"] += 1
+            log.info(
+                "PN108: plateau SHADOW fire (no action) — would cap at %d after "
+                "%d scored tokens (window=%d, floor=%.2f, repeat_min=%d)",
+                think_count, det.scored_tokens,
+                det.cfg["window"], det.cfg["floor"], det.cfg["repeat_min"],
+            )
 
 
 def get_stats() -> dict[str, int]:

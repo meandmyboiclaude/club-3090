@@ -10,7 +10,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _genesis.plateau import pn108  # noqa: E402
 
 
-CFG = {"arm_after": 512, "window": 128, "floor": 0.20, "consec": 3, "grace": 0}
+CFG = {
+    "arm_after": 512, "window": 128, "floor": 0.20, "consec": 3,
+    "repeat_min": 3, "grace": 0, "enforce": True,
+}
 
 
 def _fresh(monkeypatch, enabled=True):
@@ -48,6 +51,21 @@ def test_loop_stream_fires_after_arm_and_streak(monkeypatch):
     assert fired is True
     # sticky
     assert det.observe(_novel_stream(256)) is True
+
+
+def _dna_stream(n, seed=11):
+    """Low-novelty but LEGITIMATE content: transcription over a 4-token
+    alphabet (gpqa-127 class). Trigram novelty collapses, but 8-grams are
+    mostly unique — the periodicity gate must spare it."""
+    rng = random.Random(seed)
+    return [rng.randrange(0, 4) for _ in range(n)]
+
+
+def test_dna_transcription_is_spared(monkeypatch):
+    _fresh(monkeypatch)
+    det = pn108.PlateauDetector(dict(CFG))
+    det.observe(_novel_stream(512))
+    assert det.observe(_dna_stream(128 * 8)) is False  # novelty low, no fire
 
 
 def test_pre_arm_loop_gives_no_verdict(monkeypatch):
@@ -97,8 +115,9 @@ def _mk_state(output, start_thinking=0, think_count=None, budget=10240):
 THINK_START_LEN = 2  # e.g. ["<think>", "\n"] — passed by the holder
 
 
-def test_observe_state_fires_and_mutates_budget(monkeypatch):
+def test_observe_state_enforce_fires_and_mutates_budget(monkeypatch):
     _fresh(monkeypatch)
+    monkeypatch.setenv("GENESIS_PN108_MODE", "enforce")
     monkeypatch.setenv("GENESIS_PN108_ARM_AFTER_TOKENS", "512")
     monkeypatch.setenv("GENESIS_PN108_WINDOW_TOKENS", "128")
     monkeypatch.setenv("GENESIS_PN108_CONSEC_WINDOWS", "3")
@@ -109,6 +128,24 @@ def test_observe_state_fires_and_mutates_budget(monkeypatch):
     assert state["check_count_down"] == 0
     assert state.get("pn108_applied") is True
     assert pn108.get_stats()["fires"] == 1
+
+
+def test_observe_state_shadow_default_logs_but_never_mutates(monkeypatch):
+    _fresh(monkeypatch)
+    monkeypatch.delenv("GENESIS_PN108_MODE", raising=False)  # default = shadow
+    monkeypatch.setenv("GENESIS_PN108_ARM_AFTER_TOKENS", "512")
+    monkeypatch.setenv("GENESIS_PN108_WINDOW_TOKENS", "128")
+    monkeypatch.setenv("GENESIS_PN108_CONSEC_WINDOWS", "3")
+    tokens = [0] * THINK_START_LEN + _novel_stream(512) + _loop_stream(600)
+    state = _mk_state(tokens, start_thinking=0, think_count=len(tokens) - THINK_START_LEN)
+    budget_before = state["thinking_token_budget"]
+    countdown_before = state["check_count_down"]
+    pn108.observe_state(state, THINK_START_LEN)
+    assert state["thinking_token_budget"] == budget_before
+    assert state["check_count_down"] == countdown_before
+    assert state.get("pn108_applied") is True  # verdict recorded once
+    stats = pn108.get_stats()
+    assert stats["shadow_fires"] == 1 and stats["fires"] == 0
 
 
 def test_observe_state_incremental_no_double_feed(monkeypatch):
