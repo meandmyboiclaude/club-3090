@@ -198,6 +198,33 @@ def test_second_think_block_gets_fresh_detector(monkeypatch):
     assert det2.scored_tokens > 0  # and it actually consumed think #2
 
 
+def test_prompt_side_think_is_observed_bug107d(monkeypatch):
+    """BUG-107d regression: template opens <think> in the PROMPT, so
+    start_thinking is prompt-space (~600) while output is short. The old
+    slice returned None forever -> detector structurally inert (proven
+    in-container by the 2026-07-19 shadow window)."""
+    _fresh(monkeypatch)
+    monkeypatch.setenv("GENESIS_PN108_ARM_AFTER_TOKENS", "512")
+    monkeypatch.setenv("GENESIS_PN108_WINDOW_TOKENS", "128")
+    state = _mk_state(_novel_stream(1024), start_thinking=600)
+    state["prompt_tok_ids"] = list(range(700))  # prompt-space world
+    state["continue_thinking"] = True
+    state["in_think"] = True
+    pn108.observe_state(state, THINK_START_LEN)
+    assert "pn108" in state, "detector never created (BUG-107d shape)"
+    assert state["pn108"].scored_tokens > 0
+    assert pn108.get_stats()["observed_requests"] == 1
+
+
+def test_prompt_side_think_closed_is_noop(monkeypatch):
+    _fresh(monkeypatch)
+    state = _mk_state(_novel_stream(1024), start_thinking=600)
+    state["continue_thinking"] = True
+    state["in_think"] = False  # block closed
+    pn108.observe_state(state, THINK_START_LEN)
+    assert "pn108" not in state
+
+
 def test_module_reload_is_clean():
     mod = importlib.reload(pn108)
     assert mod.get_stats()["fires"] == 0 and mod._STATE_KEY == "pn108"

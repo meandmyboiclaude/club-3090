@@ -157,21 +157,33 @@ class PlateauDetector:
 
 
 def _think_token_slice(state: dict[str, Any], think_start_len: int) -> list[int] | None:
-    """Active-think token ids, or None when the request isn't mid-think."""
+    """Active-think token ids, or None when the request isn't mid-think.
+
+    BUG-107d (2026-07-19 shadow window): when the chat template opens
+    ``<think>`` in the PROMPT (this deployment's template does, line 147),
+    ``start_thinking`` is a PROMPT-space index while ``output_tok_ids`` is
+    output-space — slicing output with it always overflowed and returned
+    None, leaving the detector structurally inert. The continue_thinking
+    branch must therefore be checked FIRST, not gated behind ``start < 0``:
+    in that mode every output token is a think token until the end sequence.
+    """
     if state.get("in_end", False):
         return None
     if state.get("end_thinking", -1) != -1:
         return None
-    start = state.get("start_thinking", -1)
     output = state.get("output_tok_ids") or []
+    # prompt-side think: start_thinking is prompt-space — never slice output
+    # with it. The whole output is think tokens while the block stays open.
+    if state.get("continue_thinking", False):
+        if not state.get("in_think", False):
+            return None
+        return output or None
+    start = state.get("start_thinking", -1)
     if start >= 0:
         begin = start + think_start_len
         if begin >= len(output):
             return None
         return output[begin:]
-    # prompt-side think (continue_thinking): the whole output is think tokens
-    if state.get("continue_thinking", False) and state.get("in_think", False):
-        return output or None
     return None
 
 
