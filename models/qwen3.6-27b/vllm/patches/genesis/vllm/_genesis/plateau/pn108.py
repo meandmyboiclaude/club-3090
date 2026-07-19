@@ -201,6 +201,16 @@ def observe_state(state: dict[str, Any], think_start_len: int) -> None:
         state[_STATE_KEY + "_basis"] = basis
         state.pop(_STATE_KEY + "_applied", None)  # one verdict per block
         _STATS["observed_requests"] += 1
+        # Execution proof: exactly one line per observed think block. Without
+        # this, "0 fires" is indistinguishable from "hook never ran" — the
+        # periodicity gate makes normal reasoning UNABLE to fire at any env
+        # setting (that's the precision property), so fires can't serve as
+        # the liveness signal. Found by the 07-19 shadow window's canary.
+        log.info(
+            "PN108: observing think block (budget=%d, basis=%d, mode=%s)",
+            state.get("thinking_token_budget", -1), basis,
+            "enforce" if det.cfg["enforce"] else "shadow",
+        )
     fed = state.get(_STATE_KEY + "_fed", 0)
     if len(tokens) <= fed:
         return
