@@ -505,6 +505,11 @@ services:
         python3 /fixes/patch_vram_tracer.py
         python3 /fixes/patch_gdn_oom_retry.py
         python3 /fixes/patch_oom_resilience.py
+        # [PN108 2026-07-20] plateau/runaway guard call-site graft into
+        # ThinkingBudgetStateHolder (BUG-107d fixed 8dabb965). Patch applies
+        # every boot; the HOOK is inert unless GENESIS_ENABLE_PN108_PLATEAU_CAP=1
+        # (shadow default). Was shipped unwired on 07-19 — this line is the fix.
+        python3 /fixes/patch_pn108_plateau_cap.py
         python3 /fixes/patch_pn71_reasoning_alias.py
         python3 /fixes/patch_pn72_streaming_toolcall_content_recover.py
         # [PN76 — 2026-06-26] Engine-level deferred tool-call commit: holds the <tool_call>
