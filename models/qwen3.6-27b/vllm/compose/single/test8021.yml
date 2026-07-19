@@ -71,7 +71,9 @@ services:
       # VLLM_CACHE_ROOT/startup_plan; matching-fingerprint reboots skip the profiling
       # and cudagraph-estimation passes -> faster time-to-serve. Auto-falls-back on
       # mismatch/OOM; never overrides an explicit --kv-cache-memory.
-      - VLLM_ENABLE_STARTUP_PLAN=1
+      # [2026-07-19 BUG-107] OFF — skip-path design flaw (BUG-078 re-class) +
+      # shared startup_plan dir cross-arms prod. See endgame8020.yml.
+      - VLLM_ENABLE_STARTUP_PLAN=0
       # [2026-07-13 Wave-3b] arms the torch profiler endpoints (inert until /start_profile)
       # DEV_MODE required: /start_profile //stop_profile are dev-mode-gated on dev1060.
       - VLLM_TORCH_PROFILER_DIR=/profiles

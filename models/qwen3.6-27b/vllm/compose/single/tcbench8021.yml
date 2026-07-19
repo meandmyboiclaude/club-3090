@@ -84,7 +84,11 @@ services:
       # VLLM_CACHE_ROOT/startup_plan; matching-fingerprint reboots skip the profiling
       # and cudagraph-estimation passes -> faster time-to-serve. Auto-falls-back on
       # mismatch/OOM; never overrides an explicit --kv-cache-memory.
-      - VLLM_ENABLE_STARTUP_PLAN=1
+      # [2026-07-19 BUG-107] OFF — fingerprint-identical to endgame8020, so this
+      # bench compose consumed/armed PROD's plan via the shared startup_plan dir
+      # (proven: 12:17/13:34 bench boots ran prod's hot 153,064 plan). Skip-path
+      # design flaw = BUG-078 re-class; see endgame8020.yml + loop file 07-19.
+      - VLLM_ENABLE_STARTUP_PLAN=0
       # [2026-07-13 Wave-3b] arms the torch profiler endpoints (inert until /start_profile)
       # DEV_MODE required: /start_profile //stop_profile are dev-mode-gated on dev1060.
       - VLLM_TORCH_PROFILER_DIR=/profiles
@@ -666,18 +670,9 @@ services:
       # (already set) persists the result, which is what the pin was
       # supposed to buy: deterministic, fast boots.
       - "${GPU_MEMORY_UTILIZATION:-0.95}"
-      # [2026-07-19] Pin RESTORED to the endgame-validated value.
-      # Removing it on 07-18 let the profiler re-fit 150,967 tok — the exact
-      # figure commit 22920e0e records as "gated green on synthetic serial+
-      # concurrent tests but OOM'd under REAL traffic", because steady-state
-      # live alloc carries a ~1.3 GiB bounded lazy set (P38 pools, mid_o, PN31
-      # shared, allocator reserve) that synthetic gates under-provoke against
-      # the 23.31 GiB per-process cap. The profiler CANNOT see that load, so
-      # "let it profile" is not the principled fix here — this pin IS the
-      # empirical correction. 2952790016 = 2.75 GiB / 111,129 tok is the only
-      # value with live-caller evidence (storm6 x3 + burst4 x2, zero aborts).
-      # The 3.25 GiB raise at the TC promote (f682faa1) was never re-validated
-      # under live load and was what OOM'd on 07-18.
+      # [2026-07-19 corrected] The "Pin RESTORED" paragraph that stood here was
+      # DANGLING — no --kv-cache-memory arg exists in this file; profiling is
+      # authoritative. See endgame8020.yml's corrected note + BUG-078/BUG-107.
       # [PN83 — 2026-07-07] rerank micro-slots: PARKED after 2 OOM arms.
       # 29 seats = OOM at KV alloc (~700MB GDN/mamba state over budget);
       # 12 seats = aten::empty alloc failure during warmup (P66 capture list
