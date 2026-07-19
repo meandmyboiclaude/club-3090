@@ -659,7 +659,7 @@ services:
       # construction instead of by a stale constant. VLLM_ENABLE_STARTUP_PLAN
       # (already set) persists the result, which is what the pin was
       # supposed to buy: deterministic, fast boots.
-      - "${GPU_MEMORY_UTILIZATION:-0.95}"
+      - "${GPU_MEMORY_UTILIZATION:-0.94}"
       # [2026-07-19] Pin RESTORED to the endgame-validated value.
       # Removing it on 07-18 let the profiler re-fit 150,967 tok — the exact
       # figure commit 22920e0e records as "gated green on synthetic serial+
@@ -672,8 +672,6 @@ services:
       # value with live-caller evidence (storm6 x3 + burst4 x2, zero aborts).
       # The 3.25 GiB raise at the TC promote (f682faa1) was never re-validated
       # under live load and was what OOM'd on 07-18.
-      - --kv-cache-memory
-      - "${KV_CACHE_MEMORY_BYTES:-2952790016}"
       # [PN83 — 2026-07-07] rerank micro-slots: PARKED after 2 OOM arms.
       # 29 seats = OOM at KV alloc (~700MB GDN/mamba state over budget);
       # 12 seats = aten::empty alloc failure during warmup (P66 capture list
