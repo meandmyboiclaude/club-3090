@@ -31,6 +31,13 @@ mutated; enforce only via env after a live-capture arm proves post-close
 accuracy. Expected role: runaway guard (gpqa-131 class), NOT a latency lever
 (safe configs save ~223 tok / 100 items in this data).
 
+Known limits (documented, accepted): (1) loops with a period longer than one
+window (~256 tokens) never repeat an 8-gram in-window and are not caught —
+recall is secondary for a guard; (2) ENFORCE mode inherits the PN75/BUG-028
+dependency — think-end forcing under structured-output + MTP requires the
+PN75 clamp boot-applied (present in the 134-patch baseline; verify before
+enabling enforce on a stripped-down boot).
+
 Gate: ``GENESIS_ENABLE_PN108_PLATEAU_CAP`` (ship-dark). Knobs (env):
 ``GENESIS_PN108_MODE`` (shadow|enforce, default shadow),
 ``GENESIS_PN108_ARM_AFTER_TOKENS`` (2048), ``GENESIS_PN108_WINDOW_TOKENS``
@@ -181,11 +188,18 @@ def observe_state(state: dict[str, Any], think_start_len: int) -> None:
     tokens = _think_token_slice(state, think_start_len)
     if tokens is None:
         return
+    # Slice basis = the absolute think-start index this slice is cut from.
+    # A request can close one think block and open another; the old fed
+    # counter would then exceed the fresh (shorter) slice and silence the
+    # detector for every later block. New basis -> fresh detector per block.
+    basis = state.get("start_thinking", -1)
     det = state.get(_STATE_KEY)
-    if det is None:
+    if det is None or state.get(_STATE_KEY + "_basis") != basis:
         det = PlateauDetector()
         state[_STATE_KEY] = det
         state[_STATE_KEY + "_fed"] = 0
+        state[_STATE_KEY + "_basis"] = basis
+        state.pop(_STATE_KEY + "_applied", None)  # one verdict per block
         _STATS["observed_requests"] += 1
     fed = state.get(_STATE_KEY + "_fed", 0)
     if len(tokens) <= fed:

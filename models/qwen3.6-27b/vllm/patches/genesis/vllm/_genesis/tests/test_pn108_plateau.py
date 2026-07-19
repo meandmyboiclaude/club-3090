@@ -178,6 +178,26 @@ def test_not_in_think_is_noop(monkeypatch):
     assert "pn108" not in state
 
 
-def test_module_imports_without_vllm():
-    assert "vllm" not in sys.modules or True  # import already succeeded standalone
-    importlib.reload(pn108)
+def test_second_think_block_gets_fresh_detector(monkeypatch):
+    _fresh(monkeypatch)
+    monkeypatch.setenv("GENESIS_PN108_ARM_AFTER_TOKENS", "512")
+    monkeypatch.setenv("GENESIS_PN108_WINDOW_TOKENS", "128")
+    # think #1 at basis 0
+    t1 = [0] * THINK_START_LEN + _novel_stream(1024)
+    state = _mk_state(t1, start_thinking=0)
+    pn108.observe_state(state, THINK_START_LEN)
+    det1 = state["pn108"]
+    assert det1.scored_tokens > 0
+    # think #1 closes, think #2 opens later at a new absolute index
+    state["output_tok_ids"] = t1 + [9] * 300 + [0] * THINK_START_LEN + _novel_stream(256)
+    state["start_thinking"] = len(t1) + 300
+    state["end_thinking"] = -1
+    pn108.observe_state(state, THINK_START_LEN)
+    det2 = state["pn108"]
+    assert det2 is not det1  # fresh detector, not the silenced old one
+    assert det2.scored_tokens > 0  # and it actually consumed think #2
+
+
+def test_module_reload_is_clean():
+    mod = importlib.reload(pn108)
+    assert mod.get_stats()["fires"] == 0 and mod._STATE_KEY == "pn108"
