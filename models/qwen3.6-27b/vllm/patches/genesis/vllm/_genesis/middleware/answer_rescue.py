@@ -162,6 +162,47 @@ def _completion_cap(request: Any) -> int | None:
 # Phoenix rendered prompts). Now structurally safe: the seed no longer varies.
 
 
+# v5 (2026-07-19, spend-band analysis): v4's checkpoint delay became a FLOOR.
+# Measured: v4 produced ZERO items under 500 rtok vs 36 in the tier-ladder auto
+# (median 698 -> 1658); the cheap band collapsed from 61 items / 18.2% of spend
+# to 21 / 4.9% with NO accuracy gain there (86.9% -> 85.7%). The banner's
+# "around Step 10" deferral meant nothing considered stopping before ~1900
+# tokens. The v4 rationale (immediate cadence biases toward stopping = the
+# compression defect) is refuted by the data: the delay did not protect the
+# hard tail — it taxed the easy cohort. Meanwhile the deep band (3000+ rtok)
+# doubled its population (19 -> 35) for +2.1pt within-band, because v4's
+# "if not settled, keep going" is UNCONDITIONAL — an item that is uncertain
+# because it is unsolvable grinds instead of committing.
+#
+# v5 = same static-banner architecture (no step arithmetic, no budget
+# reference, self-targeting), two text changes:
+#   - stop-side: settled means stop, from the FIRST step — no checkpoint delay.
+#     The asymmetry does the work: cheap exits need confidence, not a schedule.
+#   - continue-side: continuing is licensed by PROGRESS, not by uncertainty.
+#     The exhaustion escape ("genuinely exhausted -> commit") returns from v3;
+#     it was dropped in v4 and its absence is what fed the deep-band money pit
+#     (73.4% of all tokens for 60% accuracy).
+# Oracle says the budget is sufficient and misallocated: 87% @ 3139 mean rtok
+# vs v4's 80% @ 3297. Move mass, don't add tokens.
+# INVARIANT (BUG-075) unchanged: seed ends mid-reasoning ("Step 1:").
+
+
+def _contract_v5_settled(ctk: dict, budget: int) -> bool:
+    """v5: static banner, floorless stop + progress-conditional continue."""
+    ctk.pop("pn100_steps", None)  # planner estimate deliberately unused
+    ctk["pn_env_banner"] = (
+        "[envelope] Work through your reasoning in numbered steps. The moment "
+        "your answer is settled — at any step, even the first — stop reasoning "
+        "and give it; do not re-verify a settled answer. If it is not settled "
+        "and you are still making real progress, keep going — there is room. "
+        "If you have genuinely exhausted your approaches and are no longer "
+        "making progress, stop and commit to your best answer."
+    )
+    ctk["pn_env_seed"] = "Step 1:"
+    log.info("PN102: contract set (v5 settled, budget=%d)", budget)
+    return True
+
+
 def _contract_v4_static(ctk: dict, budget: int) -> bool:
     """v4: one static banner for every budgeted request. Returns True if set."""
     ctk.pop("pn100_steps", None)  # planner estimate deliberately unused
@@ -234,7 +275,9 @@ def maybe_add_answer_hint(request: Any) -> None:
     # v4 ships OFF: it replaces a prod-validated banner and must not become the
     # live path until a bench window says so. It is also COUPLED to the
     # generous-budget env (see the v4 note above) — enable both or neither.
-    if _env_bool("GENESIS_PN102_STATIC_BANNER", False):
+    if _env_bool("GENESIS_PN102_BANNER_V5", False):
+        _contract_v5_settled(ctk, budget)
+    elif _env_bool("GENESIS_PN102_STATIC_BANNER", False):
         _contract_v4_static(ctk, budget)
     else:
         _contract_v3_sized(ctk, budget)
