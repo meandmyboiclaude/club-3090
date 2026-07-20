@@ -122,9 +122,11 @@ def test_observe_state_enforce_fires_and_mutates_budget(monkeypatch):
     monkeypatch.setenv("GENESIS_PN108_WINDOW_TOKENS", "128")
     monkeypatch.setenv("GENESIS_PN108_CONSEC_WINDOWS", "3")
     tokens = [0] * THINK_START_LEN + _novel_stream(512) + _loop_stream(600)
-    state = _mk_state(tokens, start_thinking=0, think_count=len(tokens) - THINK_START_LEN)
-    pn108.observe_state(state, THINK_START_LEN)
-    assert state["thinking_token_budget"] == state["think_count"]  # grace=0
+    state = _mk_state(tokens, start_thinking=0, think_count=5)  # BROKEN think_count
+    pn108.observe_state(state, THINK_START_LEN, seq_idx=3)
+    # cap basis = observed slice length, NOT the (broken) think_count
+    assert state["thinking_token_budget"] == len(tokens) - THINK_START_LEN
+    assert state["thinking_token_budget"] != 5
     assert state["check_count_down"] == 0
     assert state.get("pn108_applied") is True
     assert pn108.get_stats()["fires"] == 1

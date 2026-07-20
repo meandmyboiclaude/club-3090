@@ -46,7 +46,7 @@ REPLACEMENT = (
     "            try:\n"
     "                from vllm._genesis.plateau import pn108 as _pn108\n"
     "                _pn108.observe_state(\n"
-    "                    state, len(self.think_start_token_ids)\n"
+    "                    state, len(self.think_start_token_ids), seq_idx\n"
     "                )\n"
     "            except Exception:\n"
     "                import logging as _pn108_logging\n"
