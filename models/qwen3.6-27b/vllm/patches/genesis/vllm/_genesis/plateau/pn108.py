@@ -52,7 +52,12 @@ import logging
 import os
 from typing import Any
 
-log = logging.getLogger("genesis.plateau.pn108")
+try:  # vllm's logger prints INFO in-server; plain root logger may not
+    from vllm.logger import init_logger
+
+    log = init_logger("vllm.genesis.plateau.pn108")
+except Exception:  # pragma: no cover
+    log = logging.getLogger("genesis.plateau.pn108")
 
 _STATS = {"observed_requests": 0, "windows_scored": 0, "fires": 0, "shadow_fires": 0}
 _STATE_KEY = "pn108"
