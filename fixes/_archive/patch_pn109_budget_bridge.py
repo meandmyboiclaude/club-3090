@@ -1,6 +1,17 @@
 #!/usr/bin/env python3
 """PN109 — bridge request.thinking_token_budget into SamplingParams.
 
+RETIRED 2026-07-20 (BUG-107h): the 107e diagnosis this patch fixed was a
+MISDIAGNOSIS — this pin's chat_completion/protocol.py natively carries
+thinking_token_budget (field :244 -> to_sampling_params :774); the "zero
+reads" grep hit the legacy flat openai/protocol.py path, which does not
+exist on this pin (grep over a missing file reads as zero matches).
+The holder has tracked requests since PN100 shipped; this patch's
+client-wins guard finds the param already set and skips — that is why
+"PN109: bridged" never logged. Kept in _archive because it becomes
+load-bearing again ONLY if a future pin drops the protocol field
+(detection: re-run the 107e greps against chat_completion/protocol.py).
+
 BUG-107e (2026-07-20, second live window): SamplingParams HAS a native
 thinking_token_budget field and the engine-side ThinkingBudgetStateHolder
 enforces it — but the OpenAI protocol layer never carries the value:

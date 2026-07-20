@@ -510,12 +510,11 @@ services:
         # every boot; the HOOK is inert unless GENESIS_ENABLE_PN108_PLATEAU_CAP=1
         # (shadow default). Was shipped unwired on 07-19 — this line is the fix.
         python3 /fixes/patch_pn108_plateau_cap.py
-        # [PN109 2026-07-20] budget bridge: request.thinking_token_budget ->
-        # SamplingParams (BUG-107e — protocol layer never carried it; the
-        # engine budget holder tracked ZERO requests ever). Patch applies
-        # every boot; hook inert unless GENESIS_ENABLE_PN109_BUDGET_BRIDGE=1.
-        # BEHAVIORAL when enabled (tier caps become engine-enforced) -> bench-gated.
-        python3 /fixes/patch_pn109_budget_bridge.py
+        # [PN109 RETIRED 2026-07-20 BUG-107h] the 107e diagnosis was wrong —
+        # this pin's chat_completion/protocol.py carries thinking_token_budget
+        # natively (:244 -> :774); budgets were engine-enforced all along.
+        # Patch moved to /fixes/_archive/ (re-wire only if a future pin drops
+        # the protocol field): # python3 /fixes/_archive/patch_pn109_budget_bridge.py
         python3 /fixes/patch_pn71_reasoning_alias.py
         python3 /fixes/patch_pn72_streaming_toolcall_content_recover.py
         # [PN76 — 2026-06-26] Engine-level deferred tool-call commit: holds the <tool_call>
