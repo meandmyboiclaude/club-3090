@@ -192,7 +192,12 @@ def _think_token_slice(state: dict[str, Any], think_start_len: int) -> list[int]
     return None
 
 
-def observe_state(state: dict[str, Any], think_start_len: int, seq_idx: int = -1) -> None:
+def observe_state(
+    state: dict[str, Any],
+    think_start_len: int,
+    seq_idx: int = -1,
+    req_id: str | None = None,
+) -> None:
     """Hook called per tracked request per step, BEFORE _update_think_state.
 
     On plateau: budget := OBSERVED think length + grace, countdown := grace —
@@ -200,8 +205,9 @@ def observe_state(state: dict[str, Any], think_start_len: int, seq_idx: int = -1
     Enforce-blocker fixes (truemean window, 07-20): (1) the cap basis is
     len(slice) — the detector's own ground truth — NOT state["think_count"],
     which reads ~5 on the prompt-opened-think path (107d index-space family)
-    and would have guillotined instantly; (2) fires carry seq_idx so telemetry
-    joins to per-request outcomes.
+    and would have guillotined instantly; (2) fires carry seq_idx AND req_id
+    (07-22: index->req_id map handed over at the sync_batch call site) so
+    telemetry joins to per-request outcomes.
     """
     if not is_enabled():
         return
@@ -229,9 +235,9 @@ def observe_state(state: dict[str, Any], think_start_len: int, seq_idx: int = -1
         # setting (that's the precision property), so fires can't serve as
         # the liveness signal. Found by the 07-19 shadow window's canary.
         log.info(
-            "PN108: observing think block (budget=%d, basis=%d, mode=%s)",
+            "PN108: observing think block (budget=%d, basis=%d, mode=%s, req=%s)",
             state.get("thinking_token_budget", -1), basis,
-            "enforce" if det.cfg["enforce"] else "shadow",
+            "enforce" if det.cfg["enforce"] else "shadow", req_id,
         )
     fed = state.get(_STATE_KEY + "_fed", 0)
     if len(tokens) <= fed:
@@ -247,20 +253,20 @@ def observe_state(state: dict[str, Any], think_start_len: int, seq_idx: int = -1
             state["check_count_down"] = grace
             _STATS["fires"] += 1
             log.info(
-                "PN108: plateau ENFORCE fire — seq=%d budget=%s capping think "
-                "at %d(+%d grace) after %d scored tokens (window=%d, "
+                "PN108: plateau ENFORCE fire — seq=%d req=%s budget=%s capping "
+                "think at %d(+%d grace) after %d scored tokens (window=%d, "
                 "floor=%.2f, repeat_min=%d)",
-                seq_idx, state.get("thinking_token_budget"), think_len, grace,
-                det.scored_tokens, det.cfg["window"], det.cfg["floor"],
+                seq_idx, req_id, state.get("thinking_token_budget"), think_len,
+                grace, det.scored_tokens, det.cfg["window"], det.cfg["floor"],
                 det.cfg["repeat_min"],
             )
         else:
             _STATS["shadow_fires"] += 1
             log.info(
-                "PN108: plateau SHADOW fire (no action) — seq=%d budget=%s "
-                "would cap at %d after %d scored tokens (window=%d, "
+                "PN108: plateau SHADOW fire (no action) — seq=%d req=%s "
+                "budget=%s would cap at %d after %d scored tokens (window=%d, "
                 "floor=%.2f, repeat_min=%d)",
-                seq_idx, state.get("thinking_token_budget"), think_len,
+                seq_idx, req_id, state.get("thinking_token_budget"), think_len,
                 det.scored_tokens, det.cfg["window"], det.cfg["floor"],
                 det.cfg["repeat_min"],
             )

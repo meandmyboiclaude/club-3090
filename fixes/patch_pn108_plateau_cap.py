@@ -34,6 +34,31 @@ TARGET = pathlib.Path(
 )
 MARKER = "# PN108:"
 
+# Second target (07-22): hand the holder an index->req_id map at the
+# sync_batch call site so fire lines can be joined to per-request outcomes
+# (the bench enforce-arm prerequisite — fires carried only seq= before).
+# InputBatch._req_ids is the authoritative index->req_id list; a shallow
+# snapshot per batch change is cheap (<= max_num_seqs entries).
+TARGET2 = pathlib.Path(
+    "/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/"
+    "gpu_input_batch.py"
+)
+MARKER2 = "# PN108:"
+ANCHOR2 = (
+    "        if self.thinking_budget_state_holder is not None and batch_update:\n"
+    "            self.thinking_budget_state_holder.sync_batch(batch_update)\n"
+)
+REPLACEMENT2 = (
+    "        if self.thinking_budget_state_holder is not None and batch_update:\n"
+    "            self.thinking_budget_state_holder.sync_batch(batch_update)\n"
+    "            # PN108: index->req_id snapshot so plateau fires can be\n"
+    "            # joined to per-request outcomes. Same index space as the\n"
+    "            # holder's _state keys (both come from batch_update).\n"
+    "            self.thinking_budget_state_holder._genesis_req_id_by_index = {\n"
+    "                i: r for i, r in enumerate(self._req_ids) if r is not None\n"
+    "            }\n"
+)
+
 ANCHOR = "            self._update_think_state(state)\n"
 REPLACEMENT = (
     "            # PN108: plateau-triggered dynamic cap (house — see\n"
@@ -46,7 +71,10 @@ REPLACEMENT = (
     "            try:\n"
     "                from vllm._genesis.plateau import pn108 as _pn108\n"
     "                _pn108.observe_state(\n"
-    "                    state, len(self.think_start_token_ids), seq_idx\n"
+    "                    state, len(self.think_start_token_ids), seq_idx,\n"
+    "                    req_id=getattr(\n"
+    "                        self, '_genesis_req_id_by_index', {}\n"
+    "                    ).get(seq_idx),\n"
     "                )\n"
     "            except Exception:\n"
     "                import logging as _pn108_logging\n"
@@ -57,26 +85,35 @@ REPLACEMENT = (
 )
 
 
-def main() -> int:
-    if not TARGET.exists():
-        print(f"{LOG} FATAL: target missing: {TARGET}", flush=True)
+def _apply(target: pathlib.Path, marker: str, anchor: str, replacement: str,
+           what: str) -> int:
+    if not target.exists():
+        print(f"{LOG} FATAL: target missing: {target}", flush=True)
         return 1
-    src = TARGET.read_text(encoding="utf-8")
-    if MARKER in src:
-        print(f"{LOG} already applied — skipping", flush=True)
+    src = target.read_text(encoding="utf-8")
+    if marker in src:
+        print(f"{LOG} already applied ({what}) — skipping", flush=True)
         return 0
-    count = src.count(ANCHOR)
+    count = src.count(anchor)
     if count != 1:
         print(
-            f"{LOG} FATAL: anchor occurs {count}x (need exactly 1) — "
-            "upstream drifted; re-anchor before boot",
+            f"{LOG} FATAL: anchor occurs {count}x (need exactly 1) in "
+            f"{target.name} — upstream drifted; re-anchor before boot",
             flush=True,
         )
         return 1
-    TARGET.write_text(src.replace(ANCHOR, REPLACEMENT, 1), encoding="utf-8")
-    print(f"{LOG} applied — observe hook inserted before _update_think_state",
-          flush=True)
+    target.write_text(src.replace(anchor, replacement, 1), encoding="utf-8")
+    print(f"{LOG} applied — {what}", flush=True)
     return 0
+
+
+def main() -> int:
+    rc = _apply(TARGET, MARKER, ANCHOR, REPLACEMENT,
+                "observe hook inserted before _update_think_state")
+    if rc:
+        return rc
+    return _apply(TARGET2, MARKER2, ANCHOR2, REPLACEMENT2,
+                  "req_id map handed to holder at sync_batch site")
 
 
 if __name__ == "__main__":
