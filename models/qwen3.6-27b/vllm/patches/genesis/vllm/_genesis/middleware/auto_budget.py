@@ -398,6 +398,15 @@ def _continuous_budget(tier: int, steps: int | None) -> int | None:
     floor = _env_int("GENESIS_PN100_BUDGET_FLOOR", 128)
     ceil = _env_int("GENESIS_PN100_BUDGET_CEIL", 10240)
     raw = steps * k
+    # [2026-07-23 P-pess] high-step pessimism: the k260 audit showed ALL
+    # budget-caused misses were UNDER-grants on high-step items (099/097/127
+    # near-miss class, 76-95% of need). ENFORCED budget only — the banner
+    # renders steps, so this is invisible to the model (no P1 anchoring risk).
+    # Fat is free (self-stop). Dark unless GENESIS_PN100_HIGHSTEP_MULT is set.
+    hs_mult = _env_float("GENESIS_PN100_HIGHSTEP_MULT", 1.0)
+    hs_min = _env_int("GENESIS_PN100_HIGHSTEP_MIN", 10)
+    if hs_mult > 1.0 and steps >= hs_min:
+        raw *= hs_mult
     rounded = int(round(raw / 100.0)) * 100
     return max(floor, min(ceil, rounded))
 
