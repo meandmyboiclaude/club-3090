@@ -196,10 +196,13 @@ services:
       - GENESIS_PN108_GROW=0
       # [2026-07-22 PN112 settled-stop — SHADOW first: logs would-fire + conf
       # checkpoints for TAU calibration; zero behavioral change in shadow]
+      # [2026-07-23 collection boot: shadow @ tau13.0/floor600 = richest
+      # would-fire telemetry for the offline calibration sweep (FAST PATH 1);
+      # enforce config candidates return only via the offline-picked config]
       - GENESIS_ENABLE_PN112_SETTLED_STOP=1
-      - GENESIS_PN112_MODE=enforce
-      - GENESIS_PN112_TAU=13.5
-      - GENESIS_PN112_FLOOR=900
+      - GENESIS_PN112_MODE=shadow
+      - GENESIS_PN112_TAU=13.0
+      - GENESIS_PN112_FLOOR=600
       # Performance
       - GENESIS_ENABLE_P40=1
       - GENESIS_ENABLE_P82=1
@@ -526,6 +529,11 @@ services:
         # the PN108 patch (anchor B targets PN108's inserted text). Hook inert
         # unless GENESIS_ENABLE_PN112_SETTLED_STOP=1.
         python3 /fixes/patch_pn112_conf_tap.py
+        # [2026-07-23] PR44812 graft (tool-call implicit reasoning-end guard,
+        # slice-fixed — see docs/UPSTREAM.md row vllm#44812). DARK by default:
+        # inert unless GENESIS_ENABLE_PR44812_TOOL_GUARD=1. Runs after the
+        # PN112 patch (shares the holder file; anchors verified disjoint).
+        python3 /fixes/patch_pr44812_tool_guard.py
         # [PN109 RETIRED 2026-07-20 BUG-107h] the 107e diagnosis was wrong —
         # this pin's chat_completion/protocol.py carries thinking_token_budget
         # natively (:244 -> :774); budgets were engine-enforced all along.
