@@ -152,10 +152,17 @@ def observe_state(
     # calibration checkpoint logging (shadow AND enforce; one line per level)
     while st["next_ckpt"] < len(_CHECKPOINTS) and think_len >= _CHECKPOINTS[st["next_ckpt"]]:
         w = [c for (t, c) in st["confs"] if t > think_len - cfg["win"]]
+        # tokstep = mean think-tokens per sampler step in the window = MTP
+        # accepted+1 (2026-07-23): free acceptance-rate telemetry — candidate
+        # settled/doom side-signal (predictable text = higher acceptance).
+        ts = [t for (t, c) in st["confs"] if t > think_len - cfg["win"]]
+        deltas = [b - a for a, b in zip(ts, ts[1:]) if b > a]
+        tokstep = (sum(deltas) / len(deltas)) if deltas else 0.0
         log.info(
-            "PN112: ckpt req=%s think=%d wmean=%s n=%d streak=%d",
+            "PN112: ckpt req=%s think=%d wmean=%s n=%d streak=%d tokstep=%.2f",
             req_id, _CHECKPOINTS[st["next_ckpt"]],
             f"{sum(w)/len(w):.2f}" if w else "na", len(w), st["streak"],
+            tokstep,
         )
         st["next_ckpt"] += 1
     if think_len < cfg["floor"]:
