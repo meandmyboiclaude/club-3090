@@ -174,6 +174,21 @@ def observe_state(
         return
     if st["streak"] < cfg["k"]:
         return
+    # Degeneracy AND-gate (2026-07-23, hardening §4.4): repetition loops fake
+    # high C — a fire additionally requires the recent window to be non-
+    # degenerate (type-token ratio > 0.2, LoopGuard default). Degenerate
+    # window ⇒ reset the streak and let PN108's plateau logic own the case.
+    try:
+        _tail = tokens[-cfg["win"]:]
+        if _tail and len(set(_tail)) <= max(8, int(0.2 * len(_tail))):
+            st["streak"] = 0
+            log.info(
+                "PN112: fire suppressed (degenerate window, ttr<=0.2) "
+                "req=%s think=%d", req_id, think_len,
+            )
+            return
+    except Exception:
+        pass
     st["fired"] = True
     _STATS["settled"] += 1
     budget = state.get("thinking_token_budget", -1)
