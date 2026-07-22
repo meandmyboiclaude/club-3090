@@ -331,6 +331,17 @@ def maybe_add_answer_hint(request: Any) -> None:
     budget = getattr(request, "thinking_token_budget", 0)
     if not isinstance(budget, int) or budget <= 0:
         return  # gated on "we actually assigned a thinking budget"
+    # [2026-07-22 USER hypothesis] announce-vs-grant decoupling: a too-low
+    # ANNOUNCED number degrades reasoning itself (07-18: announced ~12 steps on
+    # a 21-step budget = model complies, −4pt at identical caps). When growth
+    # is available, size the BANNER from the reachable ceiling (grant +
+    # growth allowance) while enforcement stays at the lean grant — the model
+    # plans with room, self-stop keeps easy items short, growth delivers the
+    # room only if actually used. Env: GENESIS_PN102_ANNOUNCE_CEILING=1.
+    if _env_bool("GENESIS_PN102_ANNOUNCE_CEILING", False):
+        allowance = _env_int("GENESIS_PN108_GROW_MAX_TOTAL", 0)
+        if allowance > 0:
+            budget = budget + allowance
     # v4 ships OFF: it replaces a prod-validated banner and must not become the
     # live path until a bench window says so. It is also COUPLED to the
     # generous-budget env (see the v4 note above) — enable both or neither.

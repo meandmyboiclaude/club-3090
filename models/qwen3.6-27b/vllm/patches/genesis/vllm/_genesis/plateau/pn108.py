@@ -291,6 +291,10 @@ def observe_state(
         budget = state.get("thinking_token_budget", -1)
         if 0 < budget < det.cfg["grow_ceil"]:
             remaining = budget - len(tokens)
+            # margin scales with the grant (min of flat and 15%): a 384-token
+            # margin is 5% of a 6500 grant but ~40% of an 800 grant — unscaled
+            # it brush-triggers growth on every small-grant self-stopper.
+            margin = min(det.cfg["grow_margin"], max(64, int(budget * 0.15)))
             armed = det.scored_tokens > det.cfg["arm_after"]
             prearm_grows = state.get(_STATE_KEY + "_prearm_grows", 0)
             total_grows = state.get(_STATE_KEY + "_grows", 0)
@@ -302,7 +306,7 @@ def observe_state(
                 and (cap_ev == 0 or total_grows < cap_ev)
                 and (cap_tok == 0 or grown_tokens < cap_tok)
             )
-            if remaining <= det.cfg["grow_margin"] and allowed:
+            if remaining <= margin and allowed:
                 pct = det.cfg["grow_pct"]
                 step = (
                     max(det.cfg["grow_step"], int(budget * pct))

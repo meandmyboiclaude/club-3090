@@ -60,6 +60,7 @@ except Exception:  # pragma: no cover
 
 _MARKER_KEY = "pn100_internal"
 _CONTROL_KEY = "thinking_budget"
+_LAST_CONF: dict = {"v": "h"}
 
 _RUBRIC = (
     "You rate how much hidden reasoning an AI assistant needs to answer a "
@@ -297,7 +298,7 @@ async def _classify(serving: Any, request: Any) -> tuple[int, int | None] | None
         "chat_template_kwargs": {"enable_thinking": False, _MARKER_KEY: True},
     }
     cap_field = "max_completion_tokens" if "max_completion_tokens" in fields else "max_tokens"
-    kwargs[cap_field] = 8
+    kwargs[cap_field] = 12
     synthetic = req_cls(**kwargs)
 
     timeout = _env_int("GENESIS_PN100_TIMEOUT_S", 20)
@@ -308,11 +309,17 @@ async def _classify(serving: Any, request: Any) -> tuple[int, int | None] | None
     if not choices:
         return None
     content = getattr(choices[0].message, "content", "") or ""
-    # planner form "T|S" (tier + suggested short-step count); bare "T" accepted
+    # planner forms: "T|S|C" (rubric v3, C in {h,l}), "T|S", bare "T"
+    m = re.search(r"([0-3])\s*\|\s*(\d{1,3})\s*\|\s*([hl])", content)
+    if m:
+        _LAST_CONF["v"] = m.group(3)
+        return int(m.group(1)), max(0, min(120, int(m.group(2))))
     m = re.search(r"([0-3])\s*\|\s*(\d{1,3})", content)
     if m:
+        _LAST_CONF["v"] = "h"
         return int(m.group(1)), max(0, min(120, int(m.group(2))))
     m = re.search(r"[0-3]", content)
+    _LAST_CONF["v"] = "l"
     return (int(m.group(0)), None) if m else None
 
 
@@ -355,6 +362,36 @@ def _continuous_budget(tier: int, steps: int | None) -> int | None:
         return None
     if not steps or steps <= 0:
         return None
+    # [2026-07-22 USER] per-bucket quantile map: budget = what THIS step-value
+    # historically needed (fitted from banked L-data), piecewise-linear between
+    # fitted points. Beats any single multiplier because true need per step
+    # value is nonlinear. Format: "steps:budget,steps:budget,..." sorted keys.
+    map_env = os.environ.get("GENESIS_PN100_STEP_BUDGET_MAP", "").strip()
+    if map_env:
+        try:
+            pts = sorted(
+                (int(a), int(b))
+                for a, b in (p.split(":") for p in map_env.split(","))
+            )
+            if steps <= pts[0][0]:
+                raw = pts[0][1]
+            elif steps >= pts[-1][0]:
+                raw = pts[-1][1]
+            else:
+                raw = None
+                for (s0, b0), (s1, b1) in zip(pts, pts[1:]):
+                    if s0 <= steps <= s1:
+                        f = (steps - s0) / max(1, s1 - s0)
+                        raw = b0 + f * (b1 - b0)
+                        break
+            if raw is not None:
+                if _LAST_CONF.get("v") == "l":
+                    raw *= _env_float("GENESIS_PN100_LOWCONF_MULT", 1.5)
+                floor_m = _env_int("GENESIS_PN100_BUDGET_FLOOR", 128)
+                ceil_m = _env_int("GENESIS_PN100_BUDGET_CEIL", 10240)
+                return max(floor_m, min(ceil_m, int(round(raw / 100.0)) * 100))
+        except (ValueError, IndexError):
+            pass  # malformed map -> fall through to k*steps
     k = _env_int("GENESIS_PN100_TOK_PER_STEP", 150)
     # [2026-07-22 USER] floor 128: prod trivials should be able to land tiny
     # grants (512 and below); grow-on-progress makes a low floor harmless.
