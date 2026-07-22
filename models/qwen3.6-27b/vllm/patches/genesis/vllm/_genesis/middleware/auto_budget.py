@@ -341,6 +341,37 @@ def _apply_tier(request: Any, tier: int, allow_disable: bool) -> int:
     return budgets[tier]
 
 
+def _continuous_budget(tier: int, steps: int | None) -> int | None:
+    """Continuous per-task budget from the classifier's own step estimate.
+
+    [2026-07-22 USER] The tier bucket is too coarse — real traffic wants a
+    flexible budget (~100-tok granularity in the 500-1500 band where most
+    requests live). When GENESIS_PN100_CONTINUOUS=1 and the planner returned a
+    step count, the budget is steps x tok_per_step, rounded to 100 and clamped.
+    The tier is used ONLY to gate thinking off (tier 0). Fail-safe: returns
+    None when disabled or no step estimate (caller falls back to the tier map).
+    """
+    if not _env_bool("GENESIS_PN100_CONTINUOUS", False):
+        return None
+    if not steps or steps <= 0:
+        return None
+    k = _env_int("GENESIS_PN100_TOK_PER_STEP", 150)
+    floor = _env_int("GENESIS_PN100_BUDGET_FLOOR", 256)
+    ceil = _env_int("GENESIS_PN100_BUDGET_CEIL", 10240)
+    raw = steps * k
+    rounded = int(round(raw / 100.0)) * 100
+    return max(floor, min(ceil, rounded))
+
+
+def _apply_budget(request: Any, budget: int) -> int:
+    """Set an explicit thinking budget (continuous path)."""
+    ctk = dict(getattr(request, "chat_template_kwargs", None) or {})
+    ctk["enable_thinking"] = True
+    request.chat_template_kwargs = ctk
+    request.thinking_token_budget = budget
+    return budget
+
+
 async def apply_hook_async(serving: Any, request: Any) -> None:
     """Mutate request in place per PN100 auto-budget policy.
 
@@ -384,7 +415,11 @@ async def apply_hook_async(serving: Any, request: Any) -> None:
         _TIER_CACHE.move_to_end(key)
         _STATS["cache_hits"] += 1
         c_tier, c_steps = cached
-        applied = _apply_tier(request, c_tier, allow_disable)
+        cont = _continuous_budget(c_tier, c_steps)
+        if cont is not None and not (c_tier == 0 and allow_disable):
+            applied = _apply_budget(request, cont)
+        else:
+            applied = _apply_tier(request, c_tier, allow_disable)
         if applied > 0 and c_steps:
             _stash_steps(request, c_steps)
         log.info(
@@ -413,7 +448,11 @@ async def apply_hook_async(serving: Any, request: Any) -> None:
     tier = max(0, min(3, tier))
     _STATS["classified"] += 1
     _STATS[f"tier_{tier}"] += 1
-    applied = _apply_tier(request, tier, allow_disable)
+    cont = _continuous_budget(tier, steps)
+    if cont is not None and not (tier == 0 and allow_disable):
+        applied = _apply_budget(request, cont)
+    else:
+        applied = _apply_tier(request, tier, allow_disable)
     if applied > 0 and steps:
         _stash_steps(request, steps)
     log.info(
