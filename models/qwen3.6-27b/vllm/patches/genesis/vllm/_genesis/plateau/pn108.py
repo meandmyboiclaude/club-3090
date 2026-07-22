@@ -59,7 +59,7 @@ try:  # vllm's logger prints INFO in-server; plain root logger may not
 except Exception:  # pragma: no cover
     log = logging.getLogger("genesis.plateau.pn108")
 
-_STATS = {"observed_requests": 0, "windows_scored": 0, "fires": 0, "shadow_fires": 0}
+_STATS = {"observed_requests": 0, "windows_scored": 0, "fires": 0, "shadow_fires": 0, "grows": 0}
 _STATE_KEY = "pn108"
 
 
@@ -100,6 +100,39 @@ def _config() -> dict[str, Any]:
             os.environ.get("GENESIS_PN108_MODE", "shadow").strip().lower()
             == "enforce"
         ),
+        # [2026-07-22 grow-on-progress] In-place budget EXTENSION at the same
+        # seat: when the request nears its cap and the detector has NOT fired
+        # (novelty healthy = still progressing), raise thinking_token_budget by
+        # grow_step, up to grow_ceil. Makes lean median-based assignments safe
+        # (USER spec: never-under harmless, avg overhang 5-10%): under-estimated
+        # deep items extend themselves; plateaued ramblers do not (no fire = no
+        # growth gate passes only while progressing). Same integer the holder's
+        # force-close obeys — the exact wire PN108-enforce uses, opposite sign.
+        "grow": _env_bool("GENESIS_PN108_GROW", False),
+        "grow_step": max(128, _env_int("GENESIS_PN108_GROW_STEP", 1024)),
+        "grow_ceil": max(1024, _env_int("GENESIS_PN108_GROW_CEIL", 10240)),
+        "grow_margin": max(64, _env_int("GENESIS_PN108_GROW_MARGIN", 384)),
+        # [grow v2] growth must be EARNED: no extension before grow_arm think
+        # tokens (kills the pre-arm free ride for shallow ramblers — they close
+        # at their lean grant, where the forced answer usually survives), and
+        # once the fire-detector is armed, growth also requires a clean
+        # low-novelty streak (low_streak == 0).
+        "grow_arm": max(128, _env_int("GENESIS_PN108_GROW_ARM", 1024)),
+        # [grow v3, USER] percentage increments (scale like router error) with
+        # an absolute floor so growth stays discrete (> margin, no float
+        # degenerate); pre-detector growth is COUNT-limited so shallow ramblers
+        # get bounded pocket change while armed+clean requests grow freely.
+        "grow_pct": max(0.0, _env_float("GENESIS_PN108_GROW_PCT", 0.0)),
+        "grow_prearm_max": max(0, _env_int("GENESIS_PN108_GROW_PREARM_MAX", 2)),
+        # [Loop 15] per-request growth-event cap: effective ceiling ~= grant x
+        # (1+pct)^N -- worst case proportional to the router's estimate, so the
+        # 8-10K burn pit (deep-wrong grinders, novelty-invisible) cannot
+        # re-form via installments. 0 = uncapped.
+        "grow_max_events": max(0, _env_int("GENESIS_PN108_GROW_MAX_EVENTS", 0)),
+        # [v3 final] absolute total-growth allowance per request: covers every
+        # MEASURED router under-gap (max +2796) while bounding grinder
+        # installment-rides to grant+allowance instead of the global ceiling.
+        "grow_max_total": max(0, _env_int("GENESIS_PN108_GROW_MAX_TOTAL", 3072)),
     }
 
 
@@ -244,6 +277,53 @@ def observe_state(
         return
     fired = det.observe(tokens[fed:])
     state[_STATE_KEY + "_fed"] = len(tokens)
+    # grow-on-progress: nearing the cap with healthy novelty -> extend in place
+    # BEFORE the holder's force-close condition can bind. Plateaued (fired)
+    # requests never grow — they close at the current budget. Growth is limited
+    # per-request by grow_ceil; the client's max_tokens stays the outer bound
+    # (PN101's repair leg covers that guillotine).
+    if (
+        det.cfg["grow"]
+        and not det.fired
+        and det.low_streak == 0
+        and len(tokens) >= det.cfg["grow_arm"]
+    ):
+        budget = state.get("thinking_token_budget", -1)
+        if 0 < budget < det.cfg["grow_ceil"]:
+            remaining = budget - len(tokens)
+            armed = det.scored_tokens > det.cfg["arm_after"]
+            prearm_grows = state.get(_STATE_KEY + "_prearm_grows", 0)
+            total_grows = state.get(_STATE_KEY + "_grows", 0)
+            grown_tokens = state.get(_STATE_KEY + "_grown_tok", 0)
+            cap_ev = det.cfg["grow_max_events"]
+            cap_tok = det.cfg["grow_max_total"]
+            allowed = (
+                (armed or prearm_grows < det.cfg["grow_prearm_max"])
+                and (cap_ev == 0 or total_grows < cap_ev)
+                and (cap_tok == 0 or grown_tokens < cap_tok)
+            )
+            if remaining <= det.cfg["grow_margin"] and allowed:
+                pct = det.cfg["grow_pct"]
+                step = (
+                    max(det.cfg["grow_step"], int(budget * pct))
+                    if pct > 0 else det.cfg["grow_step"]
+                )
+                if cap_tok:
+                    step = min(step, cap_tok - grown_tokens)
+                new_budget = min(det.cfg["grow_ceil"], budget + step)
+                state["thinking_token_budget"] = new_budget
+                if not armed:
+                    state[_STATE_KEY + "_prearm_grows"] = prearm_grows + 1
+                state[_STATE_KEY + "_grows"] = total_grows + 1
+                state[_STATE_KEY + "_grown_tok"] = grown_tokens + (new_budget - budget)
+                _STATS["grows"] += 1
+                log.info(
+                    "PN108: GROW — seq=%d req=%s budget %d -> %d at think=%d "
+                    "(%s, remaining was %d)",
+                    seq_idx, req_id, budget, new_budget, len(tokens),
+                    "armed" if armed else f"prearm {prearm_grows + 1}",
+                    remaining,
+                )
     if fired and not state.get(_STATE_KEY + "_applied", False):
         grace = det.cfg["grace"]
         think_len = len(tokens)  # observed think length — valid on BOTH paths

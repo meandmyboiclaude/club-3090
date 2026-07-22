@@ -356,7 +356,9 @@ def _continuous_budget(tier: int, steps: int | None) -> int | None:
     if not steps or steps <= 0:
         return None
     k = _env_int("GENESIS_PN100_TOK_PER_STEP", 150)
-    floor = _env_int("GENESIS_PN100_BUDGET_FLOOR", 256)
+    # [2026-07-22 USER] floor 128: prod trivials should be able to land tiny
+    # grants (512 and below); grow-on-progress makes a low floor harmless.
+    floor = _env_int("GENESIS_PN100_BUDGET_FLOOR", 128)
     ceil = _env_int("GENESIS_PN100_BUDGET_CEIL", 10240)
     raw = steps * k
     rounded = int(round(raw / 100.0)) * 100

@@ -422,7 +422,20 @@ async def _maybe_escalate(serving: Any, request: Any, result: Any) -> bool:
         return False
 
     _STATS["escalations_attempted"] += 1
-    budget = _env_int("GENESIS_PN101_ESCALATE_BUDGET", 10240)
+    # [2026-07-22 grow-aware] escalation is a TOP-UP to a shared total-thinking
+    # ceiling, never a fresh full budget stacked on grown spend (USER: no 2x).
+    # A request that already thought >= the ceiling (a grown-to-ceiling rambler
+    # that dodged the plateau detector) gets no further extension.
+    total_ceil = _env_int("GENESIS_PN101_TOTAL_THINK_CEIL", 10240)
+    prior_rtok = len(reasoning) // 4
+    budget = min(_env_int("GENESIS_PN101_ESCALATE_BUDGET", 10240),
+                 total_ceil - prior_rtok)
+    if budget < 512:
+        log.info(
+            "PN101: escalation skipped — prior think ~%d already at/near total "
+            "ceiling %d", prior_rtok, total_ceil,
+        )
+        return False
     try:
         req_cls = type(request)
         fields = getattr(req_cls, "model_fields", {}) or {}
