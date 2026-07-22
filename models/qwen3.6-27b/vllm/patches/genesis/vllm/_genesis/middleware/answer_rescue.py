@@ -262,6 +262,29 @@ def _contract_v6b_named(ctk: dict, budget: int) -> bool:
     return True
 
 
+def _contract_v7_stateanswer(ctk: dict, budget: int) -> bool:
+    """v7 (2026-07-22): v5 + report-9 stop-gate lever. The </think> gate fires
+    when a STATED answer matches the model's internal computation (Termination
+    Circuit, Qwen3: 94% vs 8% for a wrong value); "the most direct lever is to
+    get the model to state its candidate answer earlier." So force an explicit
+    running answer each step -> the gate can fire the moment the answer is
+    computed, cutting the overthinking tail (median answer at ~30% of CoT).
+    General mechanism, not benchmark-tuned. SHIP DARK (GENESIS_PN102_BANNER_V7)."""
+    ctk.pop("pn100_steps", None)
+    ctk["pn_env_banner"] = (
+        "[envelope] Work through your reasoning in numbered steps. At the START "
+        "of each step, write one line 'Current answer: <your best answer now>'. "
+        "The moment that stated answer stops changing from the previous step — "
+        "at any step, even the first — stop reasoning and give it; do not "
+        "re-verify a settled answer. Keep reasoning only while your stated "
+        "answer is still changing or you are still making real progress. If you "
+        "have genuinely exhausted your approaches, commit to your best answer."
+    )
+    ctk["pn_env_seed"] = "Step 1:"
+    log.info("PN102: contract set (v7 state-answer-early, budget=%d)", budget)
+    return True
+
+
 def _contract_v4_static(ctk: dict, budget: int) -> bool:
     """v4: one static banner for every budgeted request. Returns True if set."""
     ctk.pop("pn100_steps", None)  # planner estimate deliberately unused
@@ -345,7 +368,9 @@ def maybe_add_answer_hint(request: Any) -> None:
     # v4 ships OFF: it replaces a prod-validated banner and must not become the
     # live path until a bench window says so. It is also COUPLED to the
     # generous-budget env (see the v4 note above) — enable both or neither.
-    if _env_bool("GENESIS_PN102_BANNER_V6A", False):
+    if _env_bool("GENESIS_PN102_BANNER_V7", False):
+        _contract_v7_stateanswer(ctk, budget)
+    elif _env_bool("GENESIS_PN102_BANNER_V6A", False):
         _contract_v6a_proveit(ctk, budget)
     elif _env_bool("GENESIS_PN102_BANNER_V6B", False):
         _contract_v6b_named(ctk, budget)
