@@ -195,11 +195,13 @@ services:
         # python3 /fixes/patch_pn73t_vendor_legacy_tool_parser.py
         python3 /fixes/patch_pn74_fix_p107_serving_attr.py
         python3 /fixes/patch_pn75_embedding_neg_index_guard.py
-        # [cudagraph fix 2026-06-26] PN79: cudagraph-safe fixed-size TQ decode scratch
-        # (backport vllm#46067) — fixes the device-side-assert under load when uniform-decode
-        # cudagraphs bake in a WorkspaceManager scratch addr that later moves. Required for
-        # cudagraphs to be stable on TQ3+MTP. Retire when #46067 merges upstream.
-        python3 /fixes/patch_pn79_tq_decode_scratch_cudagraph_safe.py
+        # [PN79 RETIRED 2026-07-23 BUG-119] anchor gone on this pin because the
+        # #46067 crash class is handled IN-TREE (turboquant_attn.py pre-reserves
+        # decode scratch + locks the workspace, lines ~393/~1396). The patch had
+        # silently SKIPped on every boot since the pin bump — weeks of conc-4
+        # cudagraph+TQ+MTP bench load ran without it, zero device asserts.
+        # Archived: /fixes/_archive/patch_pn79_tq_decode_scratch_cudagraph_safe.py
+        # (re-anchor only if a future pin drops the in-tree handling).
         # [PN80 — 2026-07-07 dev799 bump] vllm#47609 backport to the V1 runner:
         # skip-layers feature passes cache_dtype_str='auto' for TQ specs (kv_quant_mode
         # stays NONE on TQFullAttentionSpec) -> TurboQuantConfig.from_cache_dtype('auto')
