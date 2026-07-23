@@ -43,6 +43,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import math
 import os
 import re
 import time
@@ -315,6 +316,10 @@ async def _classify(serving: Any, request: Any,
     }
     cap_field = "max_completion_tokens" if "max_completion_tokens" in fields else "max_tokens"
     kwargs[cap_field] = 12
+    projn = _env_bool("GENESIS_PN100_PROJECTED_N", False) and "logprobs" in fields
+    if projn:
+        kwargs["logprobs"] = True
+        kwargs["top_logprobs"] = 20
     synthetic = req_cls(**kwargs)
 
     timeout = _env_int("GENESIS_PN100_TIMEOUT_S", 20)
@@ -327,16 +332,100 @@ async def _classify(serving: Any, request: Any,
     content = getattr(choices[0].message, "content", "") or ""
     # planner forms: "T|S|C" (rubric v3, C in {h,l}), "T|S", bare "T"
     m = re.search(r"([0-3])\s*\|\s*(\d{1,3})\s*\|\s*([hl])", content)
-    if m:
-        _LAST_CONF["v"] = m.group(3)
-        return int(m.group(1)), max(0, min(120, int(m.group(2))))
-    m = re.search(r"([0-3])\s*\|\s*(\d{1,3})", content)
-    if m:
-        _LAST_CONF["v"] = "h"
-        return int(m.group(1)), max(0, min(120, int(m.group(2))))
+    if not m:
+        m2 = re.search(r"([0-3])\s*\|\s*(\d{1,3})", content)
+    else:
+        m2 = None
+    hit = m or m2
+    if hit:
+        _LAST_CONF["v"] = m.group(3) if m else "h"
+        tier = int(hit.group(1))
+        steps = max(0, min(120, int(hit.group(2))))
+        if projn:
+            try:
+                proj = _projected_steps(choices[0])
+                if proj is not None:
+                    log.info("PN100: projected-N %.2f -> %d (sampled %d)",
+                             proj[0], proj[1], steps)
+                    steps = proj[1]
+            except Exception as exc:  # noqa: BLE001 — fail-open to sampled
+                log.warning("PN100: projected-N read failed (%s); sampled used", exc)
+        return tier, steps
     m = re.search(r"[0-3]", content)
     _LAST_CONF["v"] = "l"
     return (int(m.group(0)), None) if m else None
+
+
+# [2026-07-23 A1-live] Projected-N: read the steps-token POSTERIOR from the
+# classify call's own logprobs instead of trusting the sampled point.
+# Offline gate passed (a1_logit_menu.py, n=100): expected-steps Spearman 0.813
+# vs 0.785 sampled against realized v5-need rank; declusters the N=5 pileup
+# (46/100 items) that owned 7/12 premature-commit flips (V3-SIZED analysis).
+# Menu first-tokens are single-digit under Qwen3.6's digit-split vocab; the
+# "1x"/"2x" branches need a second-position read (emitted branch only; the
+# non-emitted branch mass goes to its midpoint). Calibration: measured curve
+# E[steps]->realized-need-steps is ~identity low, UNDER ~1.4x deep — encoded
+# as a piecewise-linear map (env-overridable), clamp [3, 30].
+_PROJN_MENU = {"3": 3.0, "4": 4.0, "5": 5.0, "8": 8.0}
+_PROJN_STAGE2 = {"1": {"2": 12.0, "5": 15.0}, "2": {"5": 25.0}}
+_PROJN_MID = {"1": 13.5, "2": 25.0}
+
+
+def _projn_calibrate(e: float) -> int:
+    raw = os.environ.get(
+        "GENESIS_PN100_PROJN_CAL",
+        "4.75:3.2,6:5.1,7.25:5.3,9.5:10.2,13.5:17.3")
+    try:
+        pts = sorted((float(a), float(b)) for a, b in
+                     (p.split(":") for p in raw.split(",")))
+    except ValueError:
+        return max(3, round(e))
+    if e <= pts[0][0]:
+        y = pts[0][1]
+    elif e >= pts[-1][0]:
+        y = pts[-1][1] + (e - pts[-1][0]) * 1.4  # keep deep stretch past last anchor
+    else:
+        y = pts[-1][1]
+        for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
+            if x1 <= e <= x2:
+                y = y1 + (y2 - y1) * (e - x1) / (x2 - x1)
+                break
+    return max(3, min(30, round(y)))
+
+
+def _projected_steps(choice: Any) -> tuple[float, int] | None:
+    """(expected_steps, calibrated_steps) from the classify choice logprobs."""
+    lp = getattr(choice, "logprobs", None)
+    toks = getattr(lp, "content", None) if lp else None
+    if not toks:
+        return None
+    strs = [getattr(t, "token", "") for t in toks]
+    try:
+        sp = strs.index("|") + 1
+    except ValueError:
+        return None
+    if sp >= len(toks):
+        return None
+    top = {getattr(t, "token", ""): math.exp(getattr(t, "logprob", -99.0))
+           for t in (getattr(toks[sp], "top_logprobs", None) or [])}
+    mass: dict[float, float] = {}
+    for tk, p in top.items():
+        if tk in _PROJN_MENU:
+            mass[_PROJN_MENU[tk]] = mass.get(_PROJN_MENU[tk], 0.0) + p
+        elif tk in _PROJN_STAGE2:
+            if tk == strs[sp] and sp + 1 < len(toks):
+                t2 = {getattr(t, "token", ""): math.exp(getattr(t, "logprob", -99.0))
+                      for t in (getattr(toks[sp + 1], "top_logprobs", None) or [])}
+                tot2 = sum(t2.get(k, 0.0) for k in _PROJN_STAGE2[tk]) or 1.0
+                for k, v in _PROJN_STAGE2[tk].items():
+                    mass[v] = mass.get(v, 0.0) + p * (t2.get(k, 0.0) / tot2)
+            else:
+                mass[_PROJN_MID[tk]] = mass.get(_PROJN_MID[tk], 0.0) + p
+    tot = sum(mass.values())
+    if tot <= 0.05:  # no meaningful menu mass — fall back to sampled
+        return None
+    e = sum(k * v for k, v in mass.items()) / tot
+    return e, _projn_calibrate(e)
 
 
 def _stash_steps(request: Any, steps: int) -> None:
