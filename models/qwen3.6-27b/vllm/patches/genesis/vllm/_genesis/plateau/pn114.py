@@ -132,6 +132,23 @@ def _st(state: dict[str, Any]) -> dict[str, Any]:
     return st
 
 
+def _live_think_len(state: dict[str, Any], st: dict[str, Any]) -> int | None:
+    """LIVE think depth via pn108's spec-aware slice (BUG-120: the holder's
+    state["think_count"] is FROZEN near its init value while a request is
+    under budget — the early-return in _update_think_state only walks
+    check_count_down — so think_count must never be used for depth or
+    accounting). None when not derivable (not mid-think / slice failed).
+    think_start_len is stashed in st["tsl"] by observe_state each step."""
+    try:
+        from vllm._genesis.plateau import pn108 as _pn108
+        toks = _pn108._think_token_slice(state, st.get("tsl", 1))
+        if toks is not None:
+            return len(toks)
+    except Exception:
+        pass
+    return None
+
+
 def _probe_span(ids: dict[str, list[int]],
                 st: dict[str, Any]) -> list[int | None]:
     """The probe as ONE positionally-forced span with a free HOLE for the
@@ -193,8 +210,12 @@ def _resume_thinking(state: dict[str, Any], consumed: int) -> None:
     state["end_count"] = 0
     state["force_index"] = []
     state["bonus_token_forced"] = False
+    # BUG-120: spent = LIVE slice depth (computed after the in_end flip so
+    # the slice is valid); frozen think_count only as a last-resort fallback.
+    _live = _live_think_len(state, st)
+    _spent = _live if _live is not None else state.get("think_count", 0)
     state["check_count_down"] = max(
-        1, state["thinking_token_budget"] - state.get("think_count", 0)
+        1, state["thinking_token_budget"] - _spent
     )
 
 
@@ -263,7 +284,10 @@ def _finish_probe(state: dict[str, Any], st: dict[str, Any],
                    grace=_env_int("GENESIS_PN112_GRACE", 64))
         else:
             _STATS["confirm_cancel"] += 1
-            st["confirm_cooldown"] = state.get("think_count", 0) + 512
+            _live = _live_think_len(state, st)
+            st["confirm_cooldown"] = (
+                _live if _live is not None
+                else state.get("think_count", 0)) + 512
             p112 = state.get("_pn112")
             if isinstance(p112, dict):
                 p112["streak"] = 0
@@ -294,7 +318,10 @@ def _close(state: dict[str, Any], st: dict[str, Any], why: str,
     # its grace (64), not PN114's probe grace (384, the killed regression).
     if grace is None:
         grace = st["cfg"]["grace"]
-    think = state.get("think_count", 0)
+    # BUG-120: close at the LIVE depth, not the frozen think_count (which
+    # would set a near-zero budget and guillotine instantly).
+    _live = _live_think_len(state, st)
+    think = _live if _live is not None else state.get("think_count", 0)
     if not (wrapup_enabled() and arm_wrapup(state, st.get("req_id"))):
         # bare cut (also the fallback when an end-forcing is already active)
         state["thinking_token_budget"] = think + grace
@@ -336,7 +363,9 @@ def request_confirm(state: dict[str, Any], req_id: str | None = None) -> bool:
     # would land AFTER </think>, in the visible answer.
     if state.get("in_end") or not state.get("in_think", True):
         return True  # close in flight; treat as handled (no cut, no probe)
-    if state.get("think_count", 0) < st.get("confirm_cooldown", 0):
+    _live = _live_think_len(state, st)
+    _depth = _live if _live is not None else state.get("think_count", 0)
+    if _depth < st.get("confirm_cooldown", 0):
         return True  # cooling down; treat as handled (no cut)
     st["reason"] = "confirm"
     st["req_id"] = req_id
@@ -366,6 +395,7 @@ def observe_state(state: dict[str, Any], think_start_len: int,
         return
     st = _st(state)
     st["req_id"] = req_id
+    st["tsl"] = think_start_len  # stash for _live_think_len callees
     ids = _ids()
     if not ids:
         return
@@ -385,16 +415,8 @@ def observe_state(state: dict[str, Any], think_start_len: int,
     # so depth-keyed logic on think_count can never fire mid-think — proven
     # by the 2026-07-23 canary (first observe with think>=400 arrived at
     # think=2997, in_end=True). No think_count fallback for the same reason.
-    think = -1
-    try:
-        from vllm._genesis.plateau import pn108 as _pn108
-        _toks = _pn108._think_token_slice(state, think_start_len)
-        if _toks is not None:
-            think = len(_toks)
-    except Exception:
-        log.warning("PN114: think-slice failed — no depth arming",
-                    exc_info=True)
-    if think < 0:
+    think = _live_think_len(state, st)
+    if think is None:
         return  # not mid-think per the slice: nothing to arm onto
     # P-cap (2026-07-23, GENESIS_PN112_WRAPUP_AT_CAP=1): a deep STILL-WORKING
     # request about to hit the hard budget guillotine closes through the

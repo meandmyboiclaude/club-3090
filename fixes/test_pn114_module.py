@@ -57,8 +57,11 @@ m.observe_state(s,1,0,conf=14.3,req_id="t")
 m.on_force_complete(s)
 assert st["phase"] is None
 assert st["probes"][-1]["letter"]==777, ("M2 letter", st["probes"])
-assert s["thinking_token_budget"]==s["think_count"]+384, ("close not applied",s["thinking_token_budget"],s["think_count"])
-print("M2 OK: stable x2 same letter -> enforce close (budget=think+grace)")
+# BUG-120: close budget anchors to the LIVE slice depth (len(out)-1 with
+# start_thinking=0, tsl=1), NOT the frozen think_count (which would set a
+# near-zero budget live).
+assert s["thinking_token_budget"]==len(s["output_tok_ids"])-1+384, ("close not applied",s["thinking_token_budget"],len(s["output_tok_ids"]))
+print("M2 OK: stable x2 same letter -> enforce close (budget=live_depth+grace)")
 
 # M3 confirm path: weak conf cancels + resets pn112 streak
 os.environ["GENESIS_PN112_CONFIRM"]="1"
