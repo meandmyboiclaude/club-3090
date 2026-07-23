@@ -109,6 +109,16 @@ _RUBRIC_DEPTH = (
 )
 
 
+def _env_float(name: str, default: float) -> float:
+    # [2026-07-23] was referenced by the LOWCONF path inside a swallowed
+    # try/except but never defined — the P-pess edit exposed it on the hot
+    # path (NameError -> PN100 fail-open -> bare mode; killed run 1).
+    try:
+        return float(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+
+
 def _env_int(name: str, default: int) -> int:
     try:
         return int(os.environ.get(name, "") or default)

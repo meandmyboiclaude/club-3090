@@ -178,8 +178,9 @@ def on_force_complete(state: dict[str, Any]) -> bool:
         state["force_seq"] = None
         return True
     if phase == "probe_nl":
-        seq_len = len(_ids().get("probe", [])) if _ids() else 0
-        consumed = seq_len + st["cfg"]["free_len"] + 1
+        ids = _ids() or {}
+        consumed = (len(ids.get("probe", [])) + st["cfg"]["free_len"]
+                    + len(ids.get("newline", [1])))
         st["phase"] = None
         state["force_seq"] = None
         _finish_probe(state, st, consumed)
@@ -187,6 +188,11 @@ def on_force_complete(state: dict[str, Any]) -> bool:
     if phase == "wrapup":
         st["phase"] = None
         state["force_seq"] = None
+        # restore the real budget before the answer-mode reset reads it —
+        # else a later think block inherits the parked 10M sentinel.
+        saved = st.get("saved_budget")
+        if saved is not None and saved > 0:
+            state["thinking_token_budget"] = saved
         st["saved_budget"] = None
         return False  # normal answer-mode reset proceeds
     return False

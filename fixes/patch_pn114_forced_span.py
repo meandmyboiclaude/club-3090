@@ -211,8 +211,18 @@ def _drop_stale_pyc() -> None:
 
 def main() -> int:
     rc = 0
+    f_ok = True
     for marker, anchor, repl, what in GRAFTS:
-        rc |= _apply(marker, anchor, repl, what)
+        if what.startswith("F2") and not f_ok:
+            # F2 references _pn114_fseq defined by F — applying it alone
+            # would NameError at runtime. Fail loudly instead.
+            print(f"{LOG} FATAL: skipping F2 because F failed", flush=True)
+            rc |= 1
+            continue
+        r = _apply(marker, anchor, repl, what)
+        if what.startswith("F ") or what == "F forcing-loop bound":
+            f_ok = r == 0
+        rc |= r
     if rc == 0:
         _drop_stale_pyc()
     return rc
