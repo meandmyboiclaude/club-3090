@@ -39,7 +39,10 @@ grep -qE 'P68.*(SKIP|=0)|GENESIS_ENABLE_P68_AUTO_FORCE_TOOL=0' <(sudo podman ins
 echo "== 3. Engine config (week's promoted settings) =="
 A=$(grep -m1 'non-default args' "$L")
 echo "$A" | grep -q "thinkingcap-gptq-pro-v2" && ok "TC gptq-pro-v2 model" || fail "model not TC"
-echo "$A" | grep -q "'kv_cache_memory_bytes': 3489660928" && ok "KV pin 3.25GiB" || fail "KV pin"
+# KV pin removed from compose 07-18 — KV must be auto-profiled, in the committed band (spec ~132,096 tok @ model-len 65000)
+echo "$A" | grep -q "kv_cache_memory_bytes" && fail "KV pin present (removed 07-18 — must be auto-profiled)" || ok "no KV pin (auto-profiled)"
+KVTOK=$(grep -oE 'GPU KV cache size: [0-9,]+ tokens' "$L" | tail -1 | grep -oE '[0-9,]+' | tr -d ',')
+[ -n "${KVTOK:-}" ] && [ "$KVTOK" -ge 120000 ] && [ "$KVTOK" -le 145000 ] && ok "profiled KV ${KVTOK} tok in band [120K,145K]" || fail "profiled KV out of band: ${KVTOK:-not found}"
 echo "$A" | grep -q "'async_scheduling': False" && fail "async DISABLED (should be stock-on)" || ok "async scheduling stock (on)"
 echo "$A" | grep -q "hermes" && ok "hermes tool parser" || fail "tool parser"
 echo "$A" | grep -q "chat_template.jinja" && ok "vendored chat template" || fail "chat template"
