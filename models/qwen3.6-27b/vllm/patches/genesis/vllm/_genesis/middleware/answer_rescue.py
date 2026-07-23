@@ -24,10 +24,12 @@ Env: GENESIS_ENABLE_PN101_ANSWER_RESCUE (master, default OFF),
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import os
 import re
+import time
 from typing import Any
 
 try:
@@ -827,9 +829,99 @@ async def _letter_margin(serving: Any, request: Any, content: str) -> float | No
     return _letter_posterior_margin(choice)
 
 
+# ─── PN118 gate mode: engine-side c_mean bridge (2026-07-23) ─────────────────
+# The letter-margin echo call (above) is a post-close OUTPUT signal; every
+# post-close output signal measured AUC ~0.5. The ONLY signal that discriminates
+# premature-vs-settled is pn112's per-step sampling confidence C — but that is
+# computed in the EngineCore process. pn112_export.py drops each request's
+# rolling C mean into /tmp/genesis_pn112_conf.json; this reads it back and uses
+# it as an alternative close-gate. GENESIS_PN118_GATE = margin|cmean|both.
+#
+# Join key: the engine keys the file by its InputBatch req_id — vLLM's request
+# id string, form "chatcmpl-<uuid>". The serving layer sees that identical
+# string as the ChatCompletionResponse.id (result.id). For n>1 sampling vLLM
+# may append a per-sequence "-<k>" suffix engine-side; _normalize_req_id strips
+# it so both forms join. (request.request_id is NOT reliably the chatcmpl id and
+# falls back to id(request); result.id is authoritative.)
+_PN112_CONF_PATH = "/tmp/genesis_pn112_conf.json"
+_PARALLEL_SUFFIX_RE = re.compile(r"-\d+$")
+
+
+def _normalize_req_id(rid: Any) -> str:
+    """Strip vLLM's per-sequence parallel-sample suffix ('-<k>') so the engine
+    req_id and the serving-side result.id join. The chatcmpl uuid itself carries
+    no trailing '-<digits>' (uuid4 hex), so this only removes the sample index."""
+    return _PARALLEL_SUFFIX_RE.sub("", str(rid))
+
+
+def _pn118_join_id(request: Any, result: Any) -> Any:
+    """The id to look up in the conf file: the ChatCompletionResponse.id, which
+    equals the engine's InputBatch req_id. request.request_id is a defensive
+    fallback (it is usually absent → id(request), which will simply miss)."""
+    return getattr(result, "id", None) or getattr(request, "request_id", None)
+
+
+def _pn112_conf_lookup(join_id: Any) -> dict[str, Any] | None:
+    """Read this request's exported rolling conf entry. Fail-open: a missing
+    file / torn read / malformed json all return None (→ conservative no-fire)."""
+    if join_id is None:
+        return None
+    try:
+        with open(_PN112_CONF_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    key = _normalize_req_id(join_id)
+    entry = data.get(str(join_id))
+    if entry is None:
+        entry = data.get(key)
+    if entry is None:
+        for k, v in data.items():  # defensive: stored key may carry '-<k>'
+            if _normalize_req_id(k) == key:
+                entry = v
+                break
+    return entry if isinstance(entry, dict) else None
+
+
+def _pn118_cmean_decision(entry: dict[str, Any] | None, req_id: Any,
+                          join_id: Any) -> tuple[bool, float | None]:
+    """Truth table for the c_mean gate. Fire iff entry exists AND n >= MINN AND
+    NOT stale (ts within TTL) AND c_last < CMEAN. Every miss → (False, c_last).
+    Conservative by construction: missing/stale/low-n never fires."""
+    if not entry:
+        log.info("PN118: cmean skip req=%s — no conf entry (join=%s)", req_id, join_id)
+        return False, None
+    c_last = entry.get("c_last")
+    n = entry.get("n")
+    ts = entry.get("ts")
+    if not isinstance(c_last, (int, float)) or not isinstance(n, int):
+        log.info("PN118: cmean skip req=%s — malformed entry %r", req_id, entry)
+        return False, c_last if isinstance(c_last, (int, float)) else None
+    if not isinstance(ts, (int, float)):
+        log.info("PN118: cmean skip req=%s — entry has no ts (conservative)", req_id)
+        return False, c_last
+    ttl = _env_float("GENESIS_PN118_CMEAN_TTL_S", 600.0)
+    age = time.monotonic() - ts
+    if age > ttl:
+        log.info("PN118: cmean skip req=%s — stale (age=%.1fs > %.1fs)", req_id, age, ttl)
+        return False, c_last
+    minn = _env_int("GENESIS_PN118_CMEAN_MINN", 64)
+    if n < minn:
+        log.info("PN118: cmean skip req=%s — n=%d < MINN=%d", req_id, n, minn)
+        return False, c_last
+    thr = _env_float("GENESIS_PN118_CMEAN", 10.0)
+    if c_last >= thr:
+        log.info("PN118: cmean skip req=%s — confident (c_last=%.3f >= %.3f)",
+                 req_id, c_last, thr)
+        return False, c_last
+    return True, c_last
+
+
 async def _pn118_continue(serving: Any, request: Any, result: Any, message: Any,
                           choice: Any, reasoning: str, spent: int, budget: int,
-                          req_id: Any, margin: float) -> bool:
+                          req_id: Any, signal: float) -> bool:
     """The action leg: ONE continuation resuming inside the think region with the
     first-person cue and the leftover budget. Clones PN101 escalate's resume-
     inside-think construction (unclosed <think>, continue_final_message). Any
@@ -911,8 +1003,8 @@ async def _pn118_continue(serving: Any, request: Any, result: Any, message: Any,
         _sum_usage(getattr(result, "usage", None), getattr(resp, "usage", None))
         _STATS["pn118_fires"] += 1
         log.info(
-            "PN118: FIRED req=%s spent=%d budget=%d margin=%.3f +cont_budget=%d",
-            req_id, spent, budget, margin, cont_budget,
+            "PN118: FIRED req=%s spent=%d budget=%d signal=%.3f +cont_budget=%d",
+            req_id, spent, budget, signal, cont_budget,
         )
         return True
     except Exception as exc:
@@ -965,34 +1057,62 @@ async def _maybe_pn118_closegate(serving: Any, request: Any, result: Any) -> boo
                  req_id, spent, frac, budget)
         _STATS["pn118_skips"] += 1
         return False
-    # (4) weak answer confidence via the letter-margin echo self-call.
-    try:
-        margin = await _letter_margin(serving, request, content)
-    except Exception as exc:
-        log.warning("PN118: margin read failed req=%s (%s) — skip (fail-open)", req_id, exc)
-        _STATS["pn118_errors"] += 1
-        return False
-    if margin is None:
-        log.info("PN118: skip req=%s no letter margin (open-ended answer)", req_id)
-        _STATS["pn118_skips"] += 1
-        return False
-    margin_thr = _env_float("GENESIS_PN118_MARGIN", 0.5)
-    if margin >= margin_thr:
-        log.info("PN118: skip req=%s confident (margin=%.3f >= %.3f)",
-                 req_id, margin, margin_thr)
-        _STATS["pn118_skips"] += 1
-        return False
+    # (4) WEAK-confidence gate. GENESIS_PN118_GATE selects the discriminator:
+    #   margin (default) — the post-close letter-margin echo self-call (current)
+    #   cmean            — pn112's engine-side rolling confidence via the /tmp
+    #                      bridge; NO echo call. The only signal with AUC > 0.5.
+    #   both             — cmean AND margin must both pass.
+    gate = (os.environ.get("GENESIS_PN118_GATE", "margin") or "margin").strip().lower()
+    if gate not in ("margin", "cmean", "both"):
+        gate = "margin"
+
+    c_last: float | None = None
+    if gate in ("cmean", "both"):
+        join_id = _pn118_join_id(request, result)
+        entry = _pn112_conf_lookup(join_id)
+        cmean_ok, c_last = _pn118_cmean_decision(entry, req_id, join_id)
+        # shadow-log the looked-up c_last either way (calibration visibility).
+        log.info("PN118: cmean lookup req=%s join=%s c_last=%s n=%s pass=%s",
+                 req_id, join_id,
+                 ("%.3f" % c_last) if c_last is not None else "na",
+                 (entry or {}).get("n", "na"), cmean_ok)
+        if not cmean_ok:
+            _STATS["pn118_skips"] += 1
+            return False
+
+    margin: float | None = None
+    if gate in ("margin", "both"):
+        try:
+            margin = await _letter_margin(serving, request, content)
+        except Exception as exc:
+            log.warning("PN118: margin read failed req=%s (%s) — skip (fail-open)",
+                        req_id, exc)
+            _STATS["pn118_errors"] += 1
+            return False
+        if margin is None:
+            log.info("PN118: skip req=%s no letter margin (open-ended answer)", req_id)
+            _STATS["pn118_skips"] += 1
+            return False
+        margin_thr = _env_float("GENESIS_PN118_MARGIN", 0.5)
+        if margin >= margin_thr:
+            log.info("PN118: skip req=%s confident (margin=%.3f >= %.3f)",
+                     req_id, margin, margin_thr)
+            _STATS["pn118_skips"] += 1
+            return False
+
+    # the fire signal logged / passed downstream: margin when read, else c_last.
+    signal = margin if margin is not None else (c_last if c_last is not None else -1.0)
 
     mode = (os.environ.get("GENESIS_PN118_MODE", "shadow") or "shadow").strip().lower()
     if mode != "enforce":
         _STATS["pn118_shadow_would_fire"] += 1
-        log.info("PN118: WOULD-FIRE (shadow) req=%s spent=%d budget=%d margin=%.3f",
-                 req_id, spent, budget, margin)
+        log.info("PN118: WOULD-FIRE (shadow) req=%s gate=%s spent=%d budget=%d signal=%.3f",
+                 req_id, gate, spent, budget, signal)
         return False
 
     _STATS["pn118_attempts"] += 1
     return await _pn118_continue(serving, request, result, message, choice,
-                                 reasoning, spent, budget, req_id, margin)
+                                 reasoning, spent, budget, req_id, signal)
 
 
 async def maybe_rescue_answer(serving: Any, request: Any, result: Any) -> Any:
