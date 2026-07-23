@@ -5,8 +5,9 @@ holder's </think> end-forcer, made sequence-generic by the
 patch_pn114_forced_span.py graft via per-seq state["force_seq"]):
 
   1. Fixed-depth probes (GENESIS_ENABLE_PN114_PROBE=1): at think depths
-     PN114_DEPTHS, force "\\nMy current answer: ", free-sample 3 tokens
-     (letter capture + conf), force "\\n", resume thinking. Stop rule
+     PN114_DEPTHS, force ONE combined span "\\nMy current answer: (" +
+     free_len HOLE rows (None = unforced; the letter) + ")\\n", then resume
+     thinking. Position-anchored end to end — MTP cannot overrun. Stop rule
      (PN114_MODE=enforce): PN114_STABLE_K consecutive probes with the same
      first token AND conf >= PN114_CMIN -> close think (budget := spent +
      PN114_GRACE). shadow = probe + log only (the disturbance-screen config).
@@ -36,6 +37,8 @@ _STATE_KEY = "_pn114"
 _IDS_PATH = "/tmp/genesis_pn114_ids.json"
 _IDS: dict[str, list[int]] | None = None
 _STATS = {"probes": 0, "closes": 0, "confirm_ok": 0, "confirm_cancel": 0}
+_OBSERVED_ONCE = False
+_DEPTH_SNAP_ONCE = False
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -74,6 +77,14 @@ def confirm_enabled() -> bool:
 def any_enabled() -> bool:
     return (probes_enabled() or wrapup_enabled() or confirm_enabled()
             or _env_bool("GENESIS_PN112_WRAPUP_AT_CAP", False))
+
+
+# one-shot import-time diagnostic: shows the env truth in whichever process
+# imports this module (graft G imports it before its any_enabled() gate, so
+# this line appears even when everything below stays dark).
+log.info("PN114: module import (probe=%s wrapup=%s confirm=%s at_cap=%s)",
+         probes_enabled(), wrapup_enabled(), confirm_enabled(),
+         _env_bool("GENESIS_PN112_WRAPUP_AT_CAP", False))
 
 
 def _ids() -> dict[str, list[int]] | None:
@@ -121,6 +132,19 @@ def _st(state: dict[str, Any]) -> dict[str, Any]:
     return st
 
 
+def _probe_span(ids: dict[str, list[int]],
+                st: dict[str, Any]) -> list[int | None]:
+    """The probe as ONE positionally-forced span with a free HOLE for the
+    letter: probe text + free_len unforced rows (None = wildcard/free) +
+    the ")\\n" close. The close is position-anchored by the holder's span
+    walk, so MTP cannot overrun the free window (2026-07-23 canary: the
+    old step-granularity free window let the drafter land extra tokens
+    before the close armed, producing "(D) 3)")."""
+    close = ids.get("close_paren") or ids.get("newline", [])
+    return (list(ids.get("probe", [])) + [None] * st["cfg"]["free_len"]
+            + list(close))
+
+
 def phase_active(state: dict[str, Any]) -> bool:
     """True while a forced span / free window is in flight (PN108/PN112 must
     pause their windows — probe tokens would pollute novelty/C)."""
@@ -133,16 +157,17 @@ def _arm(state: dict[str, Any], seq: list[int], phase: str,
     """Arm the generalized forcer with `seq` starting next step."""
     st = _st(state)
     st["phase"] = phase
+    st["free_confs"] = []
     if st["saved_budget"] is None:
         st["saved_budget"] = state.get("thinking_token_budget", -1)
         # keep the budget trigger far away while the span runs
         state["thinking_token_budget"] = 10_000_000
-    # ultra-review #5: the holder's in_end walk increments end_count BEFORE
-    # the first apply, so index 0 was never forced (probe lost its leading
-    # newline; ")\n" close forced only "\n"). Prepend a sacrificial copy of
-    # the first token: the pre-increment consumes it and the real sequence
-    # forces intact. (consumed accounting compensated at the probe finish.)
-    state["force_seq"] = [seq[0]] + list(seq)
+    # Span soundness redesign (ultra-review #2): the holder's B-site walk
+    # recomputes emitted progress positionally from force_seq_base against
+    # the LANDED output each step — no draft credit, no pre-increment — so
+    # index 0 forces intact and no sacrificial prepend is needed.
+    state["force_seq"] = list(seq)
+    state["force_seq_base"] = len(state.get("output_tok_ids", []))
     state["in_think"] = False
     state["in_end"] = True
     state["end_count"] = 0
@@ -182,27 +207,27 @@ def on_force_complete(state: dict[str, Any]) -> bool:
         return False
     phase = st["phase"]
     if phase == "probe_force":
-        st["phase"] = "probe_free"
-        st["free_start"] = len(state.get("output_tok_ids", []))
-        st["free_confs"] = []
-        state["in_end"] = False
-        state["in_think"] = True
-        state["end_count"] = 0
-        state["force_index"] = []
-        state["force_seq"] = None
-        return True
-    if phase == "probe_nl":
-        ids = _ids() or {}
-        consumed = (len(ids.get("probe", [])) + st["cfg"]["free_len"]
-                    + len(ids.get("close_paren") or ids.get("newline", [1]))
-                    + 2)  # the two sacrificial first-tokens (#5 fix)
+        # unified probe span (probe + hole + close) fully LANDED: finish.
+        # The letter sits right after the probe text — position-derived
+        # from force_seq_base, immune to same-step trailing frees.
+        ids0 = _ids() or {}
+        fs = state.get("force_seq") or []
+        base = state.get("force_seq_base")
+        probe_len = len(ids0.get("probe", []))
+        st["free_start"] = (
+            base + probe_len if base is not None
+            else max(0, len(state.get("output_tok_ids", []))
+                     - len(fs) + probe_len)
+        )
         st["phase"] = None
         state["force_seq"] = None
-        _finish_probe(state, st, consumed)
+        state.pop("force_seq_base", None)
+        _finish_probe(state, st, len(fs))
         return True
     if phase == "wrapup":
         st["phase"] = None
         state["force_seq"] = None
+        state.pop("force_seq_base", None)
         # restore the real budget before the answer-mode reset reads it —
         # else a later think block inherits the parked 10M sentinel.
         saved = st.get("saved_budget")
@@ -315,7 +340,7 @@ def request_confirm(state: dict[str, Any], req_id: str | None = None) -> bool:
         return True  # cooling down; treat as handled (no cut)
     st["reason"] = "confirm"
     st["req_id"] = req_id
-    _arm(state, ids["probe"], "probe_force", req_id)
+    _arm(state, _probe_span(ids, st), "probe_force", req_id)
     return True
 
 
@@ -323,6 +348,18 @@ def observe_state(state: dict[str, Any], think_start_len: int,
                   seq_idx: int = -1, conf: float | None = None,
                   req_id: str | None = None) -> None:
     """Per tracked request per step, after pn112.observe_state."""
+    global _OBSERVED_ONCE
+    if not _OBSERVED_ONCE:
+        # one-shot liveness/diagnostic line per process (canary debugging:
+        # proves the observe seat runs and shows the env truth in-engine)
+        _OBSERVED_ONCE = True
+        log.info(
+            "PN114: observe seat alive (probe=%s wrapup=%s confirm=%s "
+            "at_cap=%s ids=%s)",
+            probes_enabled(), wrapup_enabled(), confirm_enabled(),
+            _env_bool("GENESIS_PN112_WRAPUP_AT_CAP", False),
+            sorted((_ids() or {}).keys()),
+        )
     if not any_enabled():
         return
     if state.get("thinking_token_budget", -1) <= 0:
@@ -333,25 +370,38 @@ def observe_state(state: dict[str, Any], think_start_len: int,
     if not ids:
         return
     phase = st.get("phase")
-    if phase == "probe_free":
-        if conf is not None:
+    if phase == "probe_force" and conf is not None:
+        # hole-region conf capture: end_count is the span walk's LANDED
+        # position; once it passes the probe text, the letter row is being
+        # (or was just) sampled — approximates the old free-window confs.
+        if (state.get("end_count", 0) >= len(ids.get("probe", []))
+                and len(st["free_confs"]) < st["cfg"]["free_len"] + 2):
             st["free_confs"].append(float(conf))
-        out_len = len(state.get("output_tok_ids", []))
-        if out_len - st["free_start"] >= st["cfg"]["free_len"]:
-            # v2: close the constrained probe with ")\n" when available
-            _arm(state, ids.get("close_paren") or ids.get("newline", []),
-                 "probe_nl", req_id)
-            st["phase"] = "probe_nl"
-        return
     if phase:
         return  # force in flight; nothing to do at observe seat
+    # Think depth = the spec-aware LIVE slice (pn108, BUG-107d): the holder's
+    # state["think_count"] is FROZEN near 0 while a request is under budget
+    # (the early-return in _update_think_state only walks check_count_down),
+    # so depth-keyed logic on think_count can never fire mid-think — proven
+    # by the 2026-07-23 canary (first observe with think>=400 arrived at
+    # think=2997, in_end=True). No think_count fallback for the same reason.
+    think = -1
+    try:
+        from vllm._genesis.plateau import pn108 as _pn108
+        _toks = _pn108._think_token_slice(state, think_start_len)
+        if _toks is not None:
+            think = len(_toks)
+    except Exception:
+        log.warning("PN114: think-slice failed — no depth arming",
+                    exc_info=True)
+    if think < 0:
+        return  # not mid-think per the slice: nothing to arm onto
     # P-cap (2026-07-23, GENESIS_PN112_WRAPUP_AT_CAP=1): a deep STILL-WORKING
     # request about to hit the hard budget guillotine closes through the
     # wrap-up sentence instead (targets the class PN112 never touches; the
     # trace review says the answer body usually finishes the job — this
     # measures whether a soft landing cuts the relocation cost).
     if _env_bool("GENESIS_PN112_WRAPUP_AT_CAP", False):
-        think = state.get("think_count", 0)
         budget = state.get("thinking_token_budget", -1)
         # Guards (review R5): never on top of an active end-forcing, never on
         # a budget that a cut already shrank to think+grace (that IS a close
@@ -366,7 +416,19 @@ def observe_state(state: dict[str, Any], think_start_len: int,
                 return
     if not probes_enabled():
         return
-    think = state.get("think_count", 0)
+    global _DEPTH_SNAP_ONCE
+    if (not _DEPTH_SNAP_ONCE and st["cfg"]["depths"]
+            and think >= st["cfg"]["depths"][0]):
+        # one-shot diagnostic: state truth at the first depth crossing
+        _DEPTH_SNAP_ONCE = True
+        log.info(
+            "PN114: depth-gate snapshot think=%d budget=%s in_think=%s "
+            "in_end=%s depths=%s done=%s phase=%s basis=%s",
+            think, state.get("thinking_token_budget"),
+            state.get("in_think"), state.get("in_end"),
+            st["cfg"]["depths"], st["done_depths"], st.get("phase"),
+            st.get("basis"),
+        )
     # ultra-review #3: no depth-arm during/near a close (bench grants can
     # coincide exactly with depths; think_count freezes during in_end).
     budget = state.get("thinking_token_budget", -1)
@@ -380,5 +442,5 @@ def observe_state(state: dict[str, Any], think_start_len: int,
         if think >= d:
             st["done_depths"].append(d)
             st["reason"] = "depth%d" % d
-            _arm(state, ids["probe"], "probe_force", req_id)
+            _arm(state, _probe_span(ids, st), "probe_force", req_id)
             return

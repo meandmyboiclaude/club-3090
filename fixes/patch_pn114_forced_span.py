@@ -12,10 +12,20 @@ GENESIS_ENABLE_PN114_PROBE / GENESIS_PN112_WRAPUP / GENESIS_PN112_CONFIRM).
 Grafts:
   A) natural-abort guard: skip the "end token not in new_tokens -> revert to
      think" check while a PN114 span is armed (we set in_end BEFORE forcing).
-  B-D) force_seq lookups in the spec-advancement + completion machinery.
+  B) span-sound in_end walk (MTP soundness redesign, ultra-review #2): for an
+     armed force_seq, end_count is RECOMPUTED each step as the positional
+     match of the landed output (from state["force_seq_base"]) against the
+     span — drafts are never credited, so an MTP rejection cannot desync and
+     there is no pre-increment (no sacrificial prepend needed). Stock
+     </think> walk byte-identical when no span armed (fseq-fallback kept as
+     the fail-open path).
   E) completion divert: probe phases return to THINK mode (pn114.on_force_
      complete) instead of the answer-mode reset; wrap-up/normal fall through.
-  F) forcing-loop lookups (_apply_forcing_to_logits).
+  S) span-sound forcing (_apply_forcing_to_logits): a span seq masks EVERY
+     row it owns this step with force_seq[end_count + k] (bonus row gets
+     end_count + n_spec), clamped at span end. Draft verification becomes
+     forced-vs-forced; a rejection's recovery token IS the forced token.
+  F) forcing-loop lookups (stock loop; fail-open fallback for spans).
   G) pn114.observe_state call after pn112's observe.
 
 Idempotent by marker; anchor drift FATAL exit 1 (loud bad boot); stale-pyc
@@ -46,29 +56,116 @@ GRAFTS.append((
 ''',
     '''        if state["in_end"] and state["end_count"] == 0:
             # PN114 A: an armed span sets in_end BEFORE its first forced token
-            # exists in the output — skip the natural-abort check then.
+            # exists in the output — skip the natural-abort check then (span
+            # rejection recovery is site B's positional walk, not this).
             new_tokens = output[prev_length:]
             stopping_thinking = (
                 (state.get("_pn114") or {}).get("phase") is not None
-                or ''' + FSEQ + '''[state["end_count"]] in new_tokens
+                or state.get("force_seq") is not None
+                or self.think_end_token_ids[state["end_count"]] in new_tokens
             )
             if not stopping_thinking:
 ''',
     "A natural-abort guard",
 ))
 
-# B: spec-advancement bound + token compare
+# B: span-sound in_end walk. Anchor is the ENTIRE stock walk block; the
+# replacement prepends the span path (position authority = landed output,
+# positional from force_seq_base) and keeps the stock walk (with the fseq
+# fallback lookups, so a raising span path fails open to old behavior).
 GRAFTS.append((
     "# PN114 B",
-    '''                for i, token_id in enumerate(state["spec_token_ids"]):
+    '''            state["force_index"] = []
+            if len(state["spec_token_ids"]) > 0:
+                for i, token_id in enumerate(state["spec_token_ids"]):
                     if state["end_count"] + 1 < len(self.think_end_token_ids):
                         if token_id == self.think_end_token_ids[state["end_count"] + 1]:
+                            state["end_count"] += 1
+                        else:
+                            state["end_count"] += 1
+                            state["force_index"] = [i]
+                            break
+                    else:
+                        state["end_count"] += 1
+                if len(state["force_index"]) == 0:
+                    state["end_count"] += 1
+                    state["force_index"] = [len(state["spec_token_ids"])]
+            else:
+                state["end_count"] += 1
+                state["force_index"] = [0]
 ''',
-    '''                for i, token_id in enumerate(state["spec_token_ids"]):  # PN114 B
-                    if state["end_count"] + 1 < len(''' + FSEQ + '''):
-                        if token_id == ''' + FSEQ + '''[state["end_count"] + 1]:
+    '''            # PN114 B: span-sound walk. For an armed force_seq the
+            # position authority is the LANDED output (positional match from
+            # force_seq_base) — drafts are NEVER credited, so an MTP
+            # rejection cannot desync the span, and there is no
+            # pre-increment (index 0 forces intact). Stock </think> walk
+            # runs byte-identically when no span is armed.
+            _pn114_span_ok = False
+            if state.get("force_seq"):
+                try:
+                    _pn114_fs = state["force_seq"]
+                    _pn114_out = state.get("output_tok_ids", [])
+                    _pn114_base = state.get("force_seq_base")
+                    if _pn114_base is None or _pn114_base > len(_pn114_out):
+                        # armer records this at arm time; fail-safe here
+                        _pn114_base = len(_pn114_out)
+                        state["force_seq_base"] = _pn114_base
+                    _pn114_emitted = 0
+                    while (_pn114_emitted < len(_pn114_fs)
+                           and _pn114_base + _pn114_emitted < len(_pn114_out)
+                           and (_pn114_fs[_pn114_emitted] is None
+                                or _pn114_out[_pn114_base + _pn114_emitted]
+                                == _pn114_fs[_pn114_emitted])):
+                        # None = free HOLE in the span (wildcard: any landed
+                        # token advances it — the probe's captured letter)
+                        _pn114_emitted += 1
+                    if (_pn114_emitted < len(_pn114_fs)
+                            and len(_pn114_out) - _pn114_base
+                            > len(_pn114_fs) + 32):
+                        # runaway guard: span tokens are not landing (mask
+                        # writes failing?) — declare done, fail open.
+                        import logging as _pn114_blog
+                        _pn114_blog.getLogger(
+                            "vllm.genesis.pn114"
+                        ).warning(
+                            "PN114 span runaway (emitted=%d/%d grew=%d) — "
+                            "failing open",
+                            _pn114_emitted, len(_pn114_fs),
+                            len(_pn114_out) - _pn114_base,
+                        )
+                        _pn114_emitted = len(_pn114_fs)
+                    state["end_count"] = _pn114_emitted
+                    state["force_index"] = []
+                    _pn114_span_ok = True
+                except Exception:
+                    import logging as _pn114_blog2
+                    _pn114_blog2.getLogger(
+                        "vllm.genesis.pn114"
+                    ).warning(
+                        "PN114 span walk raised — stock fallback",
+                        exc_info=True,
+                    )
+            if not _pn114_span_ok:
+                state["force_index"] = []
+                if len(state["spec_token_ids"]) > 0:
+                    for i, token_id in enumerate(state["spec_token_ids"]):
+                        if state["end_count"] + 1 < len(''' + FSEQ + '''):
+                            if token_id == ''' + FSEQ + '''[state["end_count"] + 1]:
+                                state["end_count"] += 1
+                            else:
+                                state["end_count"] += 1
+                                state["force_index"] = [i]
+                                break
+                        else:
+                            state["end_count"] += 1
+                    if len(state["force_index"]) == 0:
+                        state["end_count"] += 1
+                        state["force_index"] = [len(state["spec_token_ids"])]
+                else:
+                    state["end_count"] += 1
+                    state["force_index"] = [0]
 ''',
-    "B spec advancement",
+    "B span-sound walk",
 ))
 
 # C+E: completion check + divert
@@ -102,6 +199,7 @@ GRAFTS.append((
                     ).warning("PN114 on_force_complete raised", exc_info=True)
                 if not _pn114_handled:
                     state.pop("force_seq", None)
+                    state.pop("force_seq_base", None)
                     state.update(
                         {
                             "in_end": False,
@@ -116,6 +214,82 @@ GRAFTS.append((
                     )
 ''',
     "E completion divert",
+))
+
+# S: span-sound forcing — a span seq masks EVERY row it owns this step with
+# the positionally-correct span token, so draft verification is
+# forced-vs-forced and a rejection's recovery token IS the forced token
+# (mid-span rejection cannot desync). Stock loop (F/F2 below) is untouched
+# and remains the fail-open fallback.
+GRAFTS.append((
+    "# PN114 S",
+    '''            state = self._state[seq_idx]
+            if state.get("in_end", False):
+                # logits processor in spec mode are called twice
+''',
+    '''            state = self._state[seq_idx]
+            if state.get("in_end", False):
+                # PN114 S: sound span forcing — mask every row this seq owns
+                # this step with force_seq[end_count + k] (bonus row gets
+                # end_count + n_spec), clamped at span end. end_count is the
+                # landed-output position authority from site B; it never
+                # moves inside a step, so the bonus/target calls are
+                # consistent and cannot double-force a position.
+                _pn114_sfs = state.get("force_seq")
+                if _pn114_sfs:
+                    _pn114_sdone = False
+                    _pn114_srows = []
+                    _pn114_stoks = []
+                    try:
+                        _pn114_semit = state.get("end_count", 0)
+                        if self.in_spec_mode:
+                            _pn114_sspec = (
+                                spec_token_ids_for_layout[seq_idx]
+                                if seq_idx < len(spec_token_ids_for_layout)
+                                else []
+                            )
+                            if predict_bonus_token:
+                                _pn114_spos = [
+                                    (0, _pn114_semit + len(_pn114_sspec))
+                                ]
+                            else:
+                                _pn114_spos = [
+                                    (_pn114_sk, _pn114_semit + _pn114_sk)
+                                    for _pn114_sk in range(len(_pn114_sspec))
+                                ]
+                        else:
+                            _pn114_spos = [(0, _pn114_semit)]
+                        for _pn114_sk, _pn114_sti in _pn114_spos:
+                            if (_pn114_sti >= len(_pn114_sfs)
+                                    or _pn114_sfs[_pn114_sti] is None):
+                                # past span end, or a free HOLE inside the
+                                # span (probe letter): row free-samples
+                                continue
+                            _pn114_smask = (
+                                self.cu_num_tokens[seq_idx] + _pn114_sk
+                            )
+                            if (
+                                _pn114_smask < self._mask_capacity
+                                and _pn114_smask < logits.shape[0]
+                            ):
+                                _pn114_srows.append(_pn114_smask)
+                                _pn114_stoks.append(_pn114_sfs[_pn114_sti])
+                        _pn114_sdone = True
+                    except Exception:
+                        import logging as _pn114_slog
+                        _pn114_slog.getLogger(
+                            "vllm.genesis.pn114"
+                        ).warning(
+                            "PN114 span forcing raised — stock fallback",
+                            exc_info=True,
+                        )
+                    if _pn114_sdone:
+                        active_indices_cpu.extend(_pn114_srows)
+                        force_tokens_cpu.extend(_pn114_stoks)
+                        continue
+                # logits processor in spec mode are called twice
+''',
+    "S span-sound forcing",
 ))
 
 # F: forcing loop lookups
@@ -139,10 +313,11 @@ GRAFTS.append((
                                     self.think_end_token_ids[end_count]
                                 )
 ''',
-    '''                                active_indices_cpu.append(mask_idx)  # PN114 F2
-                                force_tokens_cpu.append(
-                                    _pn114_fseq[end_count]
-                                )
+    '''                                if _pn114_fseq[end_count] is not None:
+                                    active_indices_cpu.append(mask_idx)  # PN114 F2
+                                    force_tokens_cpu.append(
+                                        _pn114_fseq[end_count]
+                                    )
 ''',
     "F2 forcing-loop token",
 ))
