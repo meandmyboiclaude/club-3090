@@ -341,6 +341,39 @@ def _contract_v3_sized(ctk: dict, budget: int) -> bool:
     return True
 
 
+def _contract_v8_hybrid(ctk: dict, budget: int) -> bool:
+    """v8 (2026-07-23): numbered scaffold + GENEROUS announced step-ceiling +
+    v5's behavioral stop/continue/exhausted clauses. Rationale (V3-SIZED-DEEP-
+    ANALYSIS-20260723): the announced N is a hard behavioral anchor (72/100
+    v3sizedfull2 traces land EXACTLY on Step N), so a lean N truncates —
+    7/12 bad flips were premature commits from the classifier's N=5 pileup.
+    v8 announces a CEILING ("up to ~N") the model should finish before, with
+    v5's settled/progress/exhausted clauses making N a soft checkpoint, never
+    a target. Announce in STEPS (behavioral), enforce in TOKENS (cost) —
+    never derive both from one lean guess. Composes with
+    GENESIS_PN102_ANNOUNCE_CEILING (dispatch inflates `budget` announce-side
+    only). SHIP DARK (GENESIS_PN102_BANNER_V8)."""
+    tps = max(50, _env_int("GENESIS_PN102_V8_TOKENS_PER_STEP", 260))
+    planner_steps = ctk.pop("pn100_steps", None)
+    n_ceil = max(3, round(budget / tps))
+    if isinstance(planner_steps, int) and planner_steps > 0:
+        n_ceil = max(n_ceil, planner_steps)
+    n_ceil += max(0, _env_int("GENESIS_PN102_V8_STEP_HEADROOM", 4))
+    ctk["pn_env_banner"] = (
+        "[envelope] Work through your reasoning in numbered steps. There is "
+        f"room for up to ~{n_ceil} steps (~{budget} thinking tokens) — more "
+        "than this should need. The moment your answer is settled — at any "
+        "step, even the first — stop reasoning and give it; do not re-verify "
+        "a settled answer. If it is not settled and you are still making real "
+        "progress, keep going — there is room. If you have genuinely "
+        "exhausted your approaches and are no longer making progress, stop "
+        "and commit to your best answer."
+    )
+    ctk["pn_env_seed"] = "Step 1:"
+    log.info("PN102: contract set (v8 hybrid, n_ceil=%d budget=%d)", n_ceil, budget)
+    return True
+
+
 def maybe_add_answer_hint(request: Any) -> None:
     if not _env_bool("GENESIS_ENABLE_PN102_CONTRACT"):
         return
@@ -368,7 +401,9 @@ def maybe_add_answer_hint(request: Any) -> None:
     # v4 ships OFF: it replaces a prod-validated banner and must not become the
     # live path until a bench window says so. It is also COUPLED to the
     # generous-budget env (see the v4 note above) — enable both or neither.
-    if _env_bool("GENESIS_PN102_BANNER_V7", False):
+    if _env_bool("GENESIS_PN102_BANNER_V8", False):
+        _contract_v8_hybrid(ctk, budget)
+    elif _env_bool("GENESIS_PN102_BANNER_V7", False):
         _contract_v7_stateanswer(ctk, budget)
     elif _env_bool("GENESIS_PN102_BANNER_V6A", False):
         _contract_v6a_proveit(ctk, budget)
