@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import re
 from typing import Any
@@ -54,6 +55,13 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, "") or default)
+    except (TypeError, ValueError):
+        return default
+
+
 def _master_on() -> bool:
     return _env_bool("GENESIS_ENABLE_PN101_ANSWER_RESCUE")
 
@@ -66,6 +74,11 @@ _STATS: dict[str, int] = {
     "escalations_attempted": 0,
     "escalations_succeeded": 0,
     "escalation_errors": 0,
+    "pn118_skips": 0,
+    "pn118_shadow_would_fire": 0,
+    "pn118_attempts": 0,
+    "pn118_fires": 0,
+    "pn118_errors": 0,
 }
 
 
@@ -678,7 +691,298 @@ async def _maybe_escalate(serving: Any, request: Any, result: Any) -> bool:
         return False
 
 
+# ─── Leg 3: PN118 premature-close gate (async, post-response) ────────────────
+# House-original, 2026-07-23. The INVERSE of the dead ending-detection lane
+# (which CUT thinking early — never rebuild that): PN118 catches the model
+# VOLUNTARILY closing </think> far under its assigned budget (obeying the
+# announced step number in the v3-sized banner) and answering with weak
+# confidence — the premature-commit class that owns 5-7 of the 12 accuracy
+# losses vs the numberless champion. It resumes generation INSIDE the think
+# region with a first-person own-voice cue and the leftover budget.
+#
+# Trigger (ALL must hold), see A10 RECOURSE-GATED TRIM + s12-P17 arm rules:
+#   1. thinking_token_budget set > 0 (bounded request)
+#   2. VOLUNTARY close, not force/cap-bound: finish=stop with an emitted answer,
+#      AND reasoning_tokens < budget - grace (a cap-bound close has no leftover)
+#   3. PREMATURE: reasoning_tokens < FRAC * budget (budget left on the table)
+#   4. WEAK confidence: letter-margin echo read < MARGIN (the A10 answer-token
+#      margin; a post-close 1-token echo self-call, not a mid-trace level gate)
+# Every failure path leaves the original response untouched (PN101 fail-open).
+# One fire per request. Modes: shadow (log would-fire incl. margin, change
+# nothing) | enforce (splice the continuation). Master default OFF.
+
+_PN118_MARKER = "pn118_internal"
+_PN118_DEFAULT_CUE = (
+    "Wait — that felt too quick; let me actually check the remaining cases "
+    "before I commit."
+)
+_PN118_LETTERS = "ABCDEFGHIJ"
+
+
+def _pn118_master_on() -> bool:
+    return _env_bool("GENESIS_ENABLE_PN118_CLOSEGATE", False)
+
+
+def _reasoning_tokens(result: Any, reasoning: str) -> int:
+    """Spend already consumed inside the think block. Prefer the engine's
+    reasoning_tokens count; fall back to the ~4-char/token estimate PN101 uses."""
+    usage = getattr(result, "usage", None)
+    details = getattr(usage, "completion_tokens_details", None) if usage else None
+    if details is not None:
+        rt = getattr(details, "reasoning_tokens", None)
+        if isinstance(rt, int) and rt > 0:
+            return rt
+    return len(reasoning) // 4
+
+
+def _letter_posterior_margin(choice: Any) -> float | None:
+    """Margin between the top-1 and top-2 single-letter posteriors at the echo
+    position. High margin = the model is confident which option letter it means;
+    low margin = weak commitment (the premature-commit signal). None if no
+    letter mass is present (open-ended answer — margin read does not apply)."""
+    lp = getattr(choice, "logprobs", None)
+    toks = getattr(lp, "content", None) if lp else None
+    if not toks:
+        return None
+    top = getattr(toks[0], "top_logprobs", None) or []
+    probs: list[float] = []
+    for t in top:
+        tok = (getattr(t, "token", "") or "").strip()
+        if len(tok) == 1 and tok.upper() in _PN118_LETTERS:
+            probs.append(math.exp(getattr(t, "logprob", -99.0)))
+    if not probs:
+        return None
+    probs.sort(reverse=True)
+    top1 = probs[0]
+    top2 = probs[1] if len(probs) > 1 else 0.0
+    return top1 - top2
+
+
+async def _letter_margin(serving: Any, request: Any, content: str) -> float | None:
+    """One 1-token echo self-call reading the answer's letter posterior margin.
+    messages = original + the emitted answer as an assistant prefix ending
+    'Answer: (', continue_final_message + logprobs → letter margin. The
+    alternative to a low-margin read is submitting that same guess anyway, so
+    the read can only add accuracy (A10). Thinking OFF, temp 0, marker-tagged to
+    avoid re-entry. Returns None on any structural miss (fail-open upstream)."""
+    req_cls = type(request)
+    fields = getattr(req_cls, "model_fields", {}) or {}
+    if "logprobs" not in fields:
+        return None
+    partial = content.strip() + "\nAnswer: ("
+    messages = list(getattr(request, "messages", None) or [])
+    messages.append({"role": "assistant", "content": partial})
+    kwargs: dict[str, Any] = {
+        "model": getattr(request, "model", None),
+        "messages": messages,
+        "temperature": 0.0,
+        "stream": False,
+        "logprobs": True,
+        "top_logprobs": 20,
+        "chat_template_kwargs": {
+            "enable_thinking": False,
+            _MARKER_KEY: True,
+            _PN118_MARKER: True,
+        },
+    }
+    cap_field = (
+        "max_completion_tokens" if "max_completion_tokens" in fields else "max_tokens"
+    )
+    kwargs[cap_field] = 1
+    for fname, val in (("continue_final_message", True), ("add_generation_prompt", False)):
+        if fname in fields:
+            kwargs[fname] = val
+        else:
+            kwargs["chat_template_kwargs"][fname] = val
+    synthetic = req_cls(**kwargs)
+    timeout = _env_int("GENESIS_PN118_MARGIN_TIMEOUT_S", 30)
+    resp = await asyncio.wait_for(
+        serving.create_chat_completion(synthetic, raw_request=None), timeout
+    )
+    choice = _extract_choice(resp)
+    if choice is None:
+        return None
+    return _letter_posterior_margin(choice)
+
+
+async def _pn118_continue(serving: Any, request: Any, result: Any, message: Any,
+                          choice: Any, reasoning: str, spent: int, budget: int,
+                          req_id: Any, margin: float) -> bool:
+    """The action leg: ONE continuation resuming inside the think region with the
+    first-person cue and the leftover budget. Clones PN101 escalate's resume-
+    inside-think construction (unclosed <think>, continue_final_message). Any
+    failure returns False and leaves the original response untouched."""
+    try:
+        req_cls = type(request)
+        fields = getattr(req_cls, "model_fields", {}) or {}
+        cue = os.environ.get("GENESIS_PN118_CUE", "").strip() or _PN118_DEFAULT_CUE
+        min_c = _env_int("GENESIS_PN118_MIN_CONT", 512)
+        max_c = _env_int("GENESIS_PN118_MAX_CONT", 6144)
+        cont_budget = max(min_c, min(max_c, budget - spent))
+        # Resume INSIDE the think region: original think content WITHOUT
+        # </think> + the own-voice cue, ending mid-flow so the model continues
+        # reasoning (never anything resembling </think>; s12-P17: first-person
+        # self-talk is internalized as own-voice, imperatives/brackets derail).
+        partial = "<think>\n" + reasoning.strip() + "\n" + cue
+        messages = list(getattr(request, "messages", None) or [])
+        messages.append({"role": "assistant", "content": partial})
+        kwargs: dict[str, Any] = {
+            "model": getattr(request, "model", None),
+            "messages": messages,
+            "temperature": getattr(request, "temperature", 0.0) or 0.0,
+            "stream": False,
+            "thinking_token_budget": cont_budget,
+            "chat_template_kwargs": dict(
+                getattr(request, "chat_template_kwargs", None) or {},
+                **{_MARKER_KEY: True, _PN118_MARKER: True},
+            ),
+        }
+        for sf in ("top_p", "top_k", "min_p", "presence_penalty",
+                   "frequency_penalty", "repetition_penalty", "stop",
+                   "seed", "logit_bias"):
+            if sf in fields:
+                sv = getattr(request, sf, None)
+                if sv is not None:
+                    kwargs[sf] = sv
+        cap_field = (
+            "max_completion_tokens" if "max_completion_tokens" in fields else "max_tokens"
+        )
+        original_cap = _completion_cap(request)
+        kwargs[cap_field] = max(original_cap or 0, cont_budget + 512)
+        for fname, val in (("continue_final_message", True), ("add_generation_prompt", False)):
+            if fname in fields:
+                kwargs[fname] = val
+            else:
+                kwargs["chat_template_kwargs"][fname] = val
+        synthetic = req_cls(**kwargs)
+        timeout = _env_int("GENESIS_PN118_TIMEOUT_S", 180)
+        resp = await asyncio.wait_for(
+            serving.create_chat_completion(synthetic, raw_request=None), timeout
+        )
+        rchoice = _extract_choice(resp)
+        rmsg = getattr(rchoice, "message", None) if rchoice else None
+        if rmsg is None:
+            log.info("PN118: continuation returned no choice req=%s — original kept", req_id)
+            return False
+        new_content = (getattr(rmsg, "content", None) or "").strip()
+        new_reasoning = _read_reasoning(rmsg)
+        if not new_content and not new_reasoning.strip():
+            log.info("PN118: continuation returned empty req=%s — original kept", req_id)
+            return False
+        # Fold the continuation's reasoning onto the original think content.
+        for attr in ("reasoning", "reasoning_content"):
+            if getattr(rmsg, attr, None) is not None:
+                try:
+                    setattr(message, attr, (reasoning + new_reasoning))
+                except Exception:  # pragma: no cover - frozen models
+                    pass
+                break
+        if not new_content:
+            # Continuation itself ended still inside think — no answer to splice.
+            log.info("PN118: continuation ended in-think req=%s — original kept", req_id)
+            return False
+        message.content = new_content
+        try:
+            choice.finish_reason = getattr(rchoice, "finish_reason", None) or "stop"
+        except Exception:  # pragma: no cover
+            pass
+        _sum_usage(getattr(result, "usage", None), getattr(resp, "usage", None))
+        _STATS["pn118_fires"] += 1
+        log.info(
+            "PN118: FIRED req=%s spent=%d budget=%d margin=%.3f +cont_budget=%d",
+            req_id, spent, budget, margin, cont_budget,
+        )
+        return True
+    except Exception as exc:
+        _STATS["pn118_errors"] += 1
+        log.warning("PN118: continuation failed req=%s (%s) — original kept", req_id, exc)
+        return False
+
+
+async def _maybe_pn118_closegate(serving: Any, request: Any, result: Any) -> bool:
+    """PN118 premature-close gate. Returns True iff a continuation was spliced
+    in (enforce mode). Shadow mode logs the would-fire and returns False."""
+    if _skip_common(request) or not _bounded(request):
+        return False
+    choice = _extract_choice(result)
+    if choice is None:
+        return False
+    # One fire per request: mark the choice so a re-invocation short-circuits.
+    if getattr(choice, "_pn118_seen", False):
+        return False
+    try:
+        setattr(choice, "_pn118_seen", True)
+    except Exception:  # pragma: no cover - frozen models
+        pass
+    message = getattr(choice, "message", None)
+    if message is None:
+        return False
+    content = (getattr(message, "content", None) or "").strip()
+    reasoning = _read_reasoning(message)
+    fr = getattr(choice, "finish_reason", None)
+    budget = getattr(request, "thinking_token_budget", 0)
+    req_id = getattr(request, "request_id", None) or id(request)
+
+    # (1) voluntary close = an answer arrived after a real think block.
+    if not content or not reasoning.strip():
+        return False
+    if fr != "stop" or getattr(message, "tool_calls", None):
+        return False
+    spent = _reasoning_tokens(result, reasoning)
+    # (2) NOT a force/cap-bound close — a cap-bound close has no leftover budget.
+    grace = _env_int("GENESIS_PN118_GRACE", 256)
+    if spent >= budget - grace:
+        log.info("PN118: skip req=%s cap-bound close (spent=%d budget=%d grace=%d)",
+                 req_id, spent, budget, grace)
+        _STATS["pn118_skips"] += 1
+        return False
+    # (3) premature — spent well under the assigned budget.
+    frac = _env_float("GENESIS_PN118_FRAC", 0.6)
+    if spent >= frac * budget:
+        log.info("PN118: skip req=%s not premature (spent=%d >= %.2f*%d)",
+                 req_id, spent, frac, budget)
+        _STATS["pn118_skips"] += 1
+        return False
+    # (4) weak answer confidence via the letter-margin echo self-call.
+    try:
+        margin = await _letter_margin(serving, request, content)
+    except Exception as exc:
+        log.warning("PN118: margin read failed req=%s (%s) — skip (fail-open)", req_id, exc)
+        _STATS["pn118_errors"] += 1
+        return False
+    if margin is None:
+        log.info("PN118: skip req=%s no letter margin (open-ended answer)", req_id)
+        _STATS["pn118_skips"] += 1
+        return False
+    margin_thr = _env_float("GENESIS_PN118_MARGIN", 0.5)
+    if margin >= margin_thr:
+        log.info("PN118: skip req=%s confident (margin=%.3f >= %.3f)",
+                 req_id, margin, margin_thr)
+        _STATS["pn118_skips"] += 1
+        return False
+
+    mode = (os.environ.get("GENESIS_PN118_MODE", "shadow") or "shadow").strip().lower()
+    if mode != "enforce":
+        _STATS["pn118_shadow_would_fire"] += 1
+        log.info("PN118: WOULD-FIRE (shadow) req=%s spent=%d budget=%d margin=%.3f",
+                 req_id, spent, budget, margin)
+        return False
+
+    _STATS["pn118_attempts"] += 1
+    return await _pn118_continue(serving, request, result, message, choice,
+                                 reasoning, spent, budget, req_id, margin)
+
+
 async def maybe_rescue_answer(serving: Any, request: Any, result: Any) -> Any:
+    # PN118 premature-close gate: an independent leg in the same post-response
+    # seat, its own master flag, unaffected by the PN101 master/repair toggles.
+    if (_pn118_master_on() and not hasattr(result, "__aiter__")
+            and not getattr(request, "stream", False)):
+        try:
+            await _maybe_pn118_closegate(serving, request, result)
+        except Exception as exc:  # pragma: no cover - belt-and-suspenders fail-open
+            _STATS["pn118_errors"] += 1
+            log.warning("PN118: closegate failed (%s) — original kept", exc)
     if not _master_on() or not _env_bool("GENESIS_PN101_REPAIR", True):
         return result
     if hasattr(result, "__aiter__"):  # streaming generator — cannot repair
