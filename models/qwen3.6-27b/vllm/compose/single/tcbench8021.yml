@@ -477,12 +477,20 @@ services:
       # ("around Step N, check whether your answer is settled"), so continuing is
       # framed as normal rather than as an exception.
       - GENESIS_PN100_TIER_BUDGETS=0,10240,10240,10240
-      - GENESIS_PN102_STATIC_BANNER=1
+      # [ARM-A 2026-07-23 TRANSIENT — v8 ladder screen: v3-sized + announce
+      # ceiling. STATIC/V5 removed so dispatch falls through to v3; ceiling
+      # inflates the ANNOUNCED budget only (enforcement untouched). RESTORE
+      # STATIC_BANNER=1 + BANNER_V5=1 and drop these two after the screen.]
+      - GENESIS_PN102_ANNOUNCE_CEILING=1
+      - GENESIS_PN108_GROW_MAX_TOTAL=3400
+      # [ARM-C TRANSIENT] map-p95 need-shaped enforcement under v3+ceiling.
+      # R2.1: HIGHSTEP/P-pess INERT under map — deep raise lives in anchors.
+      - GENESIS_PN100_STEP_BUDGET_MAP=3:1200,4:1200,5:1500,8:3800,12:3800,15:10240,25:10240
       # [v5 2026-07-19, BENCH ONLY] floorless stop + progress-conditional
       # continue. v4's checkpoint delay was measured as a hard floor (0 items
       # <500 rtok vs 36 in old auto); the unconditional keep-going fed the deep
       # band (73.4% of spend @ 60% acc). Takes precedence over STATIC_BANNER.
-      - GENESIS_PN102_BANNER_V5=1
+      # - GENESIS_PN102_BANNER_V5=1   # [ARM-A TRANSIENT: re-enable after screen]
       # Starvation backstop: one continuation resuming INSIDE the think region.
       # Non-streaming, bounded to one pass, every failure path returns the
       # original response unchanged. Reaches above the generous cap only for the

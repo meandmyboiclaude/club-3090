@@ -359,6 +359,30 @@ def _contract_v8_hybrid(ctk: dict, budget: int) -> bool:
     if isinstance(planner_steps, int) and planner_steps > 0:
         n_ceil = max(n_ceil, planner_steps)
     n_ceil += max(0, _env_int("GENESIS_PN102_V8_STEP_HEADROOM", 4))
+    # [2026-07-23 v8b] Arm-B measured: announcing the GENEROUS step count
+    # (n_ceil) inflates spend — the anchor paces the model toward the big
+    # number (wall +10% vs v5, dominated by v3+ceiling). Doctrine: generosity
+    # belongs in the LICENSE + token clause; the STEP anchor stays lean.
+    # V8_LEAN_ANCHOR=1 announces the lean planner N as a soft checkpoint with
+    # v5's behavioral clauses around it; default off preserves Arm-B semantics.
+    if _env_bool("GENESIS_PN102_V8_LEAN_ANCHOR", False):
+        steps = planner_steps if isinstance(planner_steps, int) and planner_steps > 0 \
+            else max(3, round(budget / tps))
+        ctk["pn_env_banner"] = (
+            f"[envelope] Thinking budget: about {steps} short reasoning steps "
+            f"(budget allows up to ~{budget} thinking tokens). Work in "
+            "numbered steps. The moment your answer is settled — at any step, "
+            "even the first — stop reasoning and give it; do not re-verify a "
+            f"settled answer. If it is not settled and you are still making "
+            f"real progress, keep going past Step {steps} if you need to — "
+            "there is room. If you have genuinely exhausted your approaches "
+            "and are no longer making progress, stop and commit to your best "
+            "answer."
+        )
+        ctk["pn_env_seed"] = f"Budget: ~{steps} short steps.\nStep 1:"
+        log.info("PN102: contract set (v8b lean-anchor, steps=%d budget=%d)",
+                 steps, budget)
+        return True
     ctk["pn_env_banner"] = (
         "[envelope] Work through your reasoning in numbered steps. There is "
         f"room for up to ~{n_ceil} steps (~{budget} thinking tokens) — more "
