@@ -1,0 +1,468 @@
+#!/usr/bin/env python3
+"""Offline tests for PN118 — premature-close gate (answer_rescue.py Leg 3).
+
+The engine round-trip (does an unclosed <think> partial survive template render
++ vLLM's continue_final_message containment check?) needs a GPU. Everything
+else is pure Python and a bug in any of it would waste a bench window:
+  - the trigger truth-table (early+weak fires; early+confident no; late no;
+    cap-bound no; disabled no; second fire blocked)
+  - fail-open on every raised path (margin read, continuation call)
+  - the continuation budget arithmetic (leftover clamped to [512, 6144])
+  - the first-person cue text present in the continuation request
+
+Run: python3 test_pn118_logic.py
+"""
+
+import asyncio
+import os
+import sys
+from pathlib import Path
+
+MOD_DIR = (Path(__file__).resolve().parents[1]
+           / "models" / "qwen3.6-27b" / "vllm" / "patches" / "genesis"
+           / "vllm" / "_genesis" / "middleware")
+sys.path.insert(0, str(MOD_DIR))
+
+import answer_rescue as ar  # noqa: E402
+
+FAILURES: list[str] = []
+
+
+def check(name: str, cond: bool, detail: str = "") -> None:
+    if cond:
+        print(f"  PASS  {name}")
+    else:
+        print(f"  FAIL  {name} {detail}")
+        FAILURES.append(name)
+
+
+def reset_env() -> None:
+    for k in list(os.environ):
+        if k.startswith("GENESIS_PN118") or k == "GENESIS_ENABLE_PN118_CLOSEGATE":
+            del os.environ[k]
+    # PN101 master OFF so we isolate PN118 behaviour in maybe_rescue_answer.
+    os.environ.pop("GENESIS_ENABLE_PN101_ANSWER_RESCUE", None)
+    for k in list(ar._STATS):
+        ar._STATS[k] = 0
+
+
+# ─── fakes ───────────────────────────────────────────────────────────────────
+
+
+class CTD:
+    def __init__(self, reasoning_tokens):
+        self.reasoning_tokens = reasoning_tokens
+
+
+class Usage:
+    def __init__(self, prompt=100, completion=50, reasoning=None):
+        self.prompt_tokens = prompt
+        self.completion_tokens = completion
+        self.total_tokens = prompt + completion
+        self.completion_tokens_details = CTD(reasoning) if reasoning is not None else None
+
+
+class Message:
+    def __init__(self, content=None, reasoning=None):
+        self.content = content
+        self.reasoning = reasoning
+        self.reasoning_content = None
+        self.tool_calls = None
+
+
+class Choice:
+    def __init__(self, message, finish_reason):
+        self.message = message
+        self.finish_reason = finish_reason
+
+
+class Result:
+    def __init__(self, message, finish_reason, usage=None):
+        self.choices = [Choice(message, finish_reason)]
+        self.usage = usage or Usage()
+
+
+class TopLP:
+    def __init__(self, token, logprob):
+        self.token = token
+        self.logprob = logprob
+
+
+class TokLP:
+    def __init__(self, top_logprobs):
+        self.top_logprobs = top_logprobs
+
+
+class LogProbs:
+    def __init__(self, content):
+        self.content = content
+
+
+class LPChoice:
+    """A choice carrying logprobs for the 1-token echo self-call."""
+    def __init__(self, letter_lps):
+        self.message = Message(content="", reasoning=None)
+        self.finish_reason = "stop"
+        self.logprobs = LogProbs([TokLP([TopLP(t, lp) for t, lp in letter_lps])])
+
+
+class LPResult:
+    def __init__(self, letter_lps):
+        self.choices = [LPChoice(letter_lps)]
+        self.usage = Usage(0, 1)
+
+
+class Request:
+    model_fields = {
+        "model": 1, "messages": 1, "temperature": 1, "stream": 1,
+        "thinking_token_budget": 1, "chat_template_kwargs": 1, "max_tokens": 1,
+        "continue_final_message": 1, "add_generation_prompt": 1,
+        "logprobs": 1, "top_logprobs": 1, "top_p": 1,
+    }
+    _DEFAULTS = {
+        "model": "qwen3.6", "messages": None, "temperature": 0.0, "stream": False,
+        "thinking_token_budget": 8000, "chat_template_kwargs": None,
+        "max_tokens": 2048, "tools": None, "response_format": None,
+        "continue_final_message": None, "add_generation_prompt": None,
+    }
+
+    def __init__(self, budget=None, **kwargs):
+        for k, v in self._DEFAULTS.items():
+            setattr(self, k, v)
+        if budget is not None:
+            self.thinking_token_budget = budget
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+        if self.messages is None:
+            self.messages = [{"role": "user", "content": "hard MCQ"}]
+        if self.chat_template_kwargs is None:
+            self.chat_template_kwargs = {}
+
+
+class Serving:
+    """First self-call = margin echo (returns LPResult), second = continuation
+    (returns a Result). Either can be forced to raise."""
+    def __init__(self, margin_letters=None, cont_content=None, cont_reasoning=None,
+                 raise_on_margin=None, raise_on_cont=None):
+        self.margin_letters = margin_letters
+        self.cont_content = cont_content
+        self.cont_reasoning = cont_reasoning
+        self.raise_on_margin = raise_on_margin
+        self.raise_on_cont = raise_on_cont
+        self.calls: list = []
+
+    async def create_chat_completion(self, request, raw_request=None):
+        self.calls.append(request)
+        is_margin = getattr(request, "logprobs", None) is True
+        if is_margin:
+            if self.raise_on_margin:
+                raise self.raise_on_margin
+            return LPResult(self.margin_letters or [])
+        if self.raise_on_cont:
+            raise self.raise_on_cont
+        return Result(Message(content=self.cont_content, reasoning=self.cont_reasoning),
+                      "stop", Usage(0, 500))
+
+
+def make_result(content="The answer is B.", reasoning="Step 1: ...", spent=1000,
+                finish="stop"):
+    return Result(Message(content=content, reasoning=reasoning),
+                  finish, Usage(0, 900, reasoning=spent))
+
+
+# weak = near-tie letters (margin ~0.05); strong = dominant (margin ~0.85)
+WEAK = [("A", -1.7), ("B", -1.8), ("C", -2.5)]
+STRONG = [("B", -0.1), ("A", -2.4), ("C", -3.0)]
+
+
+def run(serving, request, result):
+    return asyncio.run(ar.maybe_rescue_answer(serving, request, result))
+
+
+# ─── margin read unit ────────────────────────────────────────────────────────
+
+
+def test_margin_read():
+    print("\nletter-margin posterior read")
+    import math
+    weak = ar._letter_posterior_margin(LPChoice(WEAK))
+    strong = ar._letter_posterior_margin(LPChoice(STRONG))
+    check("weak margin < 0.5", weak is not None and weak < 0.5, f"got {weak}")
+    check("strong margin >= 0.5", strong is not None and strong >= 0.5, f"got {strong}")
+    check("no-letter mass → None",
+          ar._letter_posterior_margin(LPChoice([("(", -0.1), ("the", -2.0)])) is None)
+    expect = math.exp(-1.7) - math.exp(-1.8)
+    check("margin = top1-top2", weak is not None and abs(weak - expect) < 1e-9,
+          f"{weak} vs {expect}")
+
+
+# ─── trigger truth-table (enforce mode) ──────────────────────────────────────
+
+
+def test_disabled():
+    print("\ntruth-table: master disabled → no self-calls, no fire")
+    reset_env()
+    s = Serving(margin_letters=WEAK, cont_content="Actually the answer is C.")
+    run(s, Request(budget=8000), make_result(spent=1000))
+    check("disabled: zero self-calls", len(s.calls) == 0, f"{len(s.calls)}")
+    check("disabled: no fire", ar._STATS["pn118_fires"] == 0)
+
+
+def test_early_weak_fires():
+    print("\ntruth-table: early close + weak answer → FIRES (enforce)")
+    reset_env()
+    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN118_MODE"] = "enforce"
+    s = Serving(margin_letters=WEAK, cont_content="Actually the answer is C.")
+    res = make_result(content="The answer is B.", spent=1000)  # 1000/8000 = 12.5%
+    run(s, Request(budget=8000), res)
+    check("fired once", ar._STATS["pn118_fires"] == 1, str(ar._STATS))
+    check("two self-calls (margin + continuation)", len(s.calls) == 2, f"{len(s.calls)}")
+    check("answer spliced from continuation",
+          res.choices[0].message.content == "Actually the answer is C.")
+
+
+def test_early_confident_no_fire():
+    print("\ntruth-table: early close + confident answer → NO fire")
+    reset_env()
+    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN118_MODE"] = "enforce"
+    s = Serving(margin_letters=STRONG, cont_content="changed")
+    res = make_result(content="The answer is B.", spent=1000)
+    run(s, Request(budget=8000), res)
+    check("no fire on confident", ar._STATS["pn118_fires"] == 0)
+    check("margin read happened, continuation did NOT", len(s.calls) == 1, f"{len(s.calls)}")
+    check("original answer preserved", res.choices[0].message.content == "The answer is B.")
+    check("skip counted", ar._STATS["pn118_skips"] == 1)
+
+
+def test_late_no_fire():
+    print("\ntruth-table: late close (spent > FRAC*budget) → NO fire, no self-call")
+    reset_env()
+    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN118_MODE"] = "enforce"
+    s = Serving(margin_letters=WEAK, cont_content="changed")
+    res = make_result(content="The answer is B.", spent=6000)  # 6000/8000 = 75% > 0.6
+    run(s, Request(budget=8000), res)
+    check("no fire when late", ar._STATS["pn118_fires"] == 0)
+    check("no self-call (gated before margin read)", len(s.calls) == 0, f"{len(s.calls)}")
+
+
+def test_capbound_no_fire():
+    print("\ntruth-table: cap-bound close (no leftover) → NO fire")
+    reset_env()
+    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN118_MODE"] = "enforce"
+    os.environ["GENESIS_PN118_FRAC"] = "0.99"  # would pass frac gate; grace must catch it
+    s = Serving(margin_letters=WEAK, cont_content="changed")
+    res = make_result(content="The answer is B.", spent=7900)  # 8000-7900=100 < grace 256
+    run(s, Request(budget=8000), res)
+    check("no fire when cap-bound", ar._STATS["pn118_fires"] == 0)
+    check("no self-call (grace gate before margin)", len(s.calls) == 0, f"{len(s.calls)}")
+
+
+def test_unbounded_no_fire():
+    print("\ntruth-table: no thinking budget → NO fire")
+    reset_env()
+    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN118_MODE"] = "enforce"
+    s = Serving(margin_letters=WEAK, cont_content="changed")
+    run(s, Request(budget=0), make_result(spent=1000))
+    check("no fire when unbounded", ar._STATS["pn118_fires"] == 0)
+    check("no self-call", len(s.calls) == 0)
+
+
+def test_second_fire_blocked():
+    print("\ntruth-table: one fire per request — re-invocation blocked")
+    reset_env()
+    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN118_MODE"] = "enforce"
+    s = Serving(margin_letters=WEAK, cont_content="Actually the answer is C.")
+    res = make_result(spent=1000)
+    req = Request(budget=8000)
+    run(s, req, res)
+    calls_after_first = len(s.calls)
+    run(s, req, res)  # same result object → _pn118_seen guard
+    check("fired only once", ar._STATS["pn118_fires"] == 1)
+    check("no extra self-calls on 2nd pass", len(s.calls) == calls_after_first)
+
+
+def test_tool_and_structured_skip():
+    print("\ntruth-table: tools / structured output → NO fire")
+    reset_env()
+    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN118_MODE"] = "enforce"
+    s = Serving(margin_letters=WEAK, cont_content="changed")
+    run(s, Request(budget=8000, tools=[{"type": "function"}]), make_result(spent=1000))
+    check("tools → no self-call", len(s.calls) == 0)
+
+
+# ─── shadow mode ─────────────────────────────────────────────────────────────
+
+
+def test_shadow_mode():
+    print("\nshadow mode: computes margin, logs would-fire, changes NOTHING")
+    reset_env()
+    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN118_MODE"] = "shadow"
+    s = Serving(margin_letters=WEAK, cont_content="changed")
+    res = make_result(content="The answer is B.", spent=1000)
+    run(s, Request(budget=8000), res)
+    check("shadow: would-fire recorded", ar._STATS["pn118_shadow_would_fire"] == 1)
+    check("shadow: no real fire", ar._STATS["pn118_fires"] == 0)
+    check("shadow: margin read ran (1 self-call), NO continuation",
+          len(s.calls) == 1, f"{len(s.calls)}")
+    check("shadow: answer untouched", res.choices[0].message.content == "The answer is B.")
+
+
+def test_shadow_default():
+    print("\nshadow is the default mode (enabling master alone does not enforce)")
+    reset_env()
+    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"  # no MODE set
+    s = Serving(margin_letters=WEAK, cont_content="changed")
+    res = make_result(spent=1000)
+    run(s, Request(budget=8000), res)
+    check("default mode → no enforce fire", ar._STATS["pn118_fires"] == 0)
+    check("default mode → would-fire logged", ar._STATS["pn118_shadow_would_fire"] == 1)
+
+
+# ─── fail-open on every raised path ──────────────────────────────────────────
+
+
+def test_failopen_margin_raise():
+    print("\nfail-open: margin echo call raises → original kept")
+    reset_env()
+    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN118_MODE"] = "enforce"
+    s = Serving(raise_on_margin=RuntimeError("boom"))
+    res = make_result(content="The answer is B.", spent=1000)
+    run(s, Request(budget=8000), res)
+    check("no fire", ar._STATS["pn118_fires"] == 0)
+    check("error counted", ar._STATS["pn118_errors"] >= 1)
+    check("answer untouched", res.choices[0].message.content == "The answer is B.")
+
+
+def test_failopen_cont_raise():
+    print("\nfail-open: continuation call raises → original kept")
+    reset_env()
+    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN118_MODE"] = "enforce"
+    s = Serving(margin_letters=WEAK, raise_on_cont=RuntimeError("boom"))
+    res = make_result(content="The answer is B.", spent=1000)
+    run(s, Request(budget=8000), res)
+    check("no fire", ar._STATS["pn118_fires"] == 0)
+    check("error counted", ar._STATS["pn118_errors"] >= 1)
+    check("answer untouched", res.choices[0].message.content == "The answer is B.")
+
+
+def test_failopen_empty_continuation():
+    print("\nfail-open: continuation returns empty → original kept")
+    reset_env()
+    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN118_MODE"] = "enforce"
+    s = Serving(margin_letters=WEAK, cont_content="", cont_reasoning="")
+    res = make_result(content="The answer is B.", spent=1000)
+    run(s, Request(budget=8000), res)
+    check("no fire on empty continuation", ar._STATS["pn118_fires"] == 0)
+    check("answer untouched", res.choices[0].message.content == "The answer is B.")
+
+
+def test_no_letter_margin_skip():
+    print("\nopen-ended answer (no letter mass) → skip, no continuation")
+    reset_env()
+    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN118_MODE"] = "enforce"
+    s = Serving(margin_letters=[("The", -0.1), ("answer", -2.0)], cont_content="changed")
+    res = make_result(content="It is a long prose answer.", spent=1000)
+    run(s, Request(budget=8000), res)
+    check("no fire when margin None", ar._STATS["pn118_fires"] == 0)
+    check("margin read ran but no continuation", len(s.calls) == 1)
+
+
+# ─── continuation budget arithmetic + cue text ───────────────────────────────
+
+
+def test_continuation_budget_and_cue():
+    print("\ncontinuation: leftover budget clamped [512,6144] + cue present")
+    reset_env()
+    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN118_MODE"] = "enforce"
+
+    # leftover = 8000-1000 = 7000 → clamp to 6144
+    s = Serving(margin_letters=WEAK, cont_content="Actually C.")
+    run(s, Request(budget=8000), make_result(spent=1000))
+    cont = s.calls[-1]
+    check("leftover clamped to max 6144", cont.thinking_token_budget == 6144,
+          str(cont.thinking_token_budget))
+    txt = cont.messages[-1]["content"]
+    check("cue text present in continuation", ar._PN118_DEFAULT_CUE in txt)
+    check("resumes inside think (open <think>, no close)",
+          txt.startswith("<think>") and "</think>" not in txt)
+    check("original think content carried", "Step 1:" in txt)
+
+    # leftover small → clamp UP to 512.  spent=4700, budget=5000, frac 0.99, grace 50
+    reset_env()
+    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN118_MODE"] = "enforce"
+    os.environ["GENESIS_PN118_FRAC"] = "0.99"
+    os.environ["GENESIS_PN118_GRACE"] = "50"
+    s2 = Serving(margin_letters=WEAK, cont_content="Actually C.")
+    run(s2, Request(budget=5000), make_result(spent=4700))
+    check("leftover clamped up to min 512",
+          s2.calls[-1].thinking_token_budget == 512,
+          str(s2.calls[-1].thinking_token_budget))
+
+    # mid leftover unclamped: 8000-3000 = 5000
+    reset_env()
+    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN118_MODE"] = "enforce"
+    s3 = Serving(margin_letters=WEAK, cont_content="Actually C.")
+    run(s3, Request(budget=8000), make_result(spent=3000))
+    check("mid leftover passes through (5000)",
+          s3.calls[-1].thinking_token_budget == 5000,
+          str(s3.calls[-1].thinking_token_budget))
+
+
+def test_custom_cue_env():
+    print("\ncustom cue via GENESIS_PN118_CUE")
+    reset_env()
+    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN118_MODE"] = "enforce"
+    os.environ["GENESIS_PN118_CUE"] = "Hold on, let me reconsider the other options."
+    s = Serving(margin_letters=WEAK, cont_content="Actually C.")
+    run(s, Request(budget=8000), make_result(spent=1000))
+    check("custom cue used",
+          "Hold on, let me reconsider the other options." in s.calls[-1].messages[-1]["content"])
+
+
+def test_reasoning_tokens_fallback():
+    print("\nspend read: usage.reasoning_tokens preferred, char/4 fallback")
+    reset_env()
+    # no reasoning_tokens on usage → fall back to len(reasoning)//4
+    res = Result(Message(content="B", reasoning="x" * 400), "stop", Usage(0, 900))
+    check("char/4 fallback", ar._reasoning_tokens(res, "x" * 400) == 100)
+    res2 = Result(Message(content="B", reasoning="x" * 400), "stop",
+                  Usage(0, 900, reasoning=2222))
+    check("usage.reasoning_tokens preferred",
+          ar._reasoning_tokens(res2, "x" * 400) == 2222)
+
+
+def main():
+    for t in (test_margin_read, test_disabled, test_early_weak_fires,
+              test_early_confident_no_fire, test_late_no_fire, test_capbound_no_fire,
+              test_unbounded_no_fire, test_second_fire_blocked,
+              test_tool_and_structured_skip, test_shadow_mode, test_shadow_default,
+              test_failopen_margin_raise, test_failopen_cont_raise,
+              test_failopen_empty_continuation, test_no_letter_margin_skip,
+              test_continuation_budget_and_cue, test_custom_cue_env,
+              test_reasoning_tokens_fallback):
+        t()
+    print()
+    if FAILURES:
+        print(f"FAILED ({len(FAILURES)}): {', '.join(FAILURES)}")
+        sys.exit(1)
+    print("ALL PN118 TESTS PASSED")
+
+
+if __name__ == "__main__":
+    main()
