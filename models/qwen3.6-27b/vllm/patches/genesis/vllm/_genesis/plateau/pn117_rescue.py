@@ -217,7 +217,8 @@ def on_force_complete(state: dict[str, Any], st114: dict[str, Any]) -> bool:
 
 
 def _fire(st: dict[str, Any], reason: str, arm_n: int, c_mean: float | None,
-          think_len: int, budget: int) -> None:
+          think_len: int, budget: int,
+          state: dict[str, Any] | None = None) -> None:
     """Record a fire. shadow = log the would-fire + would-inject arm + c_mean,
     change nothing. enforce = queue the injection for the next boundary."""
     st["fired"] = True
@@ -236,6 +237,23 @@ def _fire(st: dict[str, Any], reason: str, arm_n: int, c_mean: float | None,
             reason, key or "silent", cm, think_len, budget, st.get("req_id"),
         )
         return
+    # [2026-07-23] RAISE_ON_FIRE: grow the enforced budget at fire so the
+    # room-cue arms are HONEST (plan 2.3: deep-suspected items need the room
+    # the cue promises; without a map the base budget is lean). Applied before
+    # any span arms, so pn114 parks the RAISED budget. Arm 4 = raise only
+    # (the silent-raise negative control). check_count_down grows by the same
+    # delta (holder counts down toward the cap). Never raise on converge fires
+    # (the converge cue asks for landing, not room).
+    raise_amt = _env_int("GENESIS_PN117_RAISE_ON_FIRE", 0)
+    if raise_amt > 0 and state is not None and reason != "converge":
+        cur = state.get("thinking_token_budget", 0)
+        if isinstance(cur, int) and 0 < cur < 1_000_000:  # not parked/sentinel
+            state["thinking_token_budget"] = cur + raise_amt
+            ccd = state.get("check_count_down")
+            if isinstance(ccd, int):
+                state["check_count_down"] = ccd + raise_amt
+            log.info("PN117: budget raised %d -> %d (fire) req=%s",
+                     cur, cur + raise_amt, st.get("req_id"))
     if key is None:
         # arm 4 (silent raise) enforced: negative control, no injection.
         log.info("PN117: FIRE reason=%s SILENT (arm 4) c_mean=%s think=%d "
@@ -302,7 +320,7 @@ def observe(state: dict[str, Any], think_len: int, conf: float | None,
         return
     # Trigger 2 — converge cue: descent past CONV_FRAC of budget, no conf gate.
     if cfg["converge"] and budget > 0 and think_len >= cfg["conv_frac"] * budget:
-        _fire(st, "converge", 5, None, think_len, budget)
+        _fire(st, "converge", 5, None, think_len, budget, state)
         # a converge fire may also land this step if we're already on a boundary
         if st.get("pending") and _at_sentence_boundary(state, ids):
             _do_arm(state, st, st["pending"])
@@ -315,6 +333,7 @@ def observe(state: dict[str, Any], think_len: int, conf: float | None,
         if len(w) >= cfg["min_samples"]:
             c_mean = sum(w) / len(w)
             if c_mean < cfg["cthresh"]:
-                _fire(st, "cband", cfg["arm"], c_mean, think_len, budget)
+                _fire(st, "cband", cfg["arm"], c_mean, think_len, budget,
+                      state)
                 if st.get("pending") and _at_sentence_boundary(state, ids):
                     _do_arm(state, st, st["pending"])
