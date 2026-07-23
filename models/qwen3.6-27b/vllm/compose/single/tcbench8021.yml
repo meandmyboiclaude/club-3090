@@ -212,10 +212,10 @@ services:
       # lines removed (dark, available). Base = k260 + P-pess only, so router
       # screens compare cleanly vs banked k260.]
       - GENESIS_ENABLE_PN112_SETTLED_STOP=1
-      # [2026-07-23 ~04:40Z loop-6 screen: shadow→enforce for the t1.0-uncapped
-      # settled-stop test (fires 16/30 in shadow at t1.0; saturation story was a
-      # temp-0.6 artifact). ONE knob vs native30. Revert to shadow after.]
-      - GENESIS_PN112_MODE=enforce
+      # [2026-07-23 04:55Z loop-6 verdict: t1.0 enforce KILLED (63% vs native 80%,
+      # 5 wrong-flips 0 good — C fires long before the productive end on tail
+      # items; close overhead 59 tok + ~560/item relocation). Back to shadow.]
+      - GENESIS_PN112_MODE=shadow
       - GENESIS_PN112_TAU=13.0
       - GENESIS_PN112_FLOOR=600
       - GENESIS_PN112_GRACE=64
