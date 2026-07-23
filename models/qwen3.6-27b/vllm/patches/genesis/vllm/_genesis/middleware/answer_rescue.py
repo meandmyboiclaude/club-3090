@@ -304,6 +304,19 @@ def _contract_v3_sized(ctk: dict, budget: int) -> bool:
     """v3: budget/planner-sized banner. The validated prod path (072fff66)."""
     tps = max(50, _env_int("GENESIS_PN102_TOKENS_PER_STEP", 193))
     planner_steps = ctk.pop("pn100_steps", None)
+    # [2026-07-23 rec-4] per-band ANNOUNCED-N remap (concrete, not a ceiling):
+    # "5:6,3:4" announces 6 where the planner said 5. Enforcement untouched.
+    # Trace evidence: the N=5 pileup owns the premature-commit/skipped-verify
+    # flips; a concrete bump keeps the anchor sharp (ceilings de-anchor).
+    if isinstance(planner_steps, int) and planner_steps > 0:
+        raw_map = os.environ.get("GENESIS_PN102_V3_N_BUMP_MAP", "").strip()
+        if raw_map:
+            try:
+                bump = {int(k): int(v) for k, v in
+                        (p.split(":") for p in raw_map.split(","))}
+                planner_steps = bump.get(planner_steps, planner_steps)
+            except ValueError:
+                log.warning("PN102: bad V3_N_BUMP_MAP %r ignored", raw_map)
     if isinstance(planner_steps, int) and planner_steps > 0:
         steps = planner_steps
         size_clause = f"budget allows up to ~{budget} thinking tokens"
