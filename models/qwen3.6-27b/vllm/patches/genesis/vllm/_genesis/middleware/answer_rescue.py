@@ -911,7 +911,12 @@ def _pn118_cmean_decision(entry: dict[str, Any] | None, req_id: Any,
     if not entry:
         log.info("PN118: cmean skip req=%s — no conf entry (join=%s)", req_id, join_id)
         return False, None
-    c_last = entry.get("c_last")
+    # [2026-07-23 field fix] flush-on-close made c_last = the COMMITMENT-moment
+    # window, which is high for everyone (the model commits confidently; the
+    # 9-vs-11 discrimination lives mid-trace). Default gate field is therefore
+    # c_trace (whole-trace mean, flush-proof); c_last remains selectable.
+    field = os.environ.get("GENESIS_PN118_CMEAN_FIELD", "c_trace").strip() or "c_trace"
+    c_last = entry.get(field, entry.get("c_last"))
     n = entry.get("n")
     ts = entry.get("ts")
     if not isinstance(c_last, (int, float)) or not isinstance(n, int):
