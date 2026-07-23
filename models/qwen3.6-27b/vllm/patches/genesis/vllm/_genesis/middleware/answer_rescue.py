@@ -458,9 +458,16 @@ def _contract_v8_hybrid(ctk: dict, budget: int) -> bool:
 def maybe_add_answer_hint(request: Any) -> None:
     if not _env_bool("GENESIS_ENABLE_PN102_CONTRACT"):
         return
-    if not _bounded(request) or _skip_common(request):
-        return
     ctk = dict(getattr(request, "chat_template_kwargs", None) or {})
+    # [PN118 rerun 2026-07-23] a rerun forces the v5-shape banner for THIS one
+    # synthetic call regardless of the live banner-version env chain. The
+    # dispatch below reads env, not ctk, so this ctk key is the override seam.
+    # Checked before the skip/marker gates: the rerun carries the PN118/PN101
+    # markers (to suppress post-response re-entry), and those would otherwise
+    # trip _skip_common and drop the banner it specifically needs.
+    force_v5 = bool(ctk.pop("pn102_force_v5", False))
+    if not _bounded(request) or (not force_v5 and _skip_common(request)):
+        return
     if ctk.get("pn_env_banner"):
         return  # idempotent
     if ctk.get("enable_thinking") is False:
@@ -482,7 +489,9 @@ def maybe_add_answer_hint(request: Any) -> None:
     # v4 ships OFF: it replaces a prod-validated banner and must not become the
     # live path until a bench window says so. It is also COUPLED to the
     # generous-budget env (see the v4 note above) — enable both or neither.
-    if _env_bool("GENESIS_PN102_BANNER_V8", False):
+    if force_v5:
+        _contract_v5_settled(ctk, budget)  # PN118 rerun: v5-shape, this call only
+    elif _env_bool("GENESIS_PN102_BANNER_V8", False):
         _contract_v8_hybrid(ctk, budget)
     elif _env_bool("GENESIS_PN102_BANNER_V7", False):
         _contract_v7_stateanswer(ctk, budget)
@@ -1027,6 +1036,160 @@ async def _pn118_continue(serving: Any, request: Any, result: Any, message: Any,
         return False
 
 
+# ─── PN118 action: adjudicated rerun (Leg 3b, Fable R2) ──────────────────────
+# GENESIS_PN118_ACTION = continue (default, current behaviour) | rerun.
+# rerun does ONE fresh solve of the ORIGINAL request under the v5-shape banner
+# (no poisoned-trace inheritance) and keeps the original answer UNLESS the rerun
+# disagrees AND is the more confident trace (its own c_last, exported by its
+# engine pass via the flush hook). Strictly dominates plain rerun: corruption
+# now needs disagree AND rerun-wrong AND rerun-more-confident. Fail-open at
+# every step to the original response.
+
+_PN118_ANS_RE = re.compile(
+    r"(?:answer|option|choice)\b[^A-Za-z0-9]{0,6}(?:is|:|=|\bis\b)?[^A-Za-z0-9(]{0,4}"
+    r"\(?\s*([A-J])\b",
+    re.IGNORECASE,
+)
+
+
+def _pn118_answer_key(content: str) -> str:
+    """Normalized answer for agreement comparison. Prefer the LAST letter-answer
+    (MCQ final commit); else the whitespace-normalized lowercased content."""
+    if not content:
+        return ""
+    last = None
+    for last in _PN118_ANS_RE.finditer(content):
+        pass
+    if last is not None:
+        return last.group(1).upper()
+    return " ".join(content.lower().split())
+
+
+async def _pn118_conf_wait(join_id: Any) -> dict[str, Any] | None:
+    """Look up the rerun's exported conf entry, retrying ≤ WAIT_S for the
+    engine-side flush to land (the rerun's </think> flush races this read)."""
+    wait_s = _env_float("GENESIS_PN118_RERUN_CONF_WAIT_S", 2.0)
+    deadline = time.monotonic() + max(0.0, wait_s)
+    while True:
+        entry = _pn112_conf_lookup(join_id)
+        if entry and isinstance(entry.get("c_last"), (int, float)):
+            return entry
+        if time.monotonic() >= deadline:
+            return entry
+        await asyncio.sleep(0.2)
+
+
+async def _pn118_rerun(serving: Any, request: Any, result: Any, message: Any,
+                       choice: Any, content: str, spent: int, budget: int,
+                       req_id: Any, signal: float,
+                       c_last_orig: float | None) -> bool:
+    """Adjudicated rerun action. ONE fresh v5-shape solve of the original
+    request; keep the original answer unless the rerun disagrees and its trace
+    is at least as confident. Splice (content + usage fold) on swap; never
+    expose two answers. Any failure returns False (original kept)."""
+    try:
+        req_cls = type(request)
+        fields = getattr(req_cls, "model_fields", {}) or {}
+        rerun_budget = _env_int("GENESIS_PN118_RERUN_BUDGET", 10240)
+        # Fresh solve: ORIGINAL messages (no <think> prefill), v5 banner forced
+        # for this call only. Strip any banner the first pass injected so
+        # maybe_add_answer_hint re-applies v5 (it early-returns on a present
+        # pn_env_banner). Markers suppress PN118/PN101 re-entry.
+        base_ctk = dict(getattr(request, "chat_template_kwargs", None) or {})
+        base_ctk.pop("pn_env_banner", None)
+        base_ctk.pop("pn_env_seed", None)
+        base_ctk["pn102_force_v5"] = True
+        base_ctk[_MARKER_KEY] = True
+        base_ctk[_PN118_MARKER] = True
+        messages = list(getattr(request, "messages", None) or [])
+        kwargs: dict[str, Any] = {
+            "model": getattr(request, "model", None),
+            "messages": messages,
+            "temperature": getattr(request, "temperature", 0.0) or 0.0,
+            "stream": False,
+            "thinking_token_budget": rerun_budget,
+            "chat_template_kwargs": base_ctk,
+        }
+        for sf in ("top_p", "top_k", "min_p", "presence_penalty",
+                   "frequency_penalty", "repetition_penalty", "stop",
+                   "seed", "logit_bias"):
+            if sf in fields:
+                sv = getattr(request, sf, None)
+                if sv is not None:
+                    kwargs[sf] = sv
+        cap_field = (
+            "max_completion_tokens" if "max_completion_tokens" in fields else "max_tokens"
+        )
+        original_cap = _completion_cap(request)
+        kwargs[cap_field] = max(original_cap or 0, rerun_budget + 512)
+        synthetic = req_cls(**kwargs)
+        timeout = _env_int("GENESIS_PN118_TIMEOUT_S", 180)
+        resp = await asyncio.wait_for(
+            serving.create_chat_completion(synthetic, raw_request=None), timeout
+        )
+        rchoice = _extract_choice(resp)
+        rmsg = getattr(rchoice, "message", None) if rchoice else None
+        if rmsg is None:
+            log.info("PN118: rerun returned no choice req=%s — original kept", req_id)
+            return False
+        new_content = (getattr(rmsg, "content", None) or "").strip()
+        if not new_content:
+            log.info("PN118: rerun produced no answer req=%s — original kept", req_id)
+            return False
+
+        # ADJUDICATION. Agree → keep original (cheap, done).
+        if _pn118_answer_key(content) == _pn118_answer_key(new_content):
+            _STATS["pn118_rerun_agree"] = _STATS.get("pn118_rerun_agree", 0) + 1
+            log.info("PN118: rerun AGREES req=%s — original kept (no swap)", req_id)
+            return False
+
+        # Disagree → prefer the rerun only if its trace is >= as confident.
+        rerun_join = _pn118_join_id(synthetic, resp)
+        rerun_entry = await _pn118_conf_wait(rerun_join)
+        c_last_rerun = (rerun_entry or {}).get("c_last")
+        if c_last_orig is None:
+            orig_entry = _pn112_conf_lookup(_pn118_join_id(request, result))
+            c_last_orig = (orig_entry or {}).get("c_last")
+        if not isinstance(c_last_rerun, (int, float)) or \
+                not isinstance(c_last_orig, (int, float)):
+            _STATS["pn118_rerun_confmiss"] = _STATS.get("pn118_rerun_confmiss", 0) + 1
+            log.info("PN118: rerun DISAGREES req=%s but conf lookup missed "
+                     "(orig=%s rerun=%s) — original kept",
+                     req_id, c_last_orig, c_last_rerun)
+            return False
+        if c_last_rerun < c_last_orig:
+            _STATS["pn118_rerun_keep"] = _STATS.get("pn118_rerun_keep", 0) + 1
+            log.info("PN118: rerun DISAGREES req=%s but less confident "
+                     "(c_last rerun=%.3f < orig=%.3f) — original kept",
+                     req_id, c_last_rerun, c_last_orig)
+            return False
+
+        # Swap: rerun disagrees AND is at least as confident.
+        for attr in ("reasoning", "reasoning_content"):
+            if getattr(rmsg, attr, None) is not None:
+                try:
+                    setattr(message, attr, _read_reasoning(rmsg))
+                except Exception:  # pragma: no cover - frozen models
+                    pass
+                break
+        message.content = new_content
+        try:
+            choice.finish_reason = getattr(rchoice, "finish_reason", None) or "stop"
+        except Exception:  # pragma: no cover
+            pass
+        _sum_usage(getattr(result, "usage", None), getattr(resp, "usage", None))
+        _STATS["pn118_fires"] += 1
+        _STATS["pn118_rerun_swap"] = _STATS.get("pn118_rerun_swap", 0) + 1
+        log.info("PN118: rerun SWAP req=%s — rerun more confident "
+                 "(c_last rerun=%.3f >= orig=%.3f, budget=%d)",
+                 req_id, c_last_rerun, c_last_orig, rerun_budget)
+        return True
+    except Exception as exc:
+        _STATS["pn118_errors"] += 1
+        log.warning("PN118: rerun failed req=%s (%s) — original kept", req_id, exc)
+        return False
+
+
 async def _maybe_pn118_closegate(serving: Any, request: Any, result: Any) -> bool:
     """PN118 premature-close gate. Returns True iff a continuation was spliced
     in (enforce mode). Shadow mode logs the would-fire and returns False."""
@@ -1125,6 +1288,11 @@ async def _maybe_pn118_closegate(serving: Any, request: Any, result: Any) -> boo
         return False
 
     _STATS["pn118_attempts"] += 1
+    action = (os.environ.get("GENESIS_PN118_ACTION", "continue")
+              or "continue").strip().lower()
+    if action == "rerun":
+        return await _pn118_rerun(serving, request, result, message, choice,
+                                  content, spent, budget, req_id, signal, c_last)
     return await _pn118_continue(serving, request, result, message, choice,
                                  reasoning, spent, budget, req_id, signal)
 

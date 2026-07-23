@@ -630,6 +630,177 @@ def test_margin_mode_ignores_conf_file():
     check("margin gate did the echo (2 calls)", len(s.calls) == 2, f"{len(s.calls)}")
 
 
+# ─── PN118 adjudicated rerun action (Fable R2) ───────────────────────────────
+# GENESIS_PN118_ACTION = continue (default) | rerun. rerun does ONE fresh
+# v5-shape solve of the original request and keeps the original answer unless
+# the rerun DISAGREES and its own c_last (exported by its engine pass) is >= the
+# original's. gate=cmean so no margin echo — only the rerun self-call fires.
+
+
+class RerunServing:
+    """A single rerun self-call returning a fresh answer with its own id."""
+    def __init__(self, rerun_content, rerun_rid, raise_on_rerun=None):
+        self.rerun_content = rerun_content
+        self.rerun_rid = rerun_rid
+        self.raise_on_rerun = raise_on_rerun
+        self.calls: list = []
+
+    async def create_chat_completion(self, request, raw_request=None):
+        self.calls.append(request)
+        if self.raise_on_rerun:
+            raise self.raise_on_rerun
+        return Result(Message(content=self.rerun_content, reasoning="rerun reasoning"),
+                      "stop", Usage(0, 500), rid=self.rerun_rid)
+
+
+def _rerun_env(mode="enforce"):
+    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN118_MODE"] = mode
+    os.environ["GENESIS_PN118_GATE"] = "cmean"
+    os.environ["GENESIS_PN118_ACTION"] = "rerun"
+    os.environ["GENESIS_PN118_RERUN_CONF_WAIT_S"] = "0"
+
+
+def test_action_default_is_continue():
+    print("\naction default = continue: a cmean fire uses the continuation (not rerun)")
+    reset_env()
+    _cmean_env()  # no ACTION set → continue
+    _write_conf({"chatcmpl-c1": (9.0, 128, 1.0)})
+    s = Serving(cont_content="Actually the answer is C.")
+    res = make_result(content="The answer is B.", spent=1000, rid="chatcmpl-c1")
+    run(s, Request(budget=8000), res)
+    check("fired", ar._STATS["pn118_fires"] == 1, str(ar._STATS))
+    txt = s.calls[-1].messages[-1]["content"]
+    check("continue path: <think> prefill with cue", txt.startswith("<think>")
+          and ar._PN118_DEFAULT_CUE in txt, txt[:40])
+
+
+def test_rerun_request_shape():
+    print("\nrerun: fresh solve — original messages, v5 forced, markers, budget")
+    reset_env()
+    _rerun_env()
+    os.environ["GENESIS_PN118_RERUN_BUDGET"] = "10240"
+    _write_conf({"chatcmpl-o": (9.0, 128, 1.0), "chatcmpl-rr": (12.0, 20, 0.0)})
+    s = RerunServing(rerun_content="Actually the answer is C.", rerun_rid="chatcmpl-rr")
+    res = make_result(content="The answer is B.", spent=1000, rid="chatcmpl-o")
+    run(s, Request(budget=8000), res)
+    syn = s.calls[-1]
+    ctk = syn.chat_template_kwargs
+    check("v5 forced via ctk key", ctk.get("pn102_force_v5") is True, str(ctk))
+    check("PN101 marker carried (no re-entry)", ctk.get("pn101_internal") is True)
+    check("PN118 marker carried (no re-entry)", ctk.get("pn118_internal") is True)
+    check("rerun budget = 10240", syn.thinking_token_budget == 10240,
+          str(syn.thinking_token_budget))
+    check("original messages, NO <think> prefill",
+          all("<think>" not in (m.get("content") or "") for m in syn.messages),
+          str(syn.messages))
+
+
+def test_rerun_agree_keeps_original():
+    print("\nrerun: answers AGREE → keep original (short-circuit, no swap)")
+    reset_env()
+    _rerun_env()
+    _write_conf({"chatcmpl-o": (9.0, 128, 1.0), "chatcmpl-rr": (12.0, 20, 0.0)})
+    s = RerunServing(rerun_content="The answer is B after all.", rerun_rid="chatcmpl-rr")
+    res = make_result(content="The answer is B.", spent=1000, rid="chatcmpl-o")
+    run(s, Request(budget=8000), res)
+    check("no fire on agree", ar._STATS["pn118_fires"] == 0)
+    check("agree counted", ar._STATS.get("pn118_rerun_agree") == 1, str(ar._STATS))
+    check("original answer kept", res.choices[0].message.content == "The answer is B.")
+
+
+def test_rerun_disagree_more_confident_swaps():
+    print("\nrerun: DISAGREE + rerun more confident → SWAP")
+    reset_env()
+    _rerun_env()
+    # orig c_last 9.0, rerun c_last 12.0 (>= orig) → prefer rerun
+    _write_conf({"chatcmpl-o": (9.0, 128, 1.0), "chatcmpl-rr": (12.0, 20, 0.0)})
+    s = RerunServing(rerun_content="Actually the answer is C.", rerun_rid="chatcmpl-rr")
+    res = make_result(content="The answer is B.", spent=1000, rid="chatcmpl-o")
+    run(s, Request(budget=8000), res)
+    check("fired (swap)", ar._STATS["pn118_fires"] == 1, str(ar._STATS))
+    check("swap counted", ar._STATS.get("pn118_rerun_swap") == 1)
+    check("answer replaced with rerun's",
+          res.choices[0].message.content == "Actually the answer is C.")
+
+
+def test_rerun_disagree_less_confident_keeps():
+    print("\nrerun: DISAGREE + rerun less confident → keep original")
+    reset_env()
+    _rerun_env()
+    _write_conf({"chatcmpl-o": (9.0, 128, 1.0), "chatcmpl-rr": (7.0, 20, 0.0)})
+    s = RerunServing(rerun_content="Actually the answer is C.", rerun_rid="chatcmpl-rr")
+    res = make_result(content="The answer is B.", spent=1000, rid="chatcmpl-o")
+    run(s, Request(budget=8000), res)
+    check("no fire when rerun less confident", ar._STATS["pn118_fires"] == 0)
+    check("keep counted", ar._STATS.get("pn118_rerun_keep") == 1, str(ar._STATS))
+    check("original answer kept", res.choices[0].message.content == "The answer is B.")
+
+
+def test_rerun_confmiss_keeps():
+    print("\nrerun: DISAGREE but rerun conf entry missing → keep original")
+    reset_env()
+    _rerun_env()
+    # no entry for chatcmpl-rr → conf lookup miss
+    _write_conf({"chatcmpl-o": (9.0, 128, 1.0)})
+    s = RerunServing(rerun_content="Actually the answer is C.", rerun_rid="chatcmpl-rr")
+    res = make_result(content="The answer is B.", spent=1000, rid="chatcmpl-o")
+    run(s, Request(budget=8000), res)
+    check("no fire on conf miss", ar._STATS["pn118_fires"] == 0)
+    check("confmiss counted", ar._STATS.get("pn118_rerun_confmiss") == 1, str(ar._STATS))
+    check("original answer kept", res.choices[0].message.content == "The answer is B.")
+
+
+def test_rerun_failopen():
+    print("\nrerun: the rerun call raises → fail-open, original kept")
+    reset_env()
+    _rerun_env()
+    _write_conf({"chatcmpl-o": (9.0, 128, 1.0)})
+    s = RerunServing(rerun_content="x", rerun_rid="chatcmpl-rr",
+                     raise_on_rerun=RuntimeError("boom"))
+    res = make_result(content="The answer is B.", spent=1000, rid="chatcmpl-o")
+    run(s, Request(budget=8000), res)
+    check("no fire on raise", ar._STATS["pn118_fires"] == 0)
+    check("error counted", ar._STATS["pn118_errors"] >= 1)
+    check("original answer kept", res.choices[0].message.content == "The answer is B.")
+
+
+def test_rerun_empty_keeps():
+    print("\nrerun: rerun produces no answer → keep original")
+    reset_env()
+    _rerun_env()
+    _write_conf({"chatcmpl-o": (9.0, 128, 1.0)})
+    s = RerunServing(rerun_content="", rerun_rid="chatcmpl-rr")
+    res = make_result(content="The answer is B.", spent=1000, rid="chatcmpl-o")
+    run(s, Request(budget=8000), res)
+    check("no fire on empty rerun", ar._STATS["pn118_fires"] == 0)
+    check("original answer kept", res.choices[0].message.content == "The answer is B.")
+
+
+def test_rerun_shadow_no_call():
+    print("\nrerun action but shadow mode → would-fire logged, NO rerun call")
+    reset_env()
+    _rerun_env(mode="shadow")
+    _write_conf({"chatcmpl-o": (9.0, 128, 1.0)})
+    s = RerunServing(rerun_content="Actually C.", rerun_rid="chatcmpl-rr")
+    res = make_result(content="The answer is B.", spent=1000, rid="chatcmpl-o")
+    run(s, Request(budget=8000), res)
+    check("shadow would-fire recorded", ar._STATS["pn118_shadow_would_fire"] == 1)
+    check("no rerun self-call in shadow", len(s.calls) == 0, str(len(s.calls)))
+    check("original answer kept", res.choices[0].message.content == "The answer is B.")
+
+
+def test_answer_key_extraction():
+    print("\nanswer-key: last letter-answer wins; prose falls back to normalized text")
+    check("letter extracted", ar._pn118_answer_key("So the answer is B.") == "B")
+    check("last letter wins",
+          ar._pn118_answer_key("First A, but actually the answer is D.") == "D")
+    check("prose fallback equality",
+          ar._pn118_answer_key("It is blue.") == ar._pn118_answer_key(" it  IS blue. "))
+    check("different prose differ",
+          ar._pn118_answer_key("blue") != ar._pn118_answer_key("red"))
+
+
 def main():
     for t in (test_margin_read, test_disabled, test_early_weak_fires,
               test_early_confident_no_fire, test_late_no_fire, test_capbound_no_fire,
@@ -643,7 +814,13 @@ def main():
               test_cmean_missing_entry_no_fire, test_cmean_stale_no_fire,
               test_cmean_minn_no_fire, test_cmean_id_normalization,
               test_cmean_missing_file_failopen, test_cmean_shadow_logs_no_fire,
-              test_both_gate_and_semantics, test_margin_mode_ignores_conf_file):
+              test_both_gate_and_semantics, test_margin_mode_ignores_conf_file,
+              test_action_default_is_continue, test_rerun_request_shape,
+              test_rerun_agree_keeps_original,
+              test_rerun_disagree_more_confident_swaps,
+              test_rerun_disagree_less_confident_keeps, test_rerun_confmiss_keeps,
+              test_rerun_failopen, test_rerun_empty_keeps, test_rerun_shadow_no_call,
+              test_answer_key_extraction):
         t()
     print()
     if FAILURES:
