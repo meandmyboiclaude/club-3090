@@ -212,7 +212,9 @@ services:
       - GENESIS_PN112_FLOOR=600
       - GENESIS_PN112_GRACE=64
       - GENESIS_PN112_CONFIRM=1
-      - GENESIS_PN114_CMIN=13.5
+      # CMIN recalibrated 00:25Z from banked answer-channel C: settled
+      # articulations run 11.6-12.8, grind 7.8-11.0 (13.5 was unreachable)
+      - GENESIS_PN114_CMIN=11.3
       - GENESIS_PN100_HIGHSTEP_MULT=1.25
       - GENESIS_PN100_HIGHSTEP_MIN=10
       # Performance

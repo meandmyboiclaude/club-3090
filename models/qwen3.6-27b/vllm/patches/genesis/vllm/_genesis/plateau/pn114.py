@@ -247,20 +247,29 @@ def _close(state: dict[str, Any], st: dict[str, Any], why: str) -> None:
     _STATS["closes"] += 1
     grace = st["cfg"]["grace"]
     think = state.get("think_count", 0)
-    if wrapup_enabled():
-        arm_wrapup(state, st.get("req_id"))
-    else:
+    if not (wrapup_enabled() and arm_wrapup(state, st.get("req_id"))):
+        # bare cut (also the fallback when an end-forcing is already active)
         state["thinking_token_budget"] = think + grace
         state["check_count_down"] = grace
+    # review R7: a committed close must also re-latch PN112's fired flag —
+    # its streak machinery must not re-fire (and re-probe) into the grace
+    # window of a close that is already running.
+    p112 = state.get("_pn112")
+    if isinstance(p112, dict):
+        p112["fired"] = True
     log.info("PN114: CLOSE (%s) at think=%d grace=%d req=%s",
              why, think, grace, st.get("req_id"))
 
 
 def arm_wrapup(state: dict[str, Any], req_id: str | None = None) -> bool:
     """R1b: close the think block through the wrap-up sentence + </think>.
-    Caller (pn112 fire / PN114 stop rule) uses this INSTEAD of a bare cut."""
+    Caller (pn112 fire / PN114 stop rule) uses this INSTEAD of a bare cut.
+    Refuses while an end-forcing is already in flight (arming would mangle
+    a half-emitted </think> sequence) — caller falls back to the bare cut."""
     ids = _ids()
     if not ids or not ids.get("wrapup_close"):
+        return False
+    if state.get("in_end"):
         return False
     _arm(state, ids["wrapup_close"], "wrapup", req_id)
     return True
@@ -315,7 +324,11 @@ def observe_state(state: dict[str, Any], think_start_len: int,
     if _env_bool("GENESIS_PN112_WRAPUP_AT_CAP", False):
         think = state.get("think_count", 0)
         budget = state.get("thinking_token_budget", -1)
-        if (budget > 0 and think >= budget - 512
+        # Guards (review R5): never on top of an active end-forcing, never on
+        # a budget that a cut already shrank to think+grace (that IS a close
+        # in progress — only pre-empt the ORIGINAL grant's guillotine).
+        if (budget > 512 + 64 and think >= budget - 512
+                and not state.get("in_end")
                 and not st.get("wrapup_at_cap_done")):
             st["wrapup_at_cap_done"] = True
             if arm_wrapup(state, req_id):

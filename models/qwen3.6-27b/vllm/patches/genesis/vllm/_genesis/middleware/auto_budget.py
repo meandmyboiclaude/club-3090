@@ -562,6 +562,16 @@ async def apply_hook_async(serving: Any, request: Any) -> None:
         applied = _apply_tier(request, tier, allow_disable)
     if applied > 0 and steps:
         _stash_steps(request, steps)
+    # [2026-07-23 T-sched SJF, DARK — PROD lane only] classify already knows
+    # the expected length; expose it as vLLM's per-request priority (lower =
+    # earlier) so an OPEN-arrival queue schedules short-first. Requires the
+    # server to run --scheduling-policy priority. NO effect on the bench
+    # (closed-loop client keeps the server queue empty — measured 07-23).
+    if _env_bool("GENESIS_PN100_SJF_PRIORITY", False):
+        try:
+            request.priority = int(steps or 8)
+        except Exception:
+            pass
     log.info(
         "PN100: tier=%d -> %s%s (%dms)",
         tier,
