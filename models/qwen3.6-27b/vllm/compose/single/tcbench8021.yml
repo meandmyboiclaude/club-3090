@@ -192,7 +192,11 @@ services:
       - GENESIS_PN100_CONTINUOUS=1
       - GENESIS_PN100_TOK_PER_STEP=260
       - GENESIS_ENABLE_PN108_PLATEAU_CAP=1
-      - GENESIS_PN108_MODE=enforce
+      # [2026-07-23 05:58Z PN108 enforce->SHADOW for the t1.0 re-baseline:
+      # entered via ship-stack config b395669b, never solo-validated, and it
+      # FIRES live (plateau ENFORCE fire in probdraft logs). Baseline rule:
+      # only validated mechanisms in the base; discretionary = shadow/dark.]
+      - GENESIS_PN108_MODE=shadow
       - GENESIS_PN108_GROW=0
       # [2026-07-22 PN112 settled-stop — SHADOW first: logs would-fire + conf
       # checkpoints for TAU calibration; zero behavioral change in shadow]
