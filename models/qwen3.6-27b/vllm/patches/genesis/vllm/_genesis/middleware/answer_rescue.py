@@ -358,9 +358,31 @@ def _contract_v3_sized(ctk: dict, budget: int) -> bool:
             "do not let the budget cut you off. "
         )
         seed_label = "Budget"
+    # [2026-07-23 D2 range-announce, dark] "about N–M steps": the low endpoint
+    # keeps the precise-anchor pull (easy majority unchanged), the high endpoint
+    # is a sanctioned in-anchor landing for deep items — numbers participate in
+    # shallow-layer anchoring where license prose measurably cannot (lit:
+    # tandem/both-anchor; unpublished for step announces). M = ceil(RANGE×N).
+    range_mult = _env_float("GENESIS_PN102_V3_RANGE", 0.0)
+    if range_mult > 1.0:
+        hi = max(steps + 1, math.ceil(steps * range_mult))
+        steps_txt = f"about {steps}–{hi} short reasoning steps"
+    else:
+        steps_txt = f"about {steps} short reasoning steps"
+    # [2026-07-23 ANS-freeze, dark] running answer + structural stability
+    # freeze (lit: Dynasor/ES-CoT/Answer-Convergence family): the re-verify
+    # license exists only while the stated answer is unstable.
+    ans_k = _env_int("GENESIS_PN102_V3_ANS_FREEZE", 0)
+    ans_clause = ""
+    if ans_k >= 2:
+        ans_clause = (
+            f" End every step with 'ANS: <your current answer>'. Once the "
+            f"same answer has ended {ans_k} consecutive steps, it is settled "
+            "— stop reasoning and give it."
+        )
     ctk["pn_env_banner"] = (
-        f"[envelope] Thinking budget: about {steps} short reasoning steps "
-        f"({size_clause}). " + pace_clause + answer_clause
+        f"[envelope] Thinking budget: {steps_txt} "
+        f"({size_clause}). " + pace_clause + answer_clause + ans_clause
     )
     # [2026-07-23 B2-S1/echo-anchor] optional Step-1 restatement opener: makes
     # the model re-echo the ask at Step 1 (Echoes-as-Anchors: a nearby echo
