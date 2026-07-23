@@ -211,11 +211,113 @@ def test_reused_id_new_ts():
         check("ts non-decreasing", d["ts"] >= ts1, f"{d['ts']} vs {ts1}")
 
 
+# ─── new per-request fields (c_trace, c_slope) ───────────────────────────────
+
+
+def test_new_fields_present():
+    print("\nentry carries c_trace + c_slope + n alongside c_last")
+    with tempfile.TemporaryDirectory() as td:
+        path = reset(td, WIN=256, EVERY=4, MAX=128)
+        for _ in range(4):
+            ex.observe("chatcmpl-f", 12.0)
+        e = read_file(path)["chatcmpl-f"]
+        check("c_last present", "c_last" in e)
+        check("c_trace present", "c_trace" in e, str(e))
+        check("c_slope present", "c_slope" in e, str(e))
+        check("n present", e["n"] == 4)
+        check("flat window → c_slope 0", abs(e["c_slope"]) < 1e-6, str(e["c_slope"]))
+        check("cadence entry not marked final", "final" not in e)
+
+
+def test_c_trace_vs_c_last_diverge():
+    print("\nc_trace = whole-trace mean, c_last = rolling-window mean (diverge)")
+    with tempfile.TemporaryDirectory() as td:
+        path = reset(td, WIN=4, EVERY=8, MAX=128)
+        rid = "chatcmpl-t"
+        for _ in range(4):
+            ex.observe(rid, 10.0)
+        for _ in range(4):
+            ex.observe(rid, 20.0)  # 8th → write; window holds last 4 = 20s
+        e = read_file(path)[rid]
+        check("c_last = last-window mean (20.0)", abs(e["c_last"] - 20.0) < 1e-6,
+              str(e["c_last"]))
+        check("c_trace = whole-trace mean (15.0)", abs(e["c_trace"] - 15.0) < 1e-6,
+              str(e["c_trace"]))
+
+
+def test_c_slope_sign():
+    print("\nc_slope = recent-half mean minus older-half mean (rising → positive)")
+    with tempfile.TemporaryDirectory() as td:
+        path = reset(td, WIN=4, EVERY=4, MAX=128)
+        rid = "chatcmpl-s"
+        for v in (10.0, 10.0, 20.0, 20.0):  # window [10,10,20,20]
+            ex.observe(rid, v)
+        e = read_file(path)[rid]
+        check("rising window → c_slope ~= +10", abs(e["c_slope"] - 10.0) < 1e-6,
+              str(e["c_slope"]))
+
+
+# ─── flush-on-close (Fable R1) ───────────────────────────────────────────────
+
+
+def test_flush_writes_below_cadence():
+    print("\nflush: writes final window immediately, even under EVERY cadence")
+    with tempfile.TemporaryDirectory() as td:
+        path = reset(td, WIN=256, EVERY=32, MAX=128)
+        rid = "chatcmpl-flush"
+        for _ in range(10):  # 10 < EVERY=32 → no cadence write yet
+            ex.observe(rid, 9.0)
+        check("no cadence write for short close", not os.path.exists(path))
+        ex.flush(rid)
+        check("flush wrote the file", os.path.exists(path))
+        e = read_file(path)[rid]
+        check("flushed n = 10 (final window)", e["n"] == 10, str(e["n"]))
+        check("flushed c_last = mean (9.0)", abs(e["c_last"] - 9.0) < 1e-6)
+        check("flushed entry marked final", e.get("final") is True, str(e))
+
+
+def test_flush_idempotent():
+    print("\nflush: idempotent — a second flush is inert (window closed)")
+    with tempfile.TemporaryDirectory() as td:
+        path = reset(td, WIN=256, EVERY=1000, MAX=128)
+        rid = "chatcmpl-once"
+        for _ in range(5):
+            ex.observe(rid, 8.0)
+        ex.flush(rid)
+        writes_after_first = ex.get_stats()["writes"]
+        ex.flush(rid)  # window already popped → no-op
+        check("no extra write on 2nd flush",
+              ex.get_stats()["writes"] == writes_after_first, str(ex.get_stats()))
+        check("no errors", ex.get_stats()["errors"] == 0)
+
+
+def test_flush_failopen():
+    print("\nflush: unknown id / None / disabled never raise, never write")
+    with tempfile.TemporaryDirectory() as td:
+        path = reset(td, WIN=256, EVERY=1000, MAX=128)
+        try:
+            ex.flush(None)
+            ex.flush("chatcmpl-never-tracked")
+            raised = False
+        except Exception:
+            raised = True
+        check("flush never raises on miss", not raised)
+        check("no file for miss-only flushes", not os.path.exists(path))
+        # disabled master → flush is inert
+        ex.observe("chatcmpl-d", 9.0)
+        os.environ.pop("GENESIS_ENABLE_PN112_EXPORT", None)
+        ex.flush("chatcmpl-d")
+        check("disabled flush writes nothing", not os.path.exists(path))
+
+
 def main():
     for t in (test_disabled, test_rolling_mean_and_cadence, test_window_bounds_mean,
               test_atomic_single_object, test_rotation_keeps_recent_max,
               test_active_window_lru_evicts, test_failopen_none_inputs,
-              test_failopen_unwritable_path, test_reused_id_new_ts):
+              test_failopen_unwritable_path, test_reused_id_new_ts,
+              test_new_fields_present, test_c_trace_vs_c_last_diverge,
+              test_c_slope_sign, test_flush_writes_below_cadence,
+              test_flush_idempotent, test_flush_failopen):
         t()
     print()
     if FAILURES:

@@ -119,6 +119,21 @@ def observe_state(
     except Exception:
         return
     if tokens is None:
+        # Think block ended (or not yet open). On the FALLING edge — an end
+        # state the seat already sees (in_end / end_thinking set) — flush the
+        # exporter's final window unconditionally (Fable R1): the shortest,
+        # most-premature closes end before one write cadence and would otherwise
+        # export nothing or a stale value, blinding PN118 exactly on its target
+        # class. flush() is idempotent + fail-open; inert unless export enabled.
+        if req_id is not None and (
+            state.get("in_end", False) or state.get("end_thinking", -1) != -1
+        ):
+            try:
+                from vllm._genesis.plateau import pn112_export as _pn112exp
+                if _pn112exp.is_enabled():
+                    _pn112exp.flush(req_id)
+            except Exception:
+                log.warning("PN112 export flush raised; ignored", exc_info=True)
         return
     think_len = len(tokens)
     # PN117 deep-band rescue (2026-07-23): observe the same per-step conf the
