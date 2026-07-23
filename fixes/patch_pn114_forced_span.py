@@ -178,6 +178,66 @@ GRAFTS.append((
 ))
 
 
+# H: P-pen hesitation-marker logit penalty (GENESIS_PPEN_LAMBDA>0; ids from
+# the boot ids file; thinking-phase rows only; spans excluded). FAIR-recipe
+# λ subtract at the raw-logits seat (before temperature). Expectation at
+# W4A16: −5-9% CoT, acc ±2 (headline 12-23% is 3-bit). Pre-registered λ=1.0.
+GRAFTS.append((
+    "# P-pen:",
+    "        # Build the active index / forced-token lists entirely on CPU so we\n",
+    '''        # P-pen: hesitation-marker logit penalty — runtime-gated, dark.
+        try:
+            import os as _ppen_os
+            _ppen_l = float(
+                _ppen_os.environ.get('GENESIS_PPEN_LAMBDA', '0') or 0
+            )
+            if _ppen_l > 0 and self._state:
+                _ppen_ids = getattr(self, '_ppen_ids_t', None)
+                if _ppen_ids is None:
+                    import json as _ppen_json
+                    import torch as _ppen_t
+                    try:
+                        with open('/tmp/genesis_pn114_ids.json') as _ppen_f:
+                            _ppen_lst = _ppen_json.load(_ppen_f).get(
+                                'ppen', []
+                            )
+                    except Exception:
+                        _ppen_lst = []
+                    _ppen_ids = (
+                        _ppen_t.tensor(
+                            _ppen_lst, dtype=_ppen_t.long,
+                            device=logits.device,
+                        )
+                        if _ppen_lst else False
+                    )
+                    self._ppen_ids_t = _ppen_ids
+                if _ppen_ids is not False and len(_ppen_ids) > 0:
+                    for _ppen_si, _ppen_state in self._state.items():
+                        if not _ppen_state.get('in_think'):
+                            continue
+                        if (_ppen_state.get('_pn114') or {}).get('phase'):
+                            continue
+                        _ppen_row = self.cu_num_tokens.get(_ppen_si)
+                        if _ppen_row is None or _ppen_row >= logits.shape[0]:
+                            continue
+                        _ppen_end = min(
+                            self.cu_num_tokens.get(
+                                _ppen_si + 1, logits.shape[0]
+                            ),
+                            logits.shape[0],
+                        )
+                        logits[_ppen_row:_ppen_end, _ppen_ids] -= _ppen_l
+        except Exception:
+            import logging as _ppen_log
+            _ppen_log.getLogger('vllm.genesis.pn114').warning(
+                'P-pen raised', exc_info=True
+            )
+        # Build the active index / forced-token lists entirely on CPU so we
+''',
+    "H P-pen logit penalty",
+))
+
+
 def _apply(marker: str, anchor: str, repl: str, what: str) -> int:
     if not HOLDER.exists():
         print(f"{LOG} FATAL: holder missing: {HOLDER}", flush=True)

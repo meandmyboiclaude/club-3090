@@ -28,9 +28,14 @@ def _on(name):
 
 
 def main() -> int:
+    try:
+        ppen_on = float(os.environ.get("GENESIS_PPEN_LAMBDA", "0") or 0) > 0
+    except ValueError:
+        ppen_on = False
     if not (_on("GENESIS_ENABLE_PN114_PROBE") or _on("GENESIS_PN112_WRAPUP")
-            or _on("GENESIS_PN112_CONFIRM")):
-        print("[pn114_boot_ids] no PN114-family flag set — skipping",
+            or _on("GENESIS_PN112_CONFIRM")
+            or _on("GENESIS_PN112_WRAPUP_AT_CAP") or ppen_on):
+        print("[pn114_boot_ids] no PN114-family/P-pen flag set — skipping",
               flush=True)
         return 0
     try:
@@ -42,8 +47,22 @@ def main() -> int:
         newline = tok.encode("\n", add_special_tokens=False)
         wrap = tok.encode(WRAPUP_STR, add_special_tokens=False)
         end = tok.encode(THINK_END, add_special_tokens=False)
+        # P-pen hesitation markers (single-token only, leading-space + bare +
+        # capitalized variants; 'so'/'So' excluded per pre-registration —
+        # too load-bearing in math prose). Bank = our measured thrash regex
+        # (doom-sep, AUC 0.79-0.95) + FAIR-cited examples.
+        words = ["Wait", "wait", "But", "but", "However", "however",
+                 "Alternatively", "alternatively", "Hmm", "hmm",
+                 "Actually", "actually", "Instead", "instead",
+                 "Reconsider", "reconsider", "Alternately"]
+        ppen: list[int] = []
+        for w in words:
+            for form in (w, " " + w):
+                t = tok.encode(form, add_special_tokens=False)
+                if len(t) == 1 and t[0] not in ppen:
+                    ppen.append(t[0])
         ids = {"probe": probe, "newline": newline,
-               "wrapup_close": wrap + end}
+               "wrapup_close": wrap + end, "ppen": ppen}
         with open(OUT, "w") as f:
             json.dump(ids, f)
         print(f"[pn114_boot_ids] wrote {OUT}: probe={len(probe)} "

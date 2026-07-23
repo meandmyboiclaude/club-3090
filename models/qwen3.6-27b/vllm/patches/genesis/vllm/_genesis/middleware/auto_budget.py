@@ -288,7 +288,8 @@ def _skip_classify_by_length(request: Any) -> bool:
     return _prompt_chars(request) > limit
 
 
-async def _classify(serving: Any, request: Any) -> tuple[int, int | None] | None:
+async def _classify(serving: Any, request: Any,
+                    temperature: float = 0.0) -> tuple[int, int | None] | None:
     """One thinking-off self-call -> (tier, steps|None), or None on failure."""
     req_cls = type(request)
     fields = getattr(req_cls, "model_fields", {}) or {}
@@ -303,7 +304,7 @@ async def _classify(serving: Any, request: Any) -> tuple[int, int | None] | None
             {"role": "system", "content": rubric},
             {"role": "user", "content": _flatten_messages(request)},
         ],
-        "temperature": 0.0,
+        "temperature": temperature,
         "stream": False,
         "chat_template_kwargs": {"enable_thinking": False, _MARKER_KEY: True},
     }
@@ -427,6 +428,19 @@ def _apply_budget(request: Any, budget: int) -> int:
     ctk["enable_thinking"] = True
     request.chat_template_kwargs = ctk
     request.thinking_token_budget = budget
+    # [2026-07-23 total-completion ceiling, DARK] the answer channel is
+    # unbounded, and capped-think grinders relocate their burn there (measured:
+    # every atok>=1500 trace had capped think; 115/127 ran 8.4K answer tokens).
+    # F x budget + slack bounds TOTAL completion; answers stay readable
+    # (slack >= 1024) while the relocation grind is contained. GPQA-measured
+    # cost: F=2.0 cuts one correct grinder (~-1 acc) for ~-2s.
+    tc_f = _env_float("GENESIS_PN100_TOTAL_CEIL_F", 0.0)
+    if tc_f > 0:
+        slack = _env_int("GENESIS_PN100_TOTAL_CEIL_SLACK", 1024)
+        ceil_total = int(budget * tc_f) + slack
+        cur = getattr(request, "max_tokens", None)
+        if cur is None or cur > ceil_total:
+            request.max_tokens = ceil_total
     return budget
 
 
@@ -490,9 +504,44 @@ async def apply_hook_async(serving: Any, request: Any) -> None:
     tier = None
     steps = None
     try:
-        verdict = await _classify(serving, request)
-        if verdict is not None:
-            tier, steps = verdict
+        # [2026-07-23 P-decode resample, DARK] GENESIS_PN100_RESAMPLE_N>1:
+        # N concurrent classify calls (1 at temp 0 + N-1 at 0.7); steps =
+        # rounded mean, tier = max (safety), and the SPREAD becomes the real
+        # confidence signal (spread > 40% of mean -> conf 'l', feeding
+        # LOWCONF_MULT) — replaces the dead verbalized h/l flag. De-quantizes
+        # the estimator at decode time without touching the frozen rubric.
+        n = _env_int("GENESIS_PN100_RESAMPLE_N", 1)
+        if n > 1:
+            # MODEL temperature for the diversity calls. Default = our
+            # verified-clean serving temp 0.6; the card's native
+            # recommendation is 1.0 (documented high reasoning variability
+            # there — for a 12-token structured reply 0.6 keeps parse
+            # compliance while still spreading step estimates).
+            rt = _env_float("GENESIS_PN100_RESAMPLE_TEMP", 0.6)
+            calls = [_classify(serving, request)]
+            calls += [_classify(serving, request, temperature=rt)
+                      for _ in range(n - 1)]
+            results = await asyncio.gather(*calls, return_exceptions=True)
+            oks = [r for r in results
+                   if isinstance(r, tuple) and r[0] is not None]
+            if oks:
+                tier = max(t for t, _ in oks)
+                svals = [s for _, s in oks if s]
+                if svals:
+                    steps = int(round(sum(svals) / len(svals)))
+                    spread = max(svals) - min(svals)
+                    _LAST_CONF["v"] = (
+                        "l" if spread > 0.4 * max(1, steps) else "h"
+                    )
+                    log.info(
+                        "PN100: resample n=%d steps=%s -> %d spread=%d "
+                        "conf=%s", len(oks), svals, steps, spread,
+                        _LAST_CONF["v"],
+                    )
+        else:
+            verdict = await _classify(serving, request)
+            if verdict is not None:
+                tier, steps = verdict
     except Exception as exc:  # timeout, engine error, schema drift
         log.warning("PN100: classify failed (%s) — falling back", exc)
         _STATS["errors"] += 1

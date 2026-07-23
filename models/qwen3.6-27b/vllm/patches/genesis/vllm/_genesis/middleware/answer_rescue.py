@@ -458,6 +458,34 @@ async def _maybe_escalate(serving: Any, request: Any, result: Any) -> bool:
         return False
 
     _STATS["escalations_attempted"] += 1
+    # [2026-07-23 P-esc novelty gate, DARK] ledger 8G: re-grinding a PLATEAUED
+    # trace wastes tokens and can hurt (trace review: heavy late second-
+    # guessing regresses as often as it rescues). Text-side proxy for the
+    # engine's novelty signal: new-trigram fraction of the reasoning TAIL vs
+    # the body. Low tail novelty = the trace was looping when guillotined ->
+    # return the forced answer instead of extending. Fail-open on any error.
+    if _env_bool("GENESIS_PN101_NOVELTY_GATE", False):
+        try:
+            words = reasoning.split()
+            if len(words) > 900:
+                tail, body = words[-400:], words[:-400]
+                seen = {tuple(body[i:i + 3]) for i in range(len(body) - 2)}
+                fresh = sum(1 for i in range(len(tail) - 2)
+                            if tuple(tail[i:i + 3]) not in seen)
+                frac = fresh / max(1, len(tail) - 2)
+                try:
+                    thr = float(os.environ.get(
+                        "GENESIS_PN101_NOVELTY_MIN", "") or 0.35)
+                except ValueError:
+                    thr = 0.35
+                if frac < thr:
+                    log.info(
+                        "PN101: escalation skipped — tail novelty %.2f < %.2f "
+                        "(plateaued; re-grind refused)", frac, thr,
+                    )
+                    return False
+        except Exception:
+            pass
     # [2026-07-22 grow-aware] escalation is a TOP-UP to a shared total-thinking
     # ceiling, never a fresh full budget stacked on grown spend (USER: no 2x).
     # A request that already thought >= the ceiling (a grown-to-ceiling rambler

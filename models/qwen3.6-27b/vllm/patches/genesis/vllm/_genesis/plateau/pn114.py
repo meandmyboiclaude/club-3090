@@ -72,7 +72,8 @@ def confirm_enabled() -> bool:
 
 
 def any_enabled() -> bool:
-    return probes_enabled() or wrapup_enabled() or confirm_enabled()
+    return (probes_enabled() or wrapup_enabled() or confirm_enabled()
+            or _env_bool("GENESIS_PN112_WRAPUP_AT_CAP", False))
 
 
 def _ids() -> dict[str, list[int]] | None:
@@ -306,6 +307,21 @@ def observe_state(state: dict[str, Any], think_start_len: int,
         return
     if phase:
         return  # force in flight; nothing to do at observe seat
+    # P-cap (2026-07-23, GENESIS_PN112_WRAPUP_AT_CAP=1): a deep STILL-WORKING
+    # request about to hit the hard budget guillotine closes through the
+    # wrap-up sentence instead (targets the class PN112 never touches; the
+    # trace review says the answer body usually finishes the job — this
+    # measures whether a soft landing cuts the relocation cost).
+    if _env_bool("GENESIS_PN112_WRAPUP_AT_CAP", False):
+        think = state.get("think_count", 0)
+        budget = state.get("thinking_token_budget", -1)
+        if (budget > 0 and think >= budget - 512
+                and not st.get("wrapup_at_cap_done")):
+            st["wrapup_at_cap_done"] = True
+            if arm_wrapup(state, req_id):
+                log.info("PN114: wrapup-at-cap armed at think=%d budget=%d "
+                         "req=%s", think, budget, req_id)
+                return
     if not probes_enabled():
         return
     think = state.get("think_count", 0)
