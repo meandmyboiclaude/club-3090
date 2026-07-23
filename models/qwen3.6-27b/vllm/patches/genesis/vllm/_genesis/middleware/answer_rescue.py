@@ -1148,6 +1148,32 @@ async def _pn118_rerun(serving: Any, request: Any, result: Any, message: Any,
             log.info("PN118: rerun AGREES req=%s — original kept (no swap)", req_id)
             return False
 
+        # [2026-07-23 R1 fold] On GPQA-class MCQ, confidence-comparing two
+        # DISAGREEING answers is a measured coin flip (arXiv 2607.17531:
+        # 10/10 split; every training-free selector net-negative). Our case
+        # is asymmetric — the rerun is the STRONGER config on a wrong-enriched
+        # pool — so the default rule is rerun-wins-on-disagree. The
+        # confidence-compare survives behind GENESIS_PN118_ADJUDICATE=confidence.
+        if os.environ.get("GENESIS_PN118_ADJUDICATE", "rerun_wins").strip() \
+                != "confidence":
+            log.info("PN118: rerun DISAGREES req=%s — rerun wins (asymmetric "
+                     "escalation, R1 rule)", req_id)
+            for attr in ("reasoning", "reasoning_content"):
+                if getattr(rmsg, attr, None) is not None:
+                    try:
+                        setattr(message, attr, _read_reasoning(rmsg))
+                    except Exception:  # pragma: no cover - frozen models
+                        pass
+                    break
+            message.content = new_content
+            try:
+                choice.finish_reason = getattr(rchoice, "finish_reason", None) or "stop"
+            except Exception:  # pragma: no cover
+                pass
+            _sum_usage(getattr(result, "usage", None), getattr(resp, "usage", None))
+            _STATS["pn118_rerun_swap"] = _STATS.get("pn118_rerun_swap", 0) + 1
+            return True
+
         # Disagree → prefer the rerun only if its trace is >= as confident.
         rerun_join = _pn118_join_id(synthetic, resp)
         rerun_entry = await _pn118_conf_wait(rerun_join)

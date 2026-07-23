@@ -712,6 +712,7 @@ def test_rerun_agree_keeps_original():
 def test_rerun_disagree_more_confident_swaps():
     print("\nrerun: DISAGREE + rerun more confident → SWAP")
     reset_env()
+    os.environ["GENESIS_PN118_ADJUDICATE"] = "confidence"
     _rerun_env()
     # orig c_last 9.0, rerun c_last 12.0 (>= orig) → prefer rerun
     _write_conf({"chatcmpl-o": (9.0, 128, 1.0), "chatcmpl-rr": (12.0, 20, 0.0)})
@@ -727,6 +728,7 @@ def test_rerun_disagree_more_confident_swaps():
 def test_rerun_disagree_less_confident_keeps():
     print("\nrerun: DISAGREE + rerun less confident → keep original")
     reset_env()
+    os.environ["GENESIS_PN118_ADJUDICATE"] = "confidence"
     _rerun_env()
     _write_conf({"chatcmpl-o": (9.0, 128, 1.0), "chatcmpl-rr": (7.0, 20, 0.0)})
     s = RerunServing(rerun_content="Actually the answer is C.", rerun_rid="chatcmpl-rr")
@@ -740,6 +742,7 @@ def test_rerun_disagree_less_confident_keeps():
 def test_rerun_confmiss_keeps():
     print("\nrerun: DISAGREE but rerun conf entry missing → keep original")
     reset_env()
+    os.environ["GENESIS_PN118_ADJUDICATE"] = "confidence"
     _rerun_env()
     # no entry for chatcmpl-rr → conf lookup miss
     _write_conf({"chatcmpl-o": (9.0, 128, 1.0)})
@@ -831,3 +834,17 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def test_rerun_disagree_default_rerun_wins():
+    print("\nrerun disagree: default rule = rerun wins (R1 asymmetric escalation)")
+    reset_env()
+    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN118_MODE"] = "enforce"
+    os.environ["GENESIS_PN118_ACTION"] = "rerun"
+    s1 = Serving(margin_letters=WEAK, rerun_content="The answer is (C).")
+    res = make_result(spent=500, content="The answer is (B).")
+    fired = run(s1, Request(budget=3000), res)
+    check("swap happened without any conf lookup",
+          "(C)" in (res.choices[0].message.content or ""),
+          str(res.choices[0].message.content)[:60])
