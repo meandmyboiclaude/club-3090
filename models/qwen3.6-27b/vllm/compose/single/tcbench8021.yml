@@ -218,6 +218,14 @@ services:
       - GENESIS_PN112_GRACE=64
       - GENESIS_PN100_HIGHSTEP_MULT=1.25
       - GENESIS_PN100_HIGHSTEP_MIN=10
+      # [2026-07-23 GATE-2 RE-SCREEN boot — the first GENUINE probe screen:
+      # prior "depth" probes never armed mid-think (BUG-120 frozen
+      # think_count) and ran on unsound spans (ultra-review #2). Both fixed
+      # (f128712f + e15fc188). Shadow = would-close logging only; fresh
+      # letter-conf calibration (old CMIN values are stale by design change).]
+      - GENESIS_ENABLE_PN114_PROBE=1
+      - GENESIS_PN114_MODE=shadow
+      - GENESIS_PN114_DEPTHS=800,1200,1600,2000,2400,2800,3200,4000
       # Performance
       - GENESIS_ENABLE_P40=1
       - GENESIS_ENABLE_P82=1
