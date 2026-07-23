@@ -341,7 +341,10 @@ async def _classify(serving: Any, request: Any,
         _LAST_CONF["v"] = m.group(3) if m else "h"
         tier = int(hit.group(1))
         steps = max(0, min(120, int(hit.group(2))))
-        if projn:
+        # menu gate: the posterior read is only calibrated for the GPQA-band
+        # step menu; off-menu sampled values (0,1,2,6,...) make the digit
+        # read ambiguous ("2" = two or twenty-five) — fall back to sampled.
+        if projn and steps in (3, 4, 5, 8, 12, 15, 25):
             try:
                 proj = _projected_steps(choices[0])
                 if proj is not None:
