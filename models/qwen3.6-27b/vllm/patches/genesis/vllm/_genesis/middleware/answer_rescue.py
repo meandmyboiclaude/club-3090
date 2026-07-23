@@ -882,6 +882,15 @@ def _pn112_conf_lookup(join_id: Any) -> dict[str, Any] | None:
             if _normalize_req_id(k) == key:
                 entry = v
                 break
+    if entry is None:
+        # [2026-07-23 live canary] the engine appends an 8-hex internal suffix
+        # ("chatcmpl-<uuid>-<8hex>") that is NOT the integer sample index —
+        # prefix-match against the serving id (file holds ≤128 keys).
+        pref = key + "-"
+        for k, v in data.items():
+            if k.startswith(pref) or _normalize_req_id(k).startswith(pref):
+                entry = v
+                break
     return entry if isinstance(entry, dict) else None
 
 
