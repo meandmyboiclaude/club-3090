@@ -941,7 +941,12 @@ async def _pn118_continue(serving: Any, request: Any, result: Any, message: Any,
         cue = os.environ.get("GENESIS_PN118_CUE", "").strip() or _PN118_DEFAULT_CUE
         min_c = _env_int("GENESIS_PN118_MIN_CONT", 512)
         max_c = _env_int("GENESIS_PN118_MAX_CONT", 6144)
-        cont_budget = max(min_c, min(max_c, budget - spent))
+        # [REVIEW C1 2026-07-23] the prefilled reasoning is RE-CHARGED against
+        # the continuation's budget by the engine (same double-subtraction the
+        # PN101 escalate leg fixed, ultra-review #4): pass spent + room as the
+        # TOTAL so the continuation actually has `room` tokens of new thinking.
+        room = max(min_c, min(max_c, budget - spent))
+        cont_budget = spent + room
         # Resume INSIDE the think region: original think content WITHOUT
         # </think> + the own-voice cue, ending mid-flow so the model continues
         # reasoning (never anything resembling </think>; s12-P17: first-person
