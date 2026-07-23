@@ -24,6 +24,25 @@ PROBE_STR = "\nMy current answer: ("
 WRAPUP_STR = "\nConsidering the limited time, I'll provide the final answer now.\n"
 THINK_END = "</think>"
 
+# PN117 deep-band rescue arm texts (plan 2.3, s12-P17). First-person own-voice
+# continuations injected as REAL tokens at a sentence boundary — NEVER a numeric
+# banner, NEVER a bracketed note, NEVER anything resembling </think>. Tokenized
+# WITH a leading space so they attach as a natural continuation after a
+# sentence-end token. Arms 1-3 VERBATIM from plan 2.3; arm 5 = converge cue.
+PN117_ARMS = {
+    "arm1": " Well — I actually have plenty of room to work this properly, so "
+            "let me slow down and go through the remaining cases carefully.",
+    "arm2": " Well, let me check — I'm only about a fifth of the way through my "
+            "budget, so there's plenty left; let me keep working the remaining "
+            "cases.",
+    "arm3": " Well, let me keep going…",
+    "arm5": " Alright — I have a decent picture now; let me pull this together "
+            "and settle on the answer that fits best.",
+}
+# Tokens that mark a clean sentence boundary (the previous landed token id must
+# be one of these for PN117 to inject). Bare + newline-suffixed variants.
+PN117_SENTENCE_STRS = (".", "\n", "?", "!", ".\n", "?\n", "!\n")
+
 
 def _on(name):
     return (os.environ.get(name, "").strip().lower()
@@ -37,9 +56,10 @@ def main() -> int:
         ppen_on = False
     if not (_on("GENESIS_ENABLE_PN114_PROBE") or _on("GENESIS_PN112_WRAPUP")
             or _on("GENESIS_PN112_CONFIRM")
-            or _on("GENESIS_PN112_WRAPUP_AT_CAP") or ppen_on):
-        print("[pn114_boot_ids] no PN114-family/P-pen flag set — skipping",
-              flush=True)
+            or _on("GENESIS_PN112_WRAPUP_AT_CAP") or ppen_on
+            or _on("GENESIS_ENABLE_PN117_RESCUE")):
+        print("[pn114_boot_ids] no PN114-family/P-pen/PN117 flag set — "
+              "skipping", flush=True)
         return 0
     try:
         from transformers import AutoTokenizer
@@ -68,11 +88,32 @@ def main() -> int:
         ids = {"probe": probe, "newline": newline,
                "close_paren": close_paren,
                "wrapup_close": wrap + end, "ppen": ppen}
+        # PN117 arm texts + sentence-end id set (only when PN117 is enabled).
+        if _on("GENESIS_ENABLE_PN117_RESCUE"):
+            for _k, _s in PN117_ARMS.items():
+                _t = tok.encode(_s, add_special_tokens=False)
+                # never inject anything that resembles </think>: hard guard.
+                if any(_e in _t for _e in end):
+                    print(f"[pn114_boot_ids] WARN: {_k} contains a think-end "
+                          f"id — dropping", flush=True)
+                    continue
+                ids[_k] = _t
+            send: list[int] = []
+            for _s in PN117_SENTENCE_STRS:
+                _t = tok.encode(_s, add_special_tokens=False)
+                # a sentence-end marker is the LAST landed token; take the
+                # trailing token of each rendering (covers ".", ".\n", etc.).
+                if _t and _t[-1] not in send:
+                    send.append(_t[-1])
+            ids["sentence_end"] = send
         with open(OUT, "w") as f:
             json.dump(ids, f)
+        _p117 = (f" pn117_arms={sum(1 for k in ids if k.startswith('arm'))}"
+                 f" sentence_end={len(ids.get('sentence_end', []))}"
+                 if _on("GENESIS_ENABLE_PN117_RESCUE") else "")
         print(f"[pn114_boot_ids] wrote {OUT}: probe={len(probe)} "
-              f"newline={len(newline)} wrapup_close={len(ids['wrapup_close'])}",
-              flush=True)
+              f"newline={len(newline)} wrapup_close={len(ids['wrapup_close'])}"
+              f"{_p117}", flush=True)
         return 0
     except Exception as exc:  # fail-open
         print(f"[pn114_boot_ids] WARN: {type(exc).__name__}: {exc} — "
