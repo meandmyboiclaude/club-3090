@@ -810,7 +810,8 @@ services:
       # acc deltas = resampling noise (lossless confirmed). REVERTED to greedy
       # for banked-run RNG-path comparability; keep probabilistic as a prod
       # option for any t1.0 serving config.]
-      - '{"method":"mtp","num_speculative_tokens":3}'
+      # [06:26Z USER: t1.0 stack everywhere — probdraft ON for the method sweep.]
+      - '{"method":"mtp","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}'
       - --config
       - /config/cache-override.yaml
       - --host
