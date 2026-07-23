@@ -214,6 +214,11 @@ def _decide_mode(request: Any) -> tuple[str, bool]:
     explicit_thinking = ctk.get("enable_thinking", None)
 
     if control is not None:
+        # [2026-07-23 ultra-review #10] JSON `true` is an int subtype and >0
+        # -> str(True) -> int("True") ValueError -> whole hook failed open
+        # SILENTLY with the client's control key already popped. Bools first.
+        if control is True:
+            control = "auto"
         if control in ("off", "0", 0, False):
             return "skip", True
         if isinstance(control, int) and control > 0:

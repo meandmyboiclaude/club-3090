@@ -242,6 +242,15 @@ def observe_state(
     (07-22: index->req_id map handed over at the sync_batch call site) so
     telemetry joins to per-request outcomes.
     """
+    # [2026-07-23 ultra-review #8] pause during PN114 forced spans/probe
+    # windows: a cap fired mid-span was silently erased by the span's budget
+    # restore, latching _applied with no cap in place.
+    try:
+        from vllm._genesis.plateau import pn114 as _pn114g
+        if _pn114g.phase_active(state):
+            return
+    except ImportError:
+        pass
     if not is_enabled():
         return
     if state.get("thinking_token_budget", -1) <= 0:

@@ -117,9 +117,13 @@ REPLACEMENTS = [
 
 
 def main():
+    # [2026-07-23 ultra-review #15] this is a CRASH-CLASS protection (compose
+    # marks it Required for cudagraph stability on TQ3+MTP; PN353B was dropped
+    # BECAUSE pn79 covers it). Anchor drift must be LOUD like pn86/pn95 —
+    # a silent skip boots green and dies hours later with a device-side assert.
     if not TARGET.exists():
-        print(f"{LOG} SKIP: {TARGET} not present; no-op.", file=sys.stderr)
-        return
+        print(f"{LOG} FATAL: {TARGET} not present.", file=sys.stderr)
+        sys.exit(1)
     text = TARGET.read_text()
     if MARKER in text:
         print(f"{LOG} already applied")
@@ -127,11 +131,12 @@ def main():
     for name, old, _new in REPLACEMENTS:
         if old not in text:
             print(
-                f"{LOG} SKIP: anchor '{name}' not found in {TARGET.name} — TQ backend shape "
-                f"changed (vLLM bumped?); re-anchor before relying on this fix. No-op.",
+                f"{LOG} FATAL: anchor '{name}' not found in {TARGET.name} — TQ backend "
+                f"shape changed (vLLM bumped?); re-anchor before booting: this patch "
+                f"guards a cudagraph crash class.",
                 file=sys.stderr,
             )
-            return
+            sys.exit(1)
     for _name, old, new in REPLACEMENTS:
         text = text.replace(old, new, 1)
     TARGET.write_text(text)

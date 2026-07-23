@@ -512,14 +512,31 @@ async def _maybe_escalate(serving: Any, request: Any, result: Any) -> bool:
         partial = "<think>\n" + reasoning.strip()
         messages = list(getattr(request, "messages", None) or [])
         messages.append({"role": "assistant", "content": partial})
+        # [2026-07-23 ultra-review #4] the engine's continue_thinking init
+        # charges the prompt-resident reasoning against the budget already —
+        # passing (ceil - prior) double-subtracted prior think and made prod
+        # escalation (grants == ceil) a permanent no-op. Pass the TOTAL
+        # ceiling; the engine performs the single subtraction.
+        # [ultra-review #9] carry the client's sampling params — the
+        # continuation used to silently run at default top_p/top_k/etc.
         kwargs: dict[str, Any] = {
             "model": getattr(request, "model", None),
             "messages": messages,
             "temperature": getattr(request, "temperature", 0.0) or 0.0,
             "stream": False,
-            "thinking_token_budget": budget,
-            "chat_template_kwargs": {_MARKER_KEY: True},
+            "thinking_token_budget": total_ceil,
+            "chat_template_kwargs": dict(
+                getattr(request, "chat_template_kwargs", None) or {},
+                **{_MARKER_KEY: True},
+            ),
         }
+        for sf in ("top_p", "top_k", "min_p", "presence_penalty",
+                   "frequency_penalty", "repetition_penalty", "stop",
+                   "seed", "logit_bias"):
+            if sf in fields:
+                sv = getattr(request, sf, None)
+                if sv is not None:
+                    kwargs[sf] = sv
         cap_field = (
             "max_completion_tokens" if "max_completion_tokens" in fields else "max_tokens"
         )
@@ -562,7 +579,15 @@ async def _maybe_escalate(serving: Any, request: Any, result: Any) -> bool:
             except Exception:  # pragma: no cover
                 pass
         _sum_usage(getattr(result, "usage", None), getattr(resp, "usage", None))
-        _STATS["escalations_succeeded"] += 1
+        # [2026-07-23 ultra-review #9] success = an ANSWER was delivered;
+        # reasoning-only continuations are handed to the repair leg, not
+        # counted as escalation wins.
+        if new_content:
+            _STATS["escalations_succeeded"] += 1
+        else:
+            _STATS["escalations_reasoning_only"] = (
+                _STATS.get("escalations_reasoning_only", 0) + 1
+            )
         log.info(
             "PN101: escalated starved request (prior_rtok~%d, +%d budget, answer=%s)",
             len(reasoning) // 4, budget, "yes" if new_content else "no",

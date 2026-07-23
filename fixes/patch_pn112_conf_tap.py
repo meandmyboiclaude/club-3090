@@ -67,6 +67,7 @@ REPLACEMENT_A = (
     "                    _pn112_conf[_pn112_si] = sum(_pn112_rows) / len(_pn112_rows)\n"
     "                self._genesis_pn112_conf = _pn112_conf\n"
     "        except Exception:\n"
+    "            self._genesis_pn112_conf = {}\n"
     "            import logging as _pn112_alog\n"
     "            _pn112_alog.getLogger(\n"
     "                'genesis.plateau.pn112'\n"

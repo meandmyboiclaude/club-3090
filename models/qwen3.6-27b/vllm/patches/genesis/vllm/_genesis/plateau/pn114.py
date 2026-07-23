@@ -110,10 +110,13 @@ def _cfg() -> dict[str, Any]:
 
 def _st(state: dict[str, Any]) -> dict[str, Any]:
     st = state.get(_STATE_KEY)
-    if st is None:
-        st = {"phase": None, "done_depths": [], "probes": [], "cfg": _cfg(),
-              "saved_budget": None, "reason": None, "confirm_cooldown": 0,
-              "free_start": 0, "free_confs": []}
+    basis = state.get("start_thinking", -1)
+    # ultra-review #13: reset per think block like pn108/pn112 — stale
+    # done_depths/probes/cooldown silently disabled block 2+.
+    if st is None or st.get("basis") != basis:
+        st = {"basis": basis, "phase": None, "done_depths": [], "probes": [],
+              "cfg": _cfg(), "saved_budget": None, "reason": None,
+              "confirm_cooldown": 0, "free_start": 0, "free_confs": []}
         state[_STATE_KEY] = st
     return st
 
@@ -134,7 +137,12 @@ def _arm(state: dict[str, Any], seq: list[int], phase: str,
         st["saved_budget"] = state.get("thinking_token_budget", -1)
         # keep the budget trigger far away while the span runs
         state["thinking_token_budget"] = 10_000_000
-    state["force_seq"] = list(seq)
+    # ultra-review #5: the holder's in_end walk increments end_count BEFORE
+    # the first apply, so index 0 was never forced (probe lost its leading
+    # newline; ")\n" close forced only "\n"). Prepend a sacrificial copy of
+    # the first token: the pre-increment consumes it and the real sequence
+    # forces intact. (consumed accounting compensated at the probe finish.)
+    state["force_seq"] = [seq[0]] + list(seq)
     state["in_think"] = False
     state["in_end"] = True
     state["end_count"] = 0
@@ -149,7 +157,11 @@ def _resume_thinking(state: dict[str, Any], consumed: int) -> None:
     st = _st(state)
     saved = st.get("saved_budget")
     if saved is not None and saved > 0:
-        state["thinking_token_budget"] = saved + consumed
+        # min() belt-and-braces (#8): if a detector shrank the budget while
+        # the span ran (should be paused, but fail-safe), keep the smaller.
+        cur = state.get("thinking_token_budget", saved)
+        base = saved if cur >= 1_000_000 else min(saved, cur)
+        state["thinking_token_budget"] = base + consumed
     st["saved_budget"] = None
     state["in_end"] = False
     state["in_think"] = True
@@ -182,7 +194,8 @@ def on_force_complete(state: dict[str, Any]) -> bool:
     if phase == "probe_nl":
         ids = _ids() or {}
         consumed = (len(ids.get("probe", [])) + st["cfg"]["free_len"]
-                    + len(ids.get("close_paren") or ids.get("newline", [1])))
+                    + len(ids.get("close_paren") or ids.get("newline", [1]))
+                    + 2)  # the two sacrificial first-tokens (#5 fix)
         st["phase"] = None
         state["force_seq"] = None
         _finish_probe(state, st, consumed)
@@ -206,7 +219,9 @@ def _finish_probe(state: dict[str, Any], st: dict[str, Any],
     letter = out[st["free_start"]] if st["free_start"] < len(out) else None
     conf = (sum(st["free_confs"]) / len(st["free_confs"])
             if st["free_confs"] else 0.0)
-    st["probes"].append({"letter": letter, "conf": round(conf, 3)})
+    st["probes"].append({"letter": letter, "conf": round(conf, 3),
+                         "family": "confirm" if st.get("reason") == "confirm"
+                         else "depth"})
     _STATS["probes"] += 1
     _resume_thinking(state, consumed)
     cfg = st["cfg"]
@@ -219,7 +234,8 @@ def _finish_probe(state: dict[str, Any], st: dict[str, Any],
         # R5: confident articulated answer -> commit PN112's deferred cut
         if letter is not None and conf >= cfg["cmin"]:
             _STATS["confirm_ok"] += 1
-            _close(state, st, "confirm")
+            _close(state, st, "confirm",
+                   grace=_env_int("GENESIS_PN112_GRACE", 64))
         else:
             _STATS["confirm_cancel"] += 1
             st["confirm_cooldown"] = state.get("think_count", 0) + 512
@@ -232,7 +248,9 @@ def _finish_probe(state: dict[str, Any], st: dict[str, Any],
         return
     # fixed-depth path: stability stop rule
     k = cfg["stable_k"]
-    ps = st["probes"]
+    # ultra-review #12: stability judged on depth-family probes only —
+    # confirm probes at fire points contaminated the window.
+    ps = [p for p in st["probes"] if p.get("family") != "confirm"]
     if (len(ps) >= k
             and len({p["letter"] for p in ps[-k:]}) == 1
             and ps[-1]["letter"] is not None
@@ -244,9 +262,13 @@ def _finish_probe(state: dict[str, Any], st: dict[str, Any],
                      k, ps[-1]["letter"], req)
 
 
-def _close(state: dict[str, Any], st: dict[str, Any], why: str) -> None:
+def _close(state: dict[str, Any], st: dict[str, Any], why: str,
+           grace: int | None = None) -> None:
     _STATS["closes"] += 1
-    grace = st["cfg"]["grace"]
+    # ultra-review #6: confirm-committed cuts belong to PN112's config —
+    # its grace (64), not PN114's probe grace (384, the killed regression).
+    if grace is None:
+        grace = st["cfg"]["grace"]
     think = state.get("think_count", 0)
     if not (wrapup_enabled() and arm_wrapup(state, st.get("req_id"))):
         # bare cut (also the fallback when an end-forcing is already active)
@@ -285,6 +307,10 @@ def request_confirm(state: dict[str, Any], req_id: str | None = None) -> bool:
     st = _st(state)
     if st.get("phase"):
         return True  # already probing
+    # ultra-review #3: never arm onto an active/imminent close — the probe
+    # would land AFTER </think>, in the visible answer.
+    if state.get("in_end") or not state.get("in_think", True):
+        return True  # close in flight; treat as handled (no cut, no probe)
     if state.get("think_count", 0) < st.get("confirm_cooldown", 0):
         return True  # cooling down; treat as handled (no cut)
     st["reason"] = "confirm"
@@ -341,6 +367,13 @@ def observe_state(state: dict[str, Any], think_start_len: int,
     if not probes_enabled():
         return
     think = state.get("think_count", 0)
+    # ultra-review #3: no depth-arm during/near a close (bench grants can
+    # coincide exactly with depths; think_count freezes during in_end).
+    budget = state.get("thinking_token_budget", -1)
+    if state.get("in_end") or not state.get("in_think", True):
+        return
+    if 0 < budget <= think + 128:
+        return
     for d in st["cfg"]["depths"]:
         if d in st["done_depths"]:
             continue

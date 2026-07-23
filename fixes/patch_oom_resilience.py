@@ -56,6 +56,20 @@ def apply():
         log.info("[oom_resilience] already applied (v7)")
         return
 
+    # [2026-07-23 ultra-review #7] restart-without-recreate can leave an OLDER
+    # generation's wrapper in place (v5 residue); v7 grafting on top produced
+    # STACKED wrappers where v5's except swallowed v7's streak-cap re-raise
+    # (busy-loop restarts, hanging clients). Refuse to stack: any other
+    # oom_resilience marker generation present -> loud FATAL (the container
+    # must be recreated so the stock file is restored).
+    if "PATCH: oom_resilience" in text:
+        log.error(
+            "[oom_resilience] FATAL: a different oom_resilience generation is "
+            "already present in core.py — refusing to stack wrappers. "
+            "Recreate the container (systemctl restart does stop+rm+up)."
+        )
+        raise SystemExit(1)
+
     # Ensure a MODULE-LEVEL bare `import torch` binds the name `torch`.
     # [BUG 2026-07-14] The old substring check ("import torch " in text)
     # false-matched vram_tracer's `import torch as _vt_torch` (and would
