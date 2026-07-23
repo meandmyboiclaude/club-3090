@@ -393,7 +393,8 @@ def test_continuation_budget_and_cue():
     s = Serving(margin_letters=WEAK, cont_content="Actually C.")
     run(s, Request(budget=8000), make_result(spent=1000))
     cont = s.calls[-1]
-    check("leftover clamped to max 6144", cont.thinking_token_budget == 6144,
+    # C1 fix: total = spent + clamped room (engine re-charges the prefill)
+    check("total = spent + room(clamped 6144)", cont.thinking_token_budget == 1000 + 6144,
           str(cont.thinking_token_budget))
     txt = cont.messages[-1]["content"]
     check("cue text present in continuation", ar._PN118_DEFAULT_CUE in txt)
@@ -409,8 +410,8 @@ def test_continuation_budget_and_cue():
     os.environ["GENESIS_PN118_GRACE"] = "50"
     s2 = Serving(margin_letters=WEAK, cont_content="Actually C.")
     run(s2, Request(budget=5000), make_result(spent=4700))
-    check("leftover clamped up to min 512",
-          s2.calls[-1].thinking_token_budget == 512,
+    check("total = spent + room(min 512)",
+          s2.calls[-1].thinking_token_budget == 4700 + 512,
           str(s2.calls[-1].thinking_token_budget))
 
     # mid leftover unclamped: 8000-3000 = 5000
@@ -419,8 +420,8 @@ def test_continuation_budget_and_cue():
     os.environ["GENESIS_PN118_MODE"] = "enforce"
     s3 = Serving(margin_letters=WEAK, cont_content="Actually C.")
     run(s3, Request(budget=8000), make_result(spent=3000))
-    check("mid leftover passes through (5000)",
-          s3.calls[-1].thinking_token_budget == 5000,
+    check("total = spent + mid room (3000+5000)",
+          s3.calls[-1].thinking_token_budget == 3000 + 5000,
           str(s3.calls[-1].thinking_token_budget))
 
 
