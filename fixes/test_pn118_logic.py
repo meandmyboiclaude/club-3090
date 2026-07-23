@@ -77,9 +77,10 @@ class Choice:
 
 
 class Result:
-    def __init__(self, message, finish_reason, usage=None):
+    def __init__(self, message, finish_reason, usage=None, rid=None):
         self.choices = [Choice(message, finish_reason)]
         self.usage = usage or Usage()
+        self.id = rid  # ChatCompletionResponse.id == engine req_id (join key)
 
 
 class TopLP:
@@ -165,9 +166,9 @@ class Serving:
 
 
 def make_result(content="The answer is B.", reasoning="Step 1: ...", spent=1000,
-                finish="stop"):
+                finish="stop", rid=None):
     return Result(Message(content=content, reasoning=reasoning),
-                  finish, Usage(0, 900, reasoning=spent))
+                  finish, Usage(0, 900, reasoning=spent), rid=rid)
 
 
 # weak = near-tie letters (margin ~0.05); strong = dominant (margin ~0.85)
@@ -447,6 +448,187 @@ def test_reasoning_tokens_fallback():
           ar._reasoning_tokens(res2, "x" * 400) == 2222)
 
 
+# ─── PN118 c_mean gate (engine→serving bridge) ───────────────────────────────
+# GENESIS_PN118_GATE = margin (default) | cmean | both. cmean reads pn112's
+# exported rolling confidence from the /tmp bridge file instead of the letter-
+# margin echo self-call. Calibration: wrong items c_mean ~9.16 vs 11.37 right;
+# threshold GENESIS_PN118_CMEAN default 10.0 → fire (rescue) iff c_last < 10.0.
+
+import json as _json  # noqa: E402
+import time as _time  # noqa: E402
+import tempfile as _tempfile  # noqa: E402
+
+
+def _write_conf(entries: dict) -> str:
+    """entries: {req_id: (c_last, n, age_seconds)}. age → ts = monotonic()-age."""
+    fd, path = _tempfile.mkstemp(suffix="_pn112_conf.json")
+    os.close(fd)
+    now = _time.monotonic()
+    obj = {rid: {"c_last": c, "n": n, "ts": now - age}
+           for rid, (c, n, age) in entries.items()}
+    with open(path, "w", encoding="utf-8") as f:
+        _json.dump(obj, f)
+    ar._PN112_CONF_PATH = path
+    return path
+
+
+def _cmean_env(gate="cmean", mode="enforce"):
+    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN118_MODE"] = mode
+    os.environ["GENESIS_PN118_GATE"] = gate
+
+
+def test_cmean_below_fires_no_echo():
+    print("\ncmean gate: low c_last + n>=MINN + fresh → FIRES, NO echo self-call")
+    reset_env()
+    _cmean_env()
+    _write_conf({"chatcmpl-1": (9.0, 128, 1.0)})  # 9.0 < 10.0, n ok, fresh
+    s = Serving(margin_letters=STRONG, cont_content="Actually the answer is C.")
+    res = make_result(content="The answer is B.", spent=1000, rid="chatcmpl-1")
+    run(s, Request(budget=8000), res)
+    check("fired via cmean", ar._STATS["pn118_fires"] == 1, str(ar._STATS))
+    check("exactly ONE self-call (continuation only, no echo)", len(s.calls) == 1,
+          f"{len(s.calls)}")
+    check("answer spliced", res.choices[0].message.content == "Actually the answer is C.")
+
+
+def test_cmean_above_no_fire():
+    print("\ncmean gate: high c_last (settled) → NO fire")
+    reset_env()
+    _cmean_env()
+    _write_conf({"chatcmpl-2": (11.4, 128, 1.0)})  # 11.4 >= 10.0
+    s = Serving(cont_content="changed")
+    res = make_result(content="The answer is B.", spent=1000, rid="chatcmpl-2")
+    run(s, Request(budget=8000), res)
+    check("no fire when confident", ar._STATS["pn118_fires"] == 0)
+    check("no self-call at all", len(s.calls) == 0, f"{len(s.calls)}")
+    check("skip counted", ar._STATS["pn118_skips"] == 1)
+
+
+def test_cmean_missing_entry_no_fire():
+    print("\ncmean gate: no conf entry for this req → NO fire (conservative)")
+    reset_env()
+    _cmean_env()
+    _write_conf({"chatcmpl-other": (9.0, 128, 1.0)})
+    s = Serving(cont_content="changed")
+    res = make_result(content="The answer is B.", spent=1000, rid="chatcmpl-missing")
+    run(s, Request(budget=8000), res)
+    check("no fire on missing entry", ar._STATS["pn118_fires"] == 0)
+    check("no self-call", len(s.calls) == 0)
+
+
+def test_cmean_stale_no_fire():
+    print("\ncmean gate: stale entry (ts older than TTL) → NO fire")
+    reset_env()
+    _cmean_env()
+    os.environ["GENESIS_PN118_CMEAN_TTL_S"] = "600"
+    _write_conf({"chatcmpl-3": (9.0, 128, 1200.0)})  # 1200s old > 600 TTL
+    s = Serving(cont_content="changed")
+    res = make_result(content="The answer is B.", spent=1000, rid="chatcmpl-3")
+    run(s, Request(budget=8000), res)
+    check("no fire on stale entry", ar._STATS["pn118_fires"] == 0)
+    check("no self-call", len(s.calls) == 0)
+
+
+def test_cmean_minn_no_fire():
+    print("\ncmean gate: n < MINN (too few samples) → NO fire")
+    reset_env()
+    _cmean_env()
+    os.environ["GENESIS_PN118_CMEAN_MINN"] = "64"
+    _write_conf({"chatcmpl-4": (9.0, 40, 1.0)})  # 40 < 64
+    s = Serving(cont_content="changed")
+    res = make_result(content="The answer is B.", spent=1000, rid="chatcmpl-4")
+    run(s, Request(budget=8000), res)
+    check("no fire when under MINN", ar._STATS["pn118_fires"] == 0)
+    check("no self-call", len(s.calls) == 0)
+
+
+def test_cmean_id_normalization():
+    print("\ncmean gate: engine key '-0' parallel-sample suffix joins result.id")
+    reset_env()
+    _cmean_env()
+    # engine stored the per-sequence id; serving result.id lacks the suffix
+    _write_conf({"chatcmpl-abc-0": (9.0, 128, 1.0)})
+    s = Serving(cont_content="Actually C.")
+    res = make_result(content="The answer is B.", spent=1000, rid="chatcmpl-abc")
+    run(s, Request(budget=8000), res)
+    check("fired via normalized-id join", ar._STATS["pn118_fires"] == 1, str(ar._STATS))
+
+
+def test_cmean_missing_file_failopen():
+    print("\ncmean gate: conf file absent → fail-open NO fire")
+    reset_env()
+    _cmean_env()
+    ar._PN112_CONF_PATH = "/tmp/does_not_exist_pn112_conf_xyz.json"
+    s = Serving(cont_content="changed")
+    res = make_result(content="The answer is B.", spent=1000, rid="chatcmpl-5")
+    run(s, Request(budget=8000), res)
+    check("no fire when file missing", ar._STATS["pn118_fires"] == 0)
+    check("no self-call", len(s.calls) == 0)
+
+
+def test_cmean_shadow_logs_no_fire():
+    print("\ncmean gate shadow: would-fire recorded, NOTHING changed, no echo")
+    reset_env()
+    _cmean_env(mode="shadow")
+    _write_conf({"chatcmpl-6": (9.0, 128, 1.0)})
+    s = Serving(cont_content="changed")
+    res = make_result(content="The answer is B.", spent=1000, rid="chatcmpl-6")
+    run(s, Request(budget=8000), res)
+    check("shadow would-fire recorded", ar._STATS["pn118_shadow_would_fire"] == 1)
+    check("no real fire", ar._STATS["pn118_fires"] == 0)
+    check("no self-call in cmean shadow", len(s.calls) == 0, f"{len(s.calls)}")
+    check("answer untouched", res.choices[0].message.content == "The answer is B.")
+
+
+def test_both_gate_and_semantics():
+    print("\nboth gate: cmean AND margin must both pass")
+    # cmean pass + margin pass → fire (echo call runs, then continuation)
+    reset_env()
+    _cmean_env(gate="both")
+    _write_conf({"chatcmpl-7": (9.0, 128, 1.0)})  # cmean passes
+    s = Serving(margin_letters=WEAK, cont_content="Actually C.")  # margin passes
+    res = make_result(content="The answer is B.", spent=1000, rid="chatcmpl-7")
+    run(s, Request(budget=8000), res)
+    check("both-pass fires", ar._STATS["pn118_fires"] == 1, str(ar._STATS))
+    check("both: echo + continuation = 2 self-calls", len(s.calls) == 2, f"{len(s.calls)}")
+
+    # cmean pass + margin FAIL (confident) → no fire
+    reset_env()
+    _cmean_env(gate="both")
+    _write_conf({"chatcmpl-8": (9.0, 128, 1.0)})
+    s2 = Serving(margin_letters=STRONG, cont_content="changed")  # margin fails
+    res2 = make_result(content="The answer is B.", spent=1000, rid="chatcmpl-8")
+    run(s2, Request(budget=8000), res2)
+    check("both: cmean-pass margin-fail → no fire", ar._STATS["pn118_fires"] == 0)
+    check("both: echo ran, no continuation", len(s2.calls) == 1, f"{len(s2.calls)}")
+
+    # cmean FAIL → margin echo never even runs
+    reset_env()
+    _cmean_env(gate="both")
+    _write_conf({"chatcmpl-9": (11.4, 128, 1.0)})  # cmean fails
+    s3 = Serving(margin_letters=WEAK, cont_content="changed")
+    res3 = make_result(content="The answer is B.", spent=1000, rid="chatcmpl-9")
+    run(s3, Request(budget=8000), res3)
+    check("both: cmean-fail short-circuits before echo", len(s3.calls) == 0,
+          f"{len(s3.calls)}")
+    check("both: no fire", ar._STATS["pn118_fires"] == 0)
+
+
+def test_margin_mode_ignores_conf_file():
+    print("\ndefault margin gate: conf file never read (echo path unchanged)")
+    reset_env()
+    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN118_MODE"] = "enforce"  # no GATE set → margin default
+    _write_conf({"chatcmpl-10": (11.4, 128, 1.0)})  # confident — would block cmean
+    s = Serving(margin_letters=WEAK, cont_content="Actually C.")  # but margin is weak
+    res = make_result(content="The answer is B.", spent=1000, rid="chatcmpl-10")
+    run(s, Request(budget=8000), res)
+    check("margin gate fires on weak margin regardless of conf file",
+          ar._STATS["pn118_fires"] == 1, str(ar._STATS))
+    check("margin gate did the echo (2 calls)", len(s.calls) == 2, f"{len(s.calls)}")
+
+
 def main():
     for t in (test_margin_read, test_disabled, test_early_weak_fires,
               test_early_confident_no_fire, test_late_no_fire, test_capbound_no_fire,
@@ -455,7 +637,12 @@ def main():
               test_failopen_margin_raise, test_failopen_cont_raise,
               test_failopen_empty_continuation, test_no_letter_margin_skip,
               test_continuation_budget_and_cue, test_custom_cue_env,
-              test_reasoning_tokens_fallback):
+              test_reasoning_tokens_fallback,
+              test_cmean_below_fires_no_echo, test_cmean_above_no_fire,
+              test_cmean_missing_entry_no_fire, test_cmean_stale_no_fire,
+              test_cmean_minn_no_fire, test_cmean_id_normalization,
+              test_cmean_missing_file_failopen, test_cmean_shadow_logs_no_fire,
+              test_both_gate_and_semantics, test_margin_mode_ignores_conf_file):
         t()
     print()
     if FAILURES:
