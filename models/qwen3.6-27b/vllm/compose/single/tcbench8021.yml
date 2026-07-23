@@ -799,7 +799,11 @@ services:
       - --enable-chunked-prefill
       - --enable-prefix-caching
       - --speculative-config
-      - '{"method":"mtp","num_speculative_tokens":3}'
+      # [2026-07-23 05:10Z probdraft screen: drafts sampled at the REQUEST temp
+      # instead of greedy — the MTP head then runs as trained; expected to
+      # recover the ~5pt acceptance dip at temp 1.0. Lossless (standard
+      # rejection). Revert = drop draft_sample_method.]
+      - '{"method":"mtp","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}'
       - --config
       - /config/cache-override.yaml
       - --host
