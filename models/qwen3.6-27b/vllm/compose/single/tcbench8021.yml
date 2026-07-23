@@ -540,6 +540,14 @@ services:
         # inert unless GENESIS_ENABLE_PR44812_TOOL_GUARD=1. Runs after the
         # PN112 patch (shares the holder file; anchors verified disjoint).
         python3 /fixes/patch_pr44812_tool_guard.py
+        # [2026-07-23] PN114 forced-span family (fixed-depth probes + R5
+        # confirm-at-fire + R1b wrap-up close). Generalizes the end-forcer to
+        # per-seq force_seq; stock-identical when no span armed. ALL DARK:
+        # GENESIS_ENABLE_PN114_PROBE / GENESIS_PN112_CONFIRM /
+        # GENESIS_PN112_WRAPUP (+ PN114_MODE/DEPTHS/STABLE_K/CMIN/GRACE).
+        # Design: ~/shared/PN114-DESIGN-probe-stability-20260723.md.
+        python3 /fixes/pn114_boot_ids.py
+        python3 /fixes/patch_pn114_forced_span.py
         # [PN109 RETIRED 2026-07-20 BUG-107h] the 107e diagnosis was wrong —
         # this pin's chat_completion/protocol.py carries thinking_token_budget
         # natively (:244 -> :774); budgets were engine-enforced all along.

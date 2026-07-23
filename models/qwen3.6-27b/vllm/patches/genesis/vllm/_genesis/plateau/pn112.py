@@ -142,6 +142,14 @@ def observe_state(
         )
     if st["fired"]:
         return
+    # PN114 interplay (2026-07-23): while a forced span / probe free-window is
+    # in flight, its tokens would pollute the C window — pause accumulation.
+    try:
+        from vllm._genesis.plateau import pn114 as _pn114
+        if _pn114.phase_active(state):
+            return
+    except ImportError:
+        pass
     cfg = st["cfg"]
     if conf is not None:
         st["confs"].append((think_len, float(conf)))
@@ -209,6 +217,29 @@ def observe_state(
         )
         return
     if new_budget < budget:
+        # PN114 hooks (2026-07-23, env-gated, both dark by default):
+        #   CONFIRM (R5): defer the cut to a forced probe — confident
+        #   articulated answer commits it, weak answer cancels + cools down.
+        #   WRAPUP (R1b): close through the wrap-up sentence + </think>.
+        try:
+            from vllm._genesis.plateau import pn114 as _pn114
+            if _pn114.confirm_enabled():
+                if _pn114.request_confirm(state, req_id):
+                    st["fired"] = False  # PN114 owns the decision now
+                    log.info(
+                        "PN112: fire deferred to PN114 confirm req=%s", req_id
+                    )
+                    return
+            elif _pn114.wrapup_enabled():
+                if _pn114.arm_wrapup(state, req_id):
+                    _STATS["enforced"] += 1
+                    log.info(
+                        "PN112: SETTLED (wrapup) — budget %d, think=%d "
+                        "wmean=%.2f req=%s", budget, think_len, wmean, req_id,
+                    )
+                    return
+        except ImportError:
+            pass
         # Mirror PN108's enforce mechanics EXACTLY: budget := observed+grace
         # AND countdown := grace (think_count is unreliable on the prompt-
         # opened-think path — without the countdown the cap binds late/never).
