@@ -219,8 +219,10 @@ services:
       - GENESIS_PN112_TAU=13.0
       - GENESIS_PN112_FLOOR=600
       - GENESIS_PN112_GRACE=64
-      - GENESIS_PN100_HIGHSTEP_MULT=1.25
-      - GENESIS_PN100_HIGHSTEP_MIN=10
+      # [2026-07-23 05:50Z P-pess (HIGHSTEP) REMOVED from base — killed as
+      # blanket addon (ppess30: raised items flipped wrong). t1.0 re-baseline
+      # runs on pure k260-caps: the new banked reference differs from banked
+      # k260-0.6 by the temp knob ONLY.]
       # [2026-07-23 ~04:00Z THINKING-END LANE CLOSED — PN114 env removed
       # (dark, available). gate2b (shadow) 60% + pn114enf30 (enforce) 70%
       # vs k260-same 77%: probe-induced early termination (the sound-span
