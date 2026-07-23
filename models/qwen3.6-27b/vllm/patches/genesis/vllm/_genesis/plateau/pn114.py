@@ -227,6 +227,21 @@ def on_force_complete(state: dict[str, Any]) -> bool:
     if not st or not st.get("phase"):
         return False
     phase = st["phase"]
+    if isinstance(phase, str) and phase.startswith("pn117"):
+        # PN117 deep-band rescue injection: delegate completion (resume think,
+        # span uncharged). PN117 owns the detector; pn114 owns the forcer.
+        try:
+            from vllm._genesis.plateau import pn117_rescue as _pn117
+            return _pn117.on_force_complete(state, st)
+        except Exception:
+            log.warning("PN114: pn117 completion raised — bare resume",
+                        exc_info=True)
+            fs = state.get("force_seq") or []
+            st["phase"] = None
+            state["force_seq"] = None
+            state.pop("force_seq_base", None)
+            _resume_thinking(state, len(fs))
+            return True
     if phase == "probe_force":
         # unified probe span (probe + hole + close) fully LANDED: finish.
         # The letter sits right after the probe text — position-derived

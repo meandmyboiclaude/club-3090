@@ -121,6 +121,17 @@ def observe_state(
     if tokens is None:
         return
     think_len = len(tokens)
+    # PN117 deep-band rescue (2026-07-23): observe the same per-step conf the
+    # settled-stop detector reads. Called here (pure-python, no new graft) so
+    # PN117 sees every step regardless of PN112's own fired/mode state; it keeps
+    # its own detector state (_pn117) and arms pn114's forcer on fire. Inert
+    # unless GENESIS_ENABLE_PN117_RESCUE=1. Fail-open.
+    try:
+        from vllm._genesis.plateau import pn117_rescue as _pn117
+        if _pn117.is_enabled():
+            _pn117.observe(state, think_len, conf, req_id)
+    except Exception:
+        log.warning("PN117 observe raised; ignored", exc_info=True)
     basis = state.get("start_thinking", -1)
     st = state.get(_STATE_KEY)
     if st is None or st.get("basis") != basis:
