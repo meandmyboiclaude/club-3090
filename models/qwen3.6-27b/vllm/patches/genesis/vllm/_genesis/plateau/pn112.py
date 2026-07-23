@@ -132,6 +132,18 @@ def observe_state(
             _pn117.observe(state, think_len, conf, req_id)
     except Exception:
         log.warning("PN117 observe raised; ignored", exc_info=True)
+    # PN112→PN118 confidence bridge (2026-07-23): export this request's rolling
+    # conf mean to a /tmp file so the serving-PROCESS PN118 close-gate can read
+    # it (observe_state runs in EngineCore, PN118 in APIServer — a module dict
+    # cannot cross, a file can, like /tmp/genesis_pn114_ids.json). Same seat as
+    # pn117.observe (pure-python, no new graft). Inert unless
+    # GENESIS_ENABLE_PN112_EXPORT=1. Fail-open.
+    try:
+        from vllm._genesis.plateau import pn112_export as _pn112exp
+        if _pn112exp.is_enabled():
+            _pn112exp.observe(req_id, conf)
+    except Exception:
+        log.warning("PN112 export observe raised; ignored", exc_info=True)
     basis = state.get("start_thinking", -1)
     st = state.get(_STATE_KEY)
     if st is None or st.get("basis") != basis:
