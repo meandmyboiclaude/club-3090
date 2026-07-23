@@ -206,24 +206,16 @@ services:
       # real; 384's relocation erased them live — shipstack2 killed n=42),
       # marginal-band fires probe-guarded (GENESIS_PN112_CONFIRM). P-pess
       # stays (never-under, uncontroversial).]
+      # [2026-07-23 ROUTER-PRECISION baseline reset (kickstart §8 first action):
+      # end-side lane closed at signal ceiling — PN112 back to SHADOW (free
+      # ckpt/tokstep telemetry, zero behavioral change), CONFIRM + PN114 probe
+      # lines removed (dark, available). Base = k260 + P-pess only, so router
+      # screens compare cleanly vs banked k260.]
       - GENESIS_ENABLE_PN112_SETTLED_STOP=1
-      - GENESIS_PN112_MODE=enforce
+      - GENESIS_PN112_MODE=shadow
       - GENESIS_PN112_TAU=13.0
       - GENESIS_PN112_FLOOR=600
       - GENESIS_PN112_GRACE=64
-      - GENESIS_PN112_CONFIRM=1
-      # CMIN recalibrated 00:25Z from banked answer-channel C: settled
-      # articulations run 11.6-12.8, grind 7.8-11.0 (13.5 was unreachable)
-      - GENESIS_PN114_CMIN=11.3
-      # [2026-07-23 confirm30c boot: v2 CONSTRAINED probe ("answer: (" +
-      # 1-token letter window — kills the format confound that pinned confs
-      # at 4.9-7.0) + fixed-depth probes in SHADOW at DENSE mid-band depths
-      # (USER steer: the 2-3K self-stop class carries the 30-60% overhang =
-      # the real pool; commitment lands 55-85% of think). Shadow logs
-      # would-close only — this screen is GATE-2 data collection.]
-      - GENESIS_ENABLE_PN114_PROBE=1
-      - GENESIS_PN114_MODE=shadow
-      - GENESIS_PN114_DEPTHS=800,1200,1600,2000,2400,2800,3200,4000
       - GENESIS_PN100_HIGHSTEP_MULT=1.25
       - GENESIS_PN100_HIGHSTEP_MIN=10
       # Performance
