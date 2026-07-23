@@ -799,11 +799,12 @@ services:
       - --enable-chunked-prefill
       - --enable-prefix-caching
       - --speculative-config
-      # [2026-07-23 05:10Z probdraft screen: drafts sampled at the REQUEST temp
-      # instead of greedy — the MTP head then runs as trained; expected to
-      # recover the ~5pt acceptance dip at temp 1.0. Lossless (standard
-      # rejection). Revert = drop draft_sample_method.]
-      - '{"method":"mtp","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}'
+      # [2026-07-23 probdraft verdict: draft_sample_method=probabilistic tested
+      # (native30pd + capt10pd30): acceptance 67.2->69.5 (+2.3pt, ~2-3% tok/s),
+      # acc deltas = resampling noise (lossless confirmed). REVERTED to greedy
+      # for banked-run RNG-path comparability; keep probabilistic as a prod
+      # option for any t1.0 serving config.]
+      - '{"method":"mtp","num_speculative_tokens":3}'
       - --config
       - /config/cache-override.yaml
       - --host
