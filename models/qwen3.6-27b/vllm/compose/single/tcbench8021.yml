@@ -212,7 +212,10 @@ services:
       # lines removed (dark, available). Base = k260 + P-pess only, so router
       # screens compare cleanly vs banked k260.]
       - GENESIS_ENABLE_PN112_SETTLED_STOP=1
-      - GENESIS_PN112_MODE=shadow
+      # [2026-07-23 ~04:40Z loop-6 screen: shadow→enforce for the t1.0-uncapped
+      # settled-stop test (fires 16/30 in shadow at t1.0; saturation story was a
+      # temp-0.6 artifact). ONE knob vs native30. Revert to shadow after.]
+      - GENESIS_PN112_MODE=enforce
       - GENESIS_PN112_TAU=13.0
       - GENESIS_PN112_FLOOR=600
       - GENESIS_PN112_GRACE=64
