@@ -336,7 +336,14 @@ def _contract_v3_sized(ctk: dict, budget: int) -> bool:
         f"[envelope] Thinking budget: about {steps} short reasoning steps "
         f"({size_clause}). " + pace_clause + answer_clause
     )
-    ctk["pn_env_seed"] = f"{seed_label}: ~{steps} short steps.\nStep 1:"
+    # [2026-07-23 B2-S1/echo-anchor] optional Step-1 restatement opener: makes
+    # the model re-echo the ask at Step 1 (Echoes-as-Anchors: a nearby echo
+    # sharpens the numeric anchor). BUG-075 invariant holds (ends mid-reasoning).
+    if _env_bool("GENESIS_PN102_V3_STEP1_ECHO", False):
+        ctk["pn_env_seed"] = (f"{seed_label}: ~{steps} short steps.\n"
+                              "Step 1 — what exactly is being asked:")
+    else:
+        ctk["pn_env_seed"] = f"{seed_label}: ~{steps} short steps.\nStep 1:"
     log.info("PN102: contract set (v3 sized, steps=%d budget=%d)", steps, budget)
     return True
 
