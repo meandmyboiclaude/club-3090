@@ -103,7 +103,8 @@ def _cfg() -> dict[str, Any]:
         "stable_k": _env_int("GENESIS_PN114_STABLE_K", 2),
         "cmin": _env_float("GENESIS_PN114_CMIN", 13.5),
         "grace": _env_int("GENESIS_PN114_GRACE", 384),
-        "free_len": 3,
+        # v2 constrained probe: 1 free token (the letter inside "( )")
+        "free_len": _env_int("GENESIS_PN114_FREE_LEN", 1),
     }
 
 
@@ -181,7 +182,7 @@ def on_force_complete(state: dict[str, Any]) -> bool:
     if phase == "probe_nl":
         ids = _ids() or {}
         consumed = (len(ids.get("probe", [])) + st["cfg"]["free_len"]
-                    + len(ids.get("newline", [1])))
+                    + len(ids.get("close_paren") or ids.get("newline", [1])))
         st["phase"] = None
         state["force_seq"] = None
         _finish_probe(state, st, consumed)
@@ -311,7 +312,9 @@ def observe_state(state: dict[str, Any], think_start_len: int,
             st["free_confs"].append(float(conf))
         out_len = len(state.get("output_tok_ids", []))
         if out_len - st["free_start"] >= st["cfg"]["free_len"]:
-            _arm(state, ids.get("newline", []), "probe_nl", req_id)
+            # v2: close the constrained probe with ")\n" when available
+            _arm(state, ids.get("close_paren") or ids.get("newline", []),
+                 "probe_nl", req_id)
             st["phase"] = "probe_nl"
         return
     if phase:

@@ -17,7 +17,10 @@ import sys
 OUT = "/tmp/genesis_pn114_ids.json"
 MODEL = os.environ.get("GENESIS_PN114_TOKENIZER_PATH",
                        "/root/.cache/huggingface/thinkingcap-gptq-pro-v2")
-PROBE_STR = "\nMy current answer: "
+# Parenthesis-constrained (2026-07-23 v2): after "answer: (" the next token
+# is the letter itself — C then measures ANSWER uncertainty, not format
+# spread (unconstrained probes read 4.9-7.0 even when settled; confounded).
+PROBE_STR = "\nMy current answer: ("
 WRAPUP_STR = "\nConsidering the limited time, I'll provide the final answer now.\n"
 THINK_END = "</think>"
 
@@ -61,7 +64,9 @@ def main() -> int:
                 t = tok.encode(form, add_special_tokens=False)
                 if len(t) == 1 and t[0] not in ppen:
                     ppen.append(t[0])
+        close_paren = tok.encode(")\n", add_special_tokens=False)
         ids = {"probe": probe, "newline": newline,
+               "close_paren": close_paren,
                "wrapup_close": wrap + end, "ppen": ppen}
         with open(OUT, "w") as f:
             json.dump(ids, f)
