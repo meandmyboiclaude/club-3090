@@ -213,6 +213,16 @@ def _contract_v5_settled(ctk: dict, budget: int) -> bool:
         "If you have genuinely exhausted your approaches and are no longer "
         "making progress, stop and commit to your best answer."
     )
+    # [2026-07-24 goal-80] v5 has no answer clause (v3's terse answers come
+    # from its clause; v5 replies ramble ~4x the tokens). Opt-in graft of the
+    # v3-validated wording — default-dark, GENESIS_PN102_V5_ANSWER_CLAUSE=1.
+    if _env_bool("GENESIS_PN102_V5_ANSWER_CLAUSE", False):
+        sentences = max(1, _env_int("GENESIS_PN102_SENTENCES", 3))
+        ctk["pn_env_banner"] += (
+            " Unless the user asked for longer form, put your final answer in "
+            f"the FIRST sentence of your reply, then at most {sentences} "
+            "sentences total."
+        )
     ctk["pn_env_seed"] = "Step 1:"
     log.info("PN102: contract set (v5 settled, budget=%d)", budget)
     return True
