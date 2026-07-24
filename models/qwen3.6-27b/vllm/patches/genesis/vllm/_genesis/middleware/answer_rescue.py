@@ -334,6 +334,13 @@ def _contract_v3_sized(ctk: dict, budget: int) -> bool:
     """v3: budget/planner-sized banner. The validated prod path (072fff66)."""
     tps = max(50, _env_int("GENESIS_PN102_TOKENS_PER_STEP", 193))
     planner_steps = ctk.pop("pn100_steps", None)
+    # [2026-07-24 goal-80] per-REQUEST N override (router arm; default-dark —
+    # fires only when the caller sends pn102_force_steps in chat_template_kwargs).
+    # The chronic v3 losses close early on a too-small announced N; a correct
+    # per-item N keeps the anchor sharp (concrete bump, not a ceiling).
+    _forced = ctk.pop("pn102_force_steps", None)
+    if isinstance(_forced, int) and _forced > 0:
+        planner_steps = _forced
     # [2026-07-23 rec-4] per-band ANNOUNCED-N remap (concrete, not a ceiling):
     # "5:6,3:4" announces 6 where the planner said 5. Enforcement untouched.
     # Trace evidence: the N=5 pileup owns the premature-commit/skipped-verify
