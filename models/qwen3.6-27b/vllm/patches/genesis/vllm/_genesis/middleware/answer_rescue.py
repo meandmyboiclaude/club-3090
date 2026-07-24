@@ -216,7 +216,12 @@ def _contract_v5_settled(ctk: dict, budget: int) -> bool:
     # [2026-07-24 goal-80] v5 has no answer clause (v3's terse answers come
     # from its clause; v5 replies ramble ~4x the tokens). Opt-in graft of the
     # v3-validated wording — default-dark, GENESIS_PN102_V5_ANSWER_CLAUSE=1.
-    if _env_bool("GENESIS_PN102_V5_ANSWER_CLAUSE", False):
+    # AC2: apply only to the budget mass — deep items close early under a
+    # reply-level anchor (measured: gpqa-099 3151->986 rtok, right->wrong;
+    # ACfull lost chronic-deep 127/142/174). Mass answers are worthless
+    # overflow (cap-bound cohort: acc 6/9 at both cut depths, ans 467->1255).
+    if (_env_bool("GENESIS_PN102_V5_ANSWER_CLAUSE", False)
+            and budget <= _env_int("GENESIS_PN102_V5_AC_MAX_BUDGET", 2600)):
         sentences = max(1, _env_int("GENESIS_PN102_SENTENCES", 3))
         ctk["pn_env_banner"] += (
             " Unless the user asked for longer form, put your final answer in "
