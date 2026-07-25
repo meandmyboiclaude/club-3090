@@ -334,7 +334,7 @@ class PN119Router:
         self._next_reload_check = time.time() + self._reload_every
         self._probe_sig = self._stat_sig(npz_path)
         self._failed_sig = None
-        self.mu, self.sd, self.vt, self.w = self._load_probe(npz_path)
+        self.pv, self.pb = self._load_probe(npz_path)
         # v2 label plumbing: think-region markers of the SERVED model's
         # tokenizer (defaults = thinkingcap-gptq-pro-v2 / Qwen3.6 template:
         # thinking-ON prompt ends "<think>\n", thinking-OFF ends
@@ -409,19 +409,40 @@ class PN119Router:
 
     # ── probe loading + hot-reload ──────────────────────────────────────────
     def _load_probe(self, path: str):
-        """Load npz -> (mu, sd, vt, w) tensors on the runner device.
+        """Load npz -> (v, b): ONE folded vector on device, plus a bias scalar.
+
+        The scoring pipeline is a chain of affine maps, so it collapses:
+
+            score = w[:-1] . (Vt @ ((x - mu) / sd)) + w[-1]
+                  = ((Vt^T w[:-1]) / sd) . (x - mu)  + w[-1]
+                  =  v . x  +  b        with v = (Vt^T w[:-1]) / sd
+                                             b =  w[-1] - v . mu
+
+        Folding at LOAD time instead of per request:
+          * VRAM 1,474,604 B -> 122,884 B (-91.7%) — mu, sd and the [10,30720]
+            Vt matrix stop being resident at all;
+          * six kernels (sub, div, matvec, dot, add, and their temporaries)
+            collapse to one dot product;
+          * numerically BETTER, not worse: the fold is computed in float64 on
+            the host, so the per-request path carries one rounding instead of
+            four. A 10x30720 GEMV is bandwidth-bound, which is also why fp16
+            would buy nothing here and would cost precision.
+
         Raises on any problem — callers decide whether that is fatal
-        (__init__) or a keep-old-weights warning (_maybe_reload)."""
+        (__init__) or a keep-old-weights warning (_maybe_reload).
+        """
         import numpy as np
 
         z = np.load(path, allow_pickle=True)
         dev = self.runner.device
-        mu = torch.from_numpy(np.asarray(z["mu"])).float().to(dev)
-        sd = torch.from_numpy(np.asarray(z["sd"])).float().to(dev)
-        vt = torch.from_numpy(np.asarray(z["Vt10"])).float().to(dev)  # [10, FEAT_DIM]
-        w = torch.from_numpy(np.asarray(z["w"])).float().to(dev)      # [pcs+1] incl bias
-        if mu.numel() != FEAT_DIM or sd.numel() != FEAT_DIM:
-            raise ValueError(f"probe dim {mu.numel()} != {FEAT_DIM}")
+        # float64 host-side: this runs once per load, and it is the only place
+        # the algebra can lose precision.
+        mu = np.asarray(z["mu"], dtype=np.float64).reshape(-1)
+        sd = np.asarray(z["sd"], dtype=np.float64).reshape(-1)
+        vt = np.asarray(z["Vt10"], dtype=np.float64)   # [pcs, FEAT_DIM]
+        w = np.asarray(z["w"], dtype=np.float64).reshape(-1)  # [pcs+1] incl bias
+        if mu.size != FEAT_DIM or sd.size != FEAT_DIM:
+            raise ValueError(f"probe dim {mu.size} != {FEAT_DIM}")
         # A degenerate probe is the WORST failure this router has, because it is
         # completely silent: scoring divides by sd, so a zero entry yields inf
         # or NaN, and `NaN >= tdeep` is False — every request routes LEAN, at
@@ -430,16 +451,39 @@ class PN119Router:
         # Refuse to load instead; maybe_create turns a raise into "router
         # disabled", which is loud and leaves upstream behaviour intact.
         for name, t in (("mu", mu), ("sd", sd), ("Vt10", vt), ("w", w)):
-            if not bool(torch.isfinite(t).all()):
+            if not bool(np.isfinite(t).all()):
                 raise ValueError(f"probe {name} contains non-finite values")
         sd_min = float(sd.min())
         if sd_min < 1e-4:
             raise ValueError(
                 f"probe sd has a near-zero entry ({sd_min:.3e} < 1e-4) — "
                 "scores would be inf/NaN and every request would route lean")
-        if vt.shape[1] != FEAT_DIM or w.numel() != vt.shape[0] + 1:
-            raise ValueError(f"probe shapes Vt{tuple(vt.shape)} w{tuple(w.shape)} inconsistent")
-        return mu, sd, vt, w
+        if vt.shape[1] != FEAT_DIM or w.size != vt.shape[0] + 1:
+            raise ValueError(f"probe shapes Vt{vt.shape} w{w.shape} inconsistent")
+
+        v64 = (vt.T @ w[:-1]) / sd            # [FEAT_DIM]
+        b64 = float(w[-1] - float(v64 @ mu))
+        if not np.isfinite(v64).all() or not np.isfinite(b64):
+            raise ValueError("probe fold produced non-finite values")
+
+        # Prove the algebra on this actual probe rather than trusting the
+        # derivation: score the unfolded and folded forms on a fixed pseudo-
+        # random vector and require agreement. A silent fold error would shift
+        # every score by a constant, which looks exactly like a threshold that
+        # needs recalibrating.
+        rng = np.random.default_rng(0)
+        xt = rng.standard_normal(FEAT_DIM)
+        ref = float(w[:-1] @ (vt @ ((xt - mu) / sd)) + w[-1])
+        got = float(v64 @ xt + b64)
+        if abs(ref - got) > 1e-6 * max(1.0, abs(ref)):
+            raise ValueError(
+                f"probe fold disagrees with the staged form: {got} vs {ref}")
+
+        v = torch.from_numpy(np.ascontiguousarray(v64, dtype=np.float32)).to(dev)
+        logger.info("[PN119] probe folded: %d B on device (was %d B), "
+                    "fold check |d|=%.3e", v.numel() * 4,
+                    (mu.size + sd.size + vt.size + w.size) * 4, abs(ref - got))
+        return v, b64
 
     @staticmethod
     def _stat_sig(path: str):
@@ -468,7 +512,7 @@ class PN119Router:
             self._failed_sig = sig
             logger.warning("[PN119] probe hot-reload FAILED (%s) — keeping current weights", e)
             return
-        self.mu, self.sd, self.vt, self.w = new
+        self.pv, self.pb = new
         self._probe_sig = sig
         self._failed_sig = None
         logger.info("[PN119] probe hot-reloaded from %s (mtime_ns=%d size=%d)",
@@ -593,7 +637,13 @@ class PN119Router:
         """
         if not self.memo_on:
             for li in range(len(LAYERS)):
-                acc["sum"][li] += aux[li][start:start + take].float().sum(0)
+                # sum(dtype=) accumulates in fp32 WITHOUT materialising an fp32
+                # copy of the slice first. `.float().sum(0)` allocated one: at a
+                # 4128-token chunk x 5120 dims that is an 80.6 MiB transient per
+                # layer per step, on a card running util 0.935 with an OOM
+                # history (BUG-126). Same result, same precision, no allocation.
+                acc["sum"][li] += aux[li][start:start + take].sum(
+                    0, dtype=torch.float32)
             acc["seen"] += take
             return
         pos = acc["seen"]
@@ -603,8 +653,8 @@ class PN119Router:
             nxt = ((pos // unit) + 1) * unit
             step = min(take - off, nxt - pos)
             for li in range(len(LAYERS)):
-                acc["sum"][li] += (
-                    aux[li][start + off:start + off + step].float().sum(0))
+                acc["sum"][li] += aux[li][start + off:start + off + step].sum(
+                    0, dtype=torch.float32)
             pos += step
             off += step
             if pos % unit == 0 and not acc["missing"]:
@@ -791,9 +841,10 @@ class PN119Router:
             rows.append(last_rows[li])
             rows.append(mean_rows[li])
         x = torch.cat(rows)  # [FEAT_DIM] f32 on device
-        xs = (x - self.mu) / self.sd
-        p = self.vt @ xs  # [10]
-        score = float(torch.dot(self.w[:-1], p) + self.w[-1])
+        # One fused dot against the folded probe (see _load_probe): the
+        # centre/scale/PCA/readout chain is pre-collapsed at load, so the whole
+        # per-request decision is a single 30,720-term reduction on device.
+        score = float(torch.dot(self.pv, x)) + self.pb
         self.scored[req_id] = score
         cached = acc.get("cached", 0)
         self._acc.pop(req_id, None)
@@ -829,7 +880,10 @@ class PN119Router:
                 # copy that is not the bottleneck.  (Cost if we ever do defer
                 # it: 30720 dims x 2 B x buf = 3.75 MB VRAM at the default 64,
                 # 30 MB at the 512 hard cap.)
-                feat = (torch.stack(rows).to(torch.bfloat16)
+                # `x` is already the concatenation of `rows` and is contiguous,
+                # so reuse it: torch.stack(rows) built a second identical
+                # 122,880 B device copy purely to be cast and shipped.
+                feat = (x.to(torch.bfloat16)
                         .view(torch.uint16).cpu().numpy().tobytes())
             except Exception as e:  # noqa: BLE001 — any sink failure disables it
                 logger.warning("[PN119] sink encode failed (%s) — disabling sink", e)
