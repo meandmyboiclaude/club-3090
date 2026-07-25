@@ -12,7 +12,9 @@ from __future__ import annotations
 
 __all__ = [
     "p70_auto_strict_ngram",
-    "p71_block_verify",
+    # "p71_block_verify",  # moved to _retired/ 2026-07-26 (superseded:
+    # p71_pn369_rejection_sampler_consolidated carries the block-verify
+    # branch VERBATIM, and the P71 registry row points there)
     # P71 + PN369 consolidated into one module 2026-06-19 (both patch the same
     # engine file v1/sample/rejection_sampler.py at disjoint regions). The
     # P71 registry entry's apply_module points here; pn369_relaxed_acceptance
