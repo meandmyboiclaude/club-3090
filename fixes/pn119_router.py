@@ -62,6 +62,14 @@ def _truthy(v: str) -> bool:
     return v.lower() in ("1", "true", "yes", "on")
 
 
+def _rindex(seq, value):
+    """Index of the LAST occurrence of `value` in `seq`, or None."""
+    for i in range(len(seq) - 1, -1, -1):
+        if seq[i] == value:
+            return i
+    return None
+
+
 class PN119Router:
     @classmethod
     def maybe_create(cls, runner):
@@ -122,6 +130,18 @@ class PN119Router:
         # "<think>\n\n</think>\n\n"; </think> in OUTPUT marks end of spend).
         self._think_start = int(_env("PN119_THINK_START_ID", "248068") or 248068)
         self._think_end = int(_env("PN119_THINK_END_ID", "248069") or 248069)
+        # Tail window for the thinking-label scan. MUST be wide enough to reach
+        # back past whatever PN102 seeded INSIDE the think region, otherwise the
+        # <think> marker falls out of view and the row labels thinking=None —
+        # i.e. the refit trains on nothing. The old 8-token window only worked
+        # under the v5-family seed ("Step 1:", ~3 tokens); the v3 seed
+        # ("Budget: ~13 short steps.\nStep 1:", ~12 tokens) and the v3-echo /
+        # v8b seeds are longer, and v3 is the validated prod path.
+        # 64 clears every PN102 variant (longest ≈ 20 tokens) with 3x headroom.
+        # Widening is safe under the last-marker-wins scan below: a marker from
+        # an EARLIER conversation turn can never outrank the current turn's.
+        self._tail_window = max(
+            int(_env("PN119_TAIL_WINDOW", "64") or 64), 8)
         # per-request prefill accumulators: req_id -> state dict
         self._acc: dict[str, dict] = {}
         self.scored: dict[str, float] = {}
@@ -356,11 +376,18 @@ class PN119Router:
         cap_hit = False
         prompt_ids = getattr(req_state, "prompt_token_ids", None)
         if prompt_ids:
-            tail = list(prompt_ids[-8:])
-            if self._think_end in tail:
-                thinking = False
-            elif self._think_start in tail:
+            # LAST marker wins, not "any </think> anywhere in the window".
+            # thinking-off pre-closes the region, so the tail holds BOTH
+            # markers and </think> is last; thinking-on with a PN102 seed
+            # holds only <think>, several seed tokens back from the end.
+            tail = list(prompt_ids[-self._tail_window:])
+            last_end = _rindex(tail, self._think_end)
+            last_start = _rindex(tail, self._think_start)
+            if last_start is not None and (
+                    last_end is None or last_start > last_end):
                 thinking = True
+            elif last_end is not None:
+                thinking = False
         out_ids = getattr(req_state, "output_token_ids", None)
         if thinking and out_ids is not None:
             try:
