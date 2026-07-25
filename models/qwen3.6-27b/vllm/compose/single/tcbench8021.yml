@@ -473,10 +473,38 @@ services:
       # middleware (retired — its api_server import at apply time blacked out the
       # remaining apply log and hid the PN519 spec-loop failure).
       - GENESIS_SNDR_OWNS_PN65=1
-      # DROPPED per registry conflicts_with (conflicts_with PN54+PN59 (live prod)):
+      # [PN79 sndr — 2026-07-25 CORRECTED REASON. Do NOT re-enable.]
+      # The old note here read "DROPPED per registry conflicts_with (PN54+PN59
+      # (live prod))". That reason is now FALSE and was never the real blocker:
+      # PN59 has been =0 since 2026-07-14 (see line ~229) and PN54 was retired
+      # 2026-07-25 (commit 00f4c384), so a reader would conclude the gate is
+      # clear and flip this on.
+      # The REAL blocker is a reproduced PROD CUDA illegal-memory-access:
+      # K.2 applied 18/18 anchors cleanly, decode was healthy, then the FIRST
+      # 8K chunked prefill died (async-reported at rejection_sampler, engine
+      # death) — the in-place chunk_delta_h kernel's state_idx rebase / stride
+      # math on the IS_CONTINUOUS_BATCHING branch. Reverted on PROD 2026-06-10.
+      # pn79_inplace_ssm_state.apply() therefore HARD-REFUSES even with this
+      # flag set; it additionally requires
+      # GENESIS_PN79_FORCE_REENABLE_DESPITE_PROD_IMA=1, which exists only for
+      # the isolation repro and must never appear in a launcher.
+      # Anchor health is NOT the issue and does not license a re-enable:
+      # verified 2026-07-25, all 18 OLD anchors are count==1 on all three pins
+      # (dev1060cherry-20260713, wheel v1 dev1474cherry-1711, wheel v2
+      # dev1474cherrymax-1757) — Sub-1 8/8, Sub-2 7/7, Sub-3 2/2, Sub-4 1/1.
+      # "Applies cleanly" is exactly what makes a bare flag flip dangerous.
+      # Benefit was never demonstrated here either: A/B 2026-05-07 gave TPS
+      # +1.1% inside noise (105.3 vs 104.2) at identical VRAM (45485 MiB).
+      # To resume: kernel-level stride audit (2D/2F stride_init_state_*) vs the
+      # real ssm_state layout, per the module docstring — not a flag flip.
       # - GENESIS_ENABLE_PN79_INPLACE_SSM_STATE=1
-      - GENESIS_ENABLE_PN79_V2_MD5_CHUNK=1
-      - GENESIS_ENABLE_PN79_V2_MD5_CHUNK_DELTA_H=1
+      # [2026-07-25] The two md5+full-file PoC siblings below were RETIRED in
+      # commit 5a23bf45 (post-patch fixture never existed -> they announced
+      # APPLY and did nothing). Commented out because a retired id skips
+      # regardless (GENESIS_ALLOW_RETIRED is off, line ~382), so this is a
+      # no-op for the boot and only removes a dead "we enable these" signal.
+      # - GENESIS_ENABLE_PN79_V2_MD5_CHUNK=1
+      # - GENESIS_ENABLE_PN79_V2_MD5_CHUNK_DELTA_H=1
       - GENESIS_ENABLE_PN91_DEVELOPER_ROLE=1
       # [2026-07-14 01:15] PN77=1 ALONE (PN31 stays 0) — attribution boot 18. Rowwise fix
       # ad609ba, offline top-1 0.385->0.948; boot-17 crash trace runs through model forward
