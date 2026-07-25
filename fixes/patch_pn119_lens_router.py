@@ -57,6 +57,11 @@ B_NEW = (
     "            if self.use_aux_hidden_state_outputs:\n"
     "                # True when EAGLE 3 is used.\n"
     "                hidden_states, aux_hidden_states = model_output\n"
+    "            elif isinstance(model_output, tuple):\n"
+    "                # PN119: aux capture active WITHOUT the eagle3 flag — the\n"
+    "                # model returns (hidden, aux); drafter paths stay flag-off\n"
+    "                # stock (feeding aux concat to MTP crashes the proposer).\n"
+    "                hidden_states, aux_hidden_states = model_output\n"
     "            else:\n"
     "                # Common case.\n"
     "                hidden_states = model_output\n"
@@ -82,6 +87,24 @@ C_NEW = (
     "            self._on_request_state_removed(req_id, req_state)\n"
 )
 
+# Site D — the dummy-run/profiling unpack must also tolerate the tuple
+# (capture + memory profiling run through _dummy_run).
+D_OLD = (
+    "            if self.use_aux_hidden_state_outputs:\n"
+    "                hidden_states, _ = outputs\n"
+    "            else:\n"
+    "                hidden_states = outputs\n"
+)
+D_NEW = (
+    "            if self.use_aux_hidden_state_outputs:\n"
+    "                hidden_states, _ = outputs\n"
+    "            elif isinstance(outputs, tuple):\n"
+    "                # PN119: aux capture active without the eagle3 flag.\n"
+    "                hidden_states, _ = outputs\n"
+    "            else:\n"
+    "                hidden_states = outputs\n"
+)
+
 
 def main() -> int:
     if not RUNNER.exists():
@@ -102,7 +125,7 @@ def main() -> int:
     # pins whose runner drifted). A and C without B would be inert-but-harmless;
     # B without A would crash at runtime — hence all-or-nothing.
     sites = (("A-load", A_OLD, A_NEW), ("B-observe", B_OLD, B_NEW),
-             ("C-finish", C_OLD, C_NEW))
+             ("C-finish", C_OLD, C_NEW), ("D-dummy", D_OLD, D_NEW))
     missing = [name for name, old, _ in sites if text.count(old) != 1]
     if missing:
         print(f"{LOG} soft-skip: anchor(s) {missing} not unique on this pin — "
@@ -112,7 +135,7 @@ def main() -> int:
     for _name, old, new in sites:
         text = text.replace(old, new, 1)
     RUNNER.write_text(text, encoding="utf-8")
-    print(f"{LOG} applied 3/3 sites (A=init B=observe C=finish-sink); "
+    print(f"{LOG} applied 4/4 sites (A=init B=observe C=finish D=dummy); "
           f"inert unless GENESIS_ENABLE_PN119_ROUTER=1")
     return 0
 

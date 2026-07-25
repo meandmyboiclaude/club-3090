@@ -66,7 +66,14 @@ class PN119Router:
                 logger.warning("[PN119] model lacks set_aux_hidden_state_layers — disabled")
                 return None
             model.set_aux_hidden_state_layers(tuple(LAYERS))
-            runner.use_aux_hidden_state_outputs = True
+            # Deliberately NOT setting runner.use_aux_hidden_state_outputs:
+            # that flag also reroutes the DRAFTER'S target_hidden_states to an
+            # aux CONCAT (eagle3 semantics) — under MTP that fed a 15360-dim
+            # tensor into a 5120-dim proposer buffer and killed the engine on
+            # the first spec-decode step (live crash 2026-07-25 15:18Z).
+            # Instead the model returns (hidden, aux) tuples on its own and
+            # the PN119 patcher makes BOTH unpack sites tuple-tolerant while
+            # every drafter/eagle3 site keeps stock flag-off behavior.
             inst = cls(runner, npz_path)
             logger.info(
                 "[PN119] router active: mode=%s tdeep=%.3f probe=%s aux layers=%s sink=%s",
