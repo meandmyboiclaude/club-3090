@@ -330,6 +330,26 @@ def _contract_v4_static(ctk: dict, budget: int) -> bool:
     return True
 
 
+# [PN102 prefix-order 2026-07-25, backlog #4] GENESIS_PN102_BANNER_STATIC_FIRST:
+# the number-carrying banners (v3 sized, v8 hybrid, v8b lean-anchor) open with
+# per-request figures ("Thinking budget: about {N} steps (~{budget} tokens)"),
+# so the banner's leading tokens differ on every request and any prefix-cache
+# block containing the banner head can never be reused across requests
+# (measured hit rate 0%). With the flag ON the SAME information is emitted in
+# a stable order: all static instruction text first (referring to "Step N" /
+# "the figures at the END of this notice"), then one trailing
+# "Figures: N = ..." sentence carrying every per-request value. Semantic
+# content is preserved field-for-field — only the order changes.
+# QUALITY-AFFECTING (the prompt the model sees changes) -> default OFF =
+# byte-identical current behaviour; flip to 1 for the 30-item A/B screen.
+# The think-SEED is deliberately NOT reordered: it is the very tail of the
+# prompt (never a prefix for anything) and BUG-075 requires it to end
+# mid-reasoning ("Step 1:"), so numbers-last is impossible there anyway.
+# v4/v5/v6a/v6b/v7 banners are already request-invariant — flag is a no-op.
+def _banner_static_first() -> bool:
+    return _env_bool("GENESIS_PN102_BANNER_STATIC_FIRST", False)
+
+
 def _contract_v3_sized(ctk: dict, budget: int) -> bool:
     """v3: budget/planner-sized banner. The validated prod path (072fff66)."""
     tps = max(50, _env_int("GENESIS_PN102_TOKENS_PER_STEP", 193))
@@ -366,21 +386,40 @@ def _contract_v3_sized(ctk: dict, budget: int) -> bool:
         f"FIRST sentence of your reply, then at most {sentences} sentences total."
     )
     has_headroom = steps * tps < 0.7 * budget
+    static_first = _banner_static_first()
     if budget >= _env_int("GENESIS_PN102_PERMISSION_MIN", 4096) and has_headroom:
-        pace_clause = (
-            f"Number your steps and wrap up around Step {steps} once your "
-            "answer is settled; if the problem proves deeper than planned, "
-            f"keep reasoning past Step {steps} — the budget is generous — "
-            "and do not conclude while your answer is still uncertain. If "
-            "you have genuinely exhausted your approaches, commit to your "
-            "best answer. Do not let the budget cut you off. "
-        )
+        if static_first:
+            # [prefix-order] same clause, "Step N" symbolic — figures trail.
+            pace_clause = (
+                "Number your steps and wrap up around Step N once your "
+                "answer is settled; if the problem proves deeper than "
+                "planned, keep reasoning past Step N — the budget is "
+                "generous — and do not conclude while your answer is still "
+                "uncertain. If you have genuinely exhausted your approaches, "
+                "commit to your best answer. Do not let the budget cut you "
+                "off. "
+            )
+        else:
+            pace_clause = (
+                f"Number your steps and wrap up around Step {steps} once your "
+                "answer is settled; if the problem proves deeper than planned, "
+                f"keep reasoning past Step {steps} — the budget is generous — "
+                "and do not conclude while your answer is still uncertain. If "
+                "you have genuinely exhausted your approaches, commit to your "
+                "best answer. Do not let the budget cut you off. "
+            )
         seed_label = "Plan"
     else:
-        pace_clause = (
-            f"Number your steps and wrap up around Step {steps} yourself — "
-            "do not let the budget cut you off. "
-        )
+        if static_first:
+            pace_clause = (
+                "Number your steps and wrap up around Step N yourself — "
+                "do not let the budget cut you off. "
+            )
+        else:
+            pace_clause = (
+                f"Number your steps and wrap up around Step {steps} yourself — "
+                "do not let the budget cut you off. "
+            )
         seed_label = "Budget"
     # [2026-07-23 D2 range-announce, dark] "about N–M steps": the low endpoint
     # keeps the precise-anchor pull (easy majority unchanged), the high endpoint
@@ -404,10 +443,21 @@ def _contract_v3_sized(ctk: dict, budget: int) -> bool:
             f"same answer has ended {ans_k} consecutive steps, it is settled "
             "— stop reasoning and give it."
         )
-    ctk["pn_env_banner"] = (
-        f"[envelope] Thinking budget: {steps_txt} "
-        f"({size_clause}). " + pace_clause + answer_clause + ans_clause
-    )
+    if static_first:
+        # [prefix-order] static instruction text first (byte-identical across
+        # requests within a pace-clause branch), every per-request figure in
+        # the single trailing "Figures:" sentence. Same fields, stable prefix.
+        ctk["pn_env_banner"] = (
+            "[envelope] You have a thinking budget for this request; its "
+            "figures — the step count N and the token allowance — are stated "
+            "at the END of this notice. " + pace_clause + answer_clause
+            + ans_clause + f" Figures: N = {steps} ({steps_txt}; {size_clause})."
+        )
+    else:
+        ctk["pn_env_banner"] = (
+            f"[envelope] Thinking budget: {steps_txt} "
+            f"({size_clause}). " + pace_clause + answer_clause + ans_clause
+        )
     # [2026-07-23 B2-S1/echo-anchor] optional Step-1 restatement opener: makes
     # the model re-echo the ask at Step 1 (Echoes-as-Anchors: a nearby echo
     # sharpens the numeric anchor). BUG-075 invariant holds (ends mid-reasoning).
@@ -447,31 +497,63 @@ def _contract_v8_hybrid(ctk: dict, budget: int) -> bool:
     if _env_bool("GENESIS_PN102_V8_LEAN_ANCHOR", False):
         steps = planner_steps if isinstance(planner_steps, int) and planner_steps > 0 \
             else max(3, round(budget / tps))
-        ctk["pn_env_banner"] = (
-            f"[envelope] Thinking budget: about {steps} short reasoning steps "
-            f"(budget allows up to ~{budget} thinking tokens). Work in "
-            "numbered steps. The moment your answer is settled — at any step, "
-            "even the first — stop reasoning and give it; do not re-verify a "
-            f"settled answer. If it is not settled and you are still making "
-            f"real progress, keep going past Step {steps} if you need to — "
-            "there is room. If you have genuinely exhausted your approaches "
-            "and are no longer making progress, stop and commit to your best "
-            "answer."
-        )
+        if _banner_static_first():
+            # [prefix-order] static text first, per-request figures trail.
+            ctk["pn_env_banner"] = (
+                "[envelope] You have a thinking budget for this request; its "
+                "figures — the step count N and the token allowance — are "
+                "stated at the END of this notice. Work in numbered steps. "
+                "The moment your answer is settled — at any step, even the "
+                "first — stop reasoning and give it; do not re-verify a "
+                "settled answer. If it is not settled and you are still "
+                "making real progress, keep going past Step N if you need to "
+                "— there is room. If you have genuinely exhausted your "
+                "approaches and are no longer making progress, stop and "
+                "commit to your best answer. "
+                f"Figures: N = {steps} (about {steps} short reasoning steps; "
+                f"budget allows up to ~{budget} thinking tokens)."
+            )
+        else:
+            ctk["pn_env_banner"] = (
+                f"[envelope] Thinking budget: about {steps} short reasoning steps "
+                f"(budget allows up to ~{budget} thinking tokens). Work in "
+                "numbered steps. The moment your answer is settled — at any step, "
+                "even the first — stop reasoning and give it; do not re-verify a "
+                f"settled answer. If it is not settled and you are still making "
+                f"real progress, keep going past Step {steps} if you need to — "
+                "there is room. If you have genuinely exhausted your approaches "
+                "and are no longer making progress, stop and commit to your best "
+                "answer."
+            )
         ctk["pn_env_seed"] = f"Budget: ~{steps} short steps.\nStep 1:"
         log.info("PN102: contract set (v8b lean-anchor, steps=%d budget=%d)",
                  steps, budget)
         return True
-    ctk["pn_env_banner"] = (
-        "[envelope] Work through your reasoning in numbered steps. There is "
-        f"room for up to ~{n_ceil} steps (~{budget} thinking tokens) — more "
-        "than this should need. The moment your answer is settled — at any "
-        "step, even the first — stop reasoning and give it; do not re-verify "
-        "a settled answer. If it is not settled and you are still making real "
-        "progress, keep going — there is room. If you have genuinely "
-        "exhausted your approaches and are no longer making progress, stop "
-        "and commit to your best answer."
-    )
+    if _banner_static_first():
+        # [prefix-order] static text first, per-request figures trail.
+        ctk["pn_env_banner"] = (
+            "[envelope] Work through your reasoning in numbered steps. There "
+            "is room for up to ~N steps — more than this should need; N and "
+            "the token allowance are stated at the END of this notice. The "
+            "moment your answer is settled — at any step, even the first — "
+            "stop reasoning and give it; do not re-verify a settled answer. "
+            "If it is not settled and you are still making real progress, "
+            "keep going — there is room. If you have genuinely exhausted "
+            "your approaches and are no longer making progress, stop and "
+            "commit to your best answer. "
+            f"Figures: N = {n_ceil} steps (~{budget} thinking tokens)."
+        )
+    else:
+        ctk["pn_env_banner"] = (
+            "[envelope] Work through your reasoning in numbered steps. There is "
+            f"room for up to ~{n_ceil} steps (~{budget} thinking tokens) — more "
+            "than this should need. The moment your answer is settled — at any "
+            "step, even the first — stop reasoning and give it; do not re-verify "
+            "a settled answer. If it is not settled and you are still making real "
+            "progress, keep going — there is room. If you have genuinely "
+            "exhausted your approaches and are no longer making progress, stop "
+            "and commit to your best answer."
+        )
     ctk["pn_env_seed"] = "Step 1:"
     log.info("PN102: contract set (v8 hybrid, n_ceil=%d budget=%d)", n_ceil, budget)
     return True

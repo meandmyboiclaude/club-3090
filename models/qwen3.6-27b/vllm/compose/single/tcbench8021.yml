@@ -505,6 +505,13 @@ services:
       # <500 rtok vs 36 in old auto); the unconditional keep-going fed the deep
       # band (73.4% of spend @ 60% acc). Takes precedence over STATIC_BANNER.
       - GENESIS_PN102_BANNER_V5=1
+      # [PN102 prefix-order 2026-07-25, backlog #4] STATIC_FIRST reorders the
+      # number-carrying banners (v3 sized / v8 / v8b) so all static text
+      # precedes the per-request figures — leading banner tokens become
+      # identical across requests (prefix-cache can finally hit). No-op under
+      # v5 (already static). QUALITY-AFFECTING (prompt order changes) ->
+      # ships OFF; flip to 1 for the 30-item A/B screen.
+      - GENESIS_PN102_BANNER_STATIC_FIRST=0
       # Starvation backstop: one continuation resuming INSIDE the think region.
       # Non-streaming, bounded to one pass, every failure path returns the
       # original response unchanged. Reaches above the generous cap only for the
