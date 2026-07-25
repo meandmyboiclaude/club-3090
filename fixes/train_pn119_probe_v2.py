@@ -120,6 +120,36 @@ def bf16_rows(path: str, idx) -> np.ndarray:
 
 
 # ── data ───────────────────────────────────────────────────────────────────
+def seed_capture_source(path: str) -> str:
+    """'tap' (live in-engine capture, the space the sink and the router live
+    in) vs 'offline-hf' (lens_pilot's HF/GPTQModel host capture).
+
+    Not interchangeable, and the difference does not announce itself: the two
+    captures of the SAME 100 items have mean same-item cosine 0.971, yet a
+    probe trained on the wrong one still ranks the sink at spearman 0.988
+    against the right one. Only an explicit provenance check catches it --
+    which is why this is a guard and not a comment. lens-features-20260725 is
+    byte-identical to lens-features-20260723: that "re-capture" was a no-op.
+    """
+    side = os.path.splitext(path)[0] + ".json"
+    if os.path.isfile(side):
+        try:
+            with open(side, encoding="utf-8") as f:
+                meta = (json.load(f) or {}).get("_meta", {})
+        except (OSError, json.JSONDecodeError):
+            meta = {}
+        if "tap" in str(meta.get("source", "")).lower():
+            return "tap"
+        if meta.get("source") or meta.get("model_dir"):
+            return "offline-hf"
+    base = os.path.basename(path).lower()
+    if base.startswith("tap-features"):
+        return "tap"
+    if base.startswith("lens-features"):
+        return "offline-hf"
+    return "unknown"
+
+
 def load_seed(features: str, champion: str):
     """The 100-item GPQA capture: X [n, 30720], rtok, prompt_tok, ids.
 
@@ -403,7 +433,11 @@ def main() -> int:
                     help="force zero scalars (overrides --extra-scalar)")
     ap.add_argument("--deep-thresh", type=int, default=2000)
     ap.add_argument("--auc-thresholds", default="2000,2500")
-    ap.add_argument("--seed-features", default=f"{NEEDFIT}/lens-features-20260725.safetensors")
+    ap.add_argument("--seed-features",
+                    default=f"{NEEDFIT}/tap-features-20260725.safetensors",
+                    help="seed capture; MUST be a TAP capture (see seed_capture_source)")
+    ap.add_argument("--allow-capture-mismatch", action="store_true",
+                    help="train on an HF-offline capture anyway (you need a reason)")
     ap.add_argument("--seed-champion",
                     default=f"{RESULTS}/aibox-20260723-capt10full__gpqa_auto__"
                             f"thinkingcap_auto_t10.jsonl")
@@ -431,6 +465,15 @@ def main() -> int:
     print("=" * 78)
 
     # ── data ───────────────────────────────────────────────────────────────
+    seed_src = seed_capture_source(args.seed_features)
+    if seed_src != "tap" and not args.allow_capture_mismatch:
+        print(f"[v2] FAIL: seed {os.path.basename(args.seed_features)} is a "
+              f"{seed_src!r} capture. The sink rows this is TESTED on come from "
+              f"the tap, and the seed is the TRAINING set, so an HF-offline seed "
+              f"contaminates every number in this report -- not just the "
+              f"in-domain ones. Pass a tap capture (tap-features-*.safetensors) "
+              f"or --allow-capture-mismatch.")
+        return EXIT_FAIL
     seed_ids, X_seed_full, rtok_seed, ptok_seed = load_seed(
         args.seed_features, args.seed_champion)
     counts: dict = {}
@@ -444,11 +487,12 @@ def main() -> int:
     tags_sink = np.array([r["tag"] for r in rows])
     rep["counts"] = counts
     rep["seed"] = {"n": len(seed_ids), "features": os.path.basename(args.seed_features),
+                   "capture_source": seed_src,
                    "pos@2000": int((rtok_seed >= 2000).sum()),
                    "pos@2500": int((rtok_seed >= 2500).sum())}
 
     print(f"\nseed  : n={len(seed_ids)} from {os.path.basename(args.seed_features)} "
-          f"(pos@2000={rep['seed']['pos@2000']})")
+          f"[{seed_src}] (pos@2000={rep['seed']['pos@2000']})")
     print(f"sink  : {json.dumps(counts)}")
     print(f"        eval n={len(rows)}  "
           f"pos@2000={int((rtok_sink >= 2000).sum())} "
