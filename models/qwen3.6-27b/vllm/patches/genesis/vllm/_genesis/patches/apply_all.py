@@ -2585,7 +2585,8 @@ def apply_patch_N40_dflash_omnibus() -> PatchResult:
     Sub-kernels B (persistent buffer pool), C (adaptive N controller),
     D (workload classifier) — **all four sub-kernels are now wired** in
     `pn40_dflash_omnibus.py` + `wiring/spec_decode/patch_N40_dflash_omnibus.py`
-    + the dedicated `PN40-classifier` registry entry (audit P2 fix
+    + the dedicated `PN40c` registry entry (renamed from `PN40-classifier`
+    2026-07-25 — the hyphen broke the boot recorder's id shape) (audit P2 fix
     2026-05-05: previous "land in follow-up commits" line was outdated).
 
     Composition (no conflicts):

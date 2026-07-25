@@ -320,11 +320,20 @@ def _make_patcher() -> TextPatcher | None:
 def apply() -> tuple[str, str]:
     """Apply P67b — forward() spec-verify routing."""
     from vllm._genesis.dispatcher import should_apply, log_decision
-    # Reuse P67 env flag — P67b is meaningless without P67 kernel
-    decision, reason = should_apply("P67")
+    # 2026-07-25 (patch-id lint): gate on P67b's OWN registry row instead of
+    # P67's. P67b's canonical flag is GENESIS_ENABLE_P67B_SPEC_VERIFY_ROUTING
+    # with GENESIS_ENABLE_P67_TQ_MULTI_QUERY_KERNEL kept as an alias, so an
+    # existing compose that sets only the legacy shared flag resolves to the
+    # SAME decision this call returned before the split (both rows are
+    # default_on=False and applies_to is informational under an env override,
+    # so should_apply reduces to "is the flag truthy?" for either id).
+    # The P67-kernel dependency is NOT dropped — it is enforced below by the
+    # config_detect("P67") safety gate, which is the check that actually
+    # protects the v756 IndexKernel-overflow path.
+    decision, reason = should_apply("P67b")
     log_decision("P67b", decision, reason)
     if not decision:
-        return "skipped", "P67 kernel disabled — P67b dispatch unused"
+        return "skipped", "P67b disabled — spec-verify dispatch unused"
 
     # 2026-04-27 v756 bisect SAFETY GATE (mirrors P67's gate): without
     # speculative_config in vllm config, P67b's forward() routing would

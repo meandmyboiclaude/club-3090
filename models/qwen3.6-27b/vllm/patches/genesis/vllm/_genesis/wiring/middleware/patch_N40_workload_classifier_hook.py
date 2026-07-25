@@ -129,8 +129,16 @@ def apply() -> tuple[str, str]:
     """Apply PN40 sub-D workload classifier hook."""
     from vllm._genesis.dispatcher import log_decision, should_apply
 
-    decision, reason = should_apply("PN40")
-    log_decision("PN40-classifier", decision, reason)
+    # 2026-07-25 (patch-id lint): id renamed "PN40-classifier" → "PN40c" (the
+    # hyphen was truncated by the boot recorder's `[A-Za-z]+\d+[a-zA-Z]*`
+    # match, so this patch could never appear distinctly in boot_patches), and
+    # the row now carries its own canonical flag with the PN40 master kept as
+    # an env_flag_alias. Gate on the OWN row: with only the master flag set the
+    # alias resolves it to exactly the decision should_apply("PN40") returned
+    # before (both rows are default_on=False with the same applies_to, and
+    # applies_to is informational under an env override).
+    decision, reason = should_apply("PN40c")
+    log_decision("PN40c", decision, reason)
     if not decision:
         return "skipped", reason
 

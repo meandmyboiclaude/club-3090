@@ -63,7 +63,7 @@ def _levenshtein(a: str, b: str) -> int:
 
 
 def collect_known_flags() -> set[str]:
-    """Walk PATCH_REGISTRY and return all `env_flag` values."""
+    """Walk PATCH_REGISTRY and return all `env_flag` + `env_flag_aliases`."""
     try:
         from vllm._genesis.dispatcher import PATCH_REGISTRY
     except Exception:
@@ -73,6 +73,13 @@ def collect_known_flags() -> set[str]:
         flag = meta.get("env_flag")
         if isinstance(flag, str) and flag:
             flags.add(flag)
+        # 2026-07-25: aliases are operator-facing too (legacy / parent flags
+        # kept working across an id or flag split — see should_apply). Without
+        # them a compose that still uses the legacy name would be reported as
+        # a typo the moment the canonical name changes.
+        aliases = meta.get("env_flag_aliases")
+        if isinstance(aliases, (list, tuple, set)):
+            flags.update(a for a in aliases if isinstance(a, str) and a)
     # Genesis also has many tuning knobs (not patch toggles) and observability
     # vars — recognize their prefix to avoid false positives.
     return flags

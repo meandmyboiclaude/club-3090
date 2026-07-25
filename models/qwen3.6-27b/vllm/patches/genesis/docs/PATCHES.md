@@ -4,7 +4,7 @@ This file is the **single source of truth** for every Genesis runtime patch.
 For each patch you get: ID, title, what it does, status (ON / opt-in / deprecated),
 env flag to toggle, upstream PR (if backported), and credit.
 
-**Total PATCH_REGISTRY entries:** 126 (range P1–P107 + PN8–PN67 + PN70 + sub-patches P5b/P7b/P15B/P18b/P38B/P39a/P67b/P67c/PN26b/PN40-classifier + library/diagnostic P51/P79d/P102). The dispatcher's `PATCH_REGISTRY` is the schema-validated, lifecycle-tracked, opt-in surface — `genesis self-test` and the schema validator gate this set on every commit.
+**Total PATCH_REGISTRY entries:** 126 (range P1–P107 + PN8–PN67 + PN70 + sub-patches P5b/P7b/P15B/P18b/P38B/P39a/P67b/P67c/PN26b/PN40c + library/diagnostic P51/P79d/P102). The dispatcher's `PATCH_REGISTRY` is the schema-validated, lifecycle-tracked, opt-in surface — `genesis self-test` and the schema validator gate this set on every commit.
 
 **Total apply_all `@register_patch`:** 113 entries. P68/P69 share one `apply_patch_68_long_ctx_tool_adherence` function but are registered as two `PATCH_REGISTRY` entries; that's the reason for the 1-entry delta. As of v7.65 (2026-05-02) all legacy P1–P46 patches are first-class registry entries with `lifecycle: legacy` — historical pre-dispatcher patches with minimal metadata, kept default-on for compatibility.
 
@@ -149,7 +149,7 @@ docker run -e GENESIS_ENABLE_P67_TQ_MULTI_QUERY_KERNEL=0 ... vllm/vllm-openai:ni
 | ID | Title | Status | Env Flag | Upstream | Credit |
 |---|---|---|---|---|---|
 | **P78** | TurboQuant .tolist() capture-guard (adapted from noongh | opt-in | `GENESIS_ENABLE_P78_TOLIST_CAPTURE_GUARD` | — | Adapted from noonghunna's patch_tolist_cudagraph.py (Apache-2.0, github.com/noonghunna/qwen36-27b-single-3090). Surgical |
-| **P67b** | TurboQuant spec-verify forward() routing (FULL CG enabl | opt-in | — | — | Genesis (see source / CHANGELOG) |
+| **P67b** | TurboQuant spec-verify forward() routing (FULL CG enabl | opt-in | `GENESIS_ENABLE_P67B_SPEC_VERIFY_ROUTING`, alias `GENESIS_ENABLE_P67_TQ_MULTI_QUERY_KERNEL` | — | Genesis (see source / CHANGELOG). 2026-07-25: split off P67's shared flag — the legacy shared name stays an alias so existing composes arm P67b unchanged |
 | **P95** | Marlin TP cudagraph cap on Ampere (vllm#40385) | opt-in | `GENESIS_ENABLE_P95` | [#40385](https://github.com/vllm-project/vllm/pull/40385) | Backport of vllm#40385 (OPEN as of 2026-04-28). Defensive cap of `max_cudagraph_capture_sizes` to avoid OOM on TP>=2 with Marlin kernels |
 | **P100** | FlashInfer FULL CUDA graph for spec-decode (vllm#41127) | opt-in | `GENESIS_ENABLE_P100` | [#41127](https://github.com/vllm-project/vllm/pull/41127) | Backport of vllm#41127 (open 2026-04-28) — enables FlashInfer FULL cudagraph mode for spec-decode |
 | **PN13** | CUDAGraphWrapper gc.collect/empty_cache lambda arity (vllm#41235) | opt-in | `GENESIS_ENABLE_PN13_CUDA_GRAPH_LAMBDA_ARITY` | [#41235](https://github.com/vllm-project/vllm/pull/41235) | roikoren755 (vllm#41235, OPEN). Fixes worker-death TypeError in CUDAGraphWrapper |
@@ -239,7 +239,7 @@ validation pending) and default-ON (root-cause correctness fixes).
 | PN35 | Skip inputs_embeds buffer for text-only models (vllm#35975 backport, ~64 MiB GPU + 64 MiB CPU per buffer × 2 sites) | AjAnubolu/noonghunna/club-3090#32 | **ON** | `GENESIS_ENABLE_PN35_INPUTS_EMBEDS_OPTIONAL` (disable: `GENESIS_DISABLE_PN35_INPUTS_EMBEDS_OPTIONAL=1`) |
 | PN38 | DFlash quantized drafter sub-kernels (vllm#40425 backport, 4 sub-patches) | infatoshi/Sander | OFF | `GENESIS_ENABLE_PN38_DFLASH_QUANT_DRAFTER` |
 | PN40 | Spec-decode omnibus (sub-A DFlash K-norm + sub-B persistent buffer pool + sub-C adaptive K controller + sub-D workload classifier + sentinel) | Sander | OFF | `GENESIS_ENABLE_PN40_DFLASH_OMNIBUS` (per-sub: `GENESIS_PN40_ENABLE_SUB_{A,B,C,D}=0` to disable) |
-| PN40-classifier | PN40 sub-D workload classifier middleware (chat_completion serving hook — companion of PN40 sub-D) | Sander | OFF | `GENESIS_ENABLE_PN40_DFLASH_OMNIBUS` (toggled jointly with PN40 master) |
+| PN40c | PN40 sub-D workload classifier middleware (chat_completion serving hook — companion of PN40 sub-D). Renamed from `PN40-classifier` 2026-07-25: the hyphen was truncated by the boot recorder's `[A-Za-z]+\d+[a-zA-Z]*` id shape, so its apply/skip state could never be recorded distinctly. | Sander | OFF | `GENESIS_ENABLE_PN40C_WORKLOAD_CLASSIFIER`, alias `GENESIS_ENABLE_PN40_DFLASH_OMNIBUS` (toggled jointly with PN40 master) |
 | PN50 | GDN proj fusion (SGLang#21019 — Qwen3.5/3.6 contiguous-projection Triton kernel; +7.4% TPS claimed) | Yuan Luo (SGLang)/Sander | OFF | `GENESIS_ENABLE_PN50_GDN_FUSED_PROJ` |
 | PN51 | Qwen3 streaming `enable_thinking=false` content routing (vllm#40816 backport — fixes Open WebUI / LibreChat / LobeChat / Cline / OpenCode) | keehawkes/Sander | OFF | `GENESIS_ENABLE_PN51_QWEN3_STREAMING_THINKING_DISABLED` |
 | PN52 | prompt_logprobs eviction fix during chunked prefill (vllm#41411 backport — multi-file) | Joachim Studnia (Mistral)/Sander | OFF | `GENESIS_ENABLE_PN52_PROMPT_LOGPROBS_EVICTION` |

@@ -258,10 +258,24 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
     },
     "P67b": {
         "title": "TurboQuant spec-verify forward() routing (FULL CG enable)",
-        # P67b reuses P67's env flag intentionally — they're a coupled pair,
-        # P67b is the forward() routing companion that bypasses
-        # _prefill_attention for K+1 verify batches (cudagraph-safe).
-        "env_flag": "GENESIS_ENABLE_P67_TQ_MULTI_QUERY_KERNEL",
+        # P67b is the forward() routing companion of the P67 kernel: it
+        # bypasses _prefill_attention for K+1 verify batches (cudagraph-safe).
+        #
+        # 2026-07-25 (patch-id lint): P67b used to DECLARE P67's env_flag
+        # verbatim, so the two rows were indistinguishable to any consumer that
+        # keys on env_flag and neither could be A/B'd on its own — while in
+        # practice P67 is DRIFT/inert and P67b is the live, load-bearing half.
+        # P67b now owns GENESIS_ENABLE_P67B_SPEC_VERIFY_ROUTING and keeps the
+        # shared legacy name as an ALIAS, so every existing compose that sets
+        # GENESIS_ENABLE_P67_TQ_MULTI_QUERY_KERNEL=1 still arms P67b exactly as
+        # before. Setting GENESIS_ENABLE_P67B_SPEC_VERIFY_ROUTING=0 explicitly
+        # is now a per-patch opt-out (canonical wins over alias).
+        # NOTE: P67b is meaningless without the P67 kernel — arming ONLY the new
+        # flag leaves kernels/p67_multi_query_kernel._env_enabled() False, and
+        # patch_67b's own config_detect("P67") safety gate still runs. The pair
+        # is now separately ADDRESSABLE, not separately USEFUL.
+        "env_flag": "GENESIS_ENABLE_P67B_SPEC_VERIFY_ROUTING",
+        "env_flag_aliases": ["GENESIS_ENABLE_P67_TQ_MULTI_QUERY_KERNEL"],
         "default_on": False,
         "category": "spec_decode",
         "credit": "Genesis-original (FULL CG enable for P67 multi-query kernel)",
@@ -502,9 +516,18 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
             "spec_method": ["dflash"],
         },
     },
-    "PN40-classifier": {
+    # 2026-07-25 (patch-id lint): renamed from "PN40-classifier". The hyphen
+    # made the id ILLEGAL for the boot recorder — ops/vllm-patch-guard/
+    # vllm-patch-record.py matches `[A-Za-z]+\d+[a-zA-Z]*`, so every log line
+    # naming this patch was truncated to "PN40" and its apply/skip state could
+    # never appear distinctly in vllmops.boot_patches. "PN40c" is shape-legal
+    # (letters-digits-letters, no separator) and does NOT collide with the real
+    # PN40 row. The old, jointly-toggled master flag is kept as an alias so
+    # nothing about which composes arm this patch changes.
+    "PN40c": {
         "title": "PN40 sub-D workload classifier (chat_completion middleware)",
-        "env_flag": "GENESIS_ENABLE_PN40_DFLASH_OMNIBUS",
+        "env_flag": "GENESIS_ENABLE_PN40C_WORKLOAD_CLASSIFIER",
+        "env_flag_aliases": ["GENESIS_ENABLE_PN40_DFLASH_OMNIBUS"],
         "default_on": False,
         "category": "spec_decode",
         "credit": (
@@ -516,8 +539,12 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
             "and stash on `request._genesis_pn40_workload_class`. "
             "Consumer is the runtime K-trim hook in PN40 sub-C "
             "(scheduler.update_draft_token_ids). Toggled jointly with "
-            "PN40 master via GENESIS_ENABLE_PN40_DFLASH_OMNIBUS — no "
-            "separate enable flag (sub-D is universal companion to sub-C). "
+            "PN40 master via GENESIS_ENABLE_PN40_DFLASH_OMNIBUS, which is "
+            "retained as an env_flag_alias — sub-D is the universal companion "
+            "to sub-C, so the master flag arming it is the intended default. "
+            "GENESIS_ENABLE_PN40C_WORKLOAD_CLASSIFIER is the canonical name "
+            "and, set explicitly, wins over the alias (=0 disables just the "
+            "classifier hook; =1 arms it without the rest of the omnibus). "
             "Tier bias: code +1, long_ctx -1, others 0. Defensive on "
             "unknown class names (falls through to neutral bias)."
         ),
@@ -2145,6 +2172,31 @@ def should_apply(patch_id: str) -> tuple[bool, str]:
 
     env_value = os.environ.get(env_flag, "") if env_flag else ""
     env_truthy = env_value.strip().lower() in ("1", "true", "yes", "on")
+
+    # [patch-id lint 2026-07-25] `env_flag_aliases` — legacy / parent flags that
+    # still arm this patch. Introduced when a sub-patch that used to SHARE its
+    # parent's `env_flag` string (P67/P67b, PN40/PN40c) was given a canonical
+    # flag of its own: without an alias the split would silently stop arming the
+    # sub-patch for every existing compose, which is exactly the "flag flip that
+    # nobody notices" failure class. Mirrors sndr's `_resolve_env_state`
+    # (sndr/dispatcher/decision.py) so both lanes read aliases the same way.
+    #
+    # Precedence: an EXPLICITLY SET canonical flag always decides — so
+    # `<canonical>=0` is a real per-patch opt-out even while the shared legacy
+    # flag is 1. Aliases are consulted only when the canonical flag is absent
+    # from the environment.
+    if env_flag and not env_truthy and env_flag not in os.environ:
+        for _alias in _coerce_list(meta.get("env_flag_aliases")):
+            if os.environ.get(_alias, "").strip().lower() in (
+                "1", "true", "yes", "on",
+            ):
+                env_truthy = True
+                env_value = os.environ[_alias]
+                log.debug(
+                    "[Genesis dispatcher] %s armed via alias %s (canonical %s "
+                    "unset)", patch_id, _alias, env_flag,
+                )
+                break
 
     # Operator override: env truthy = always apply (subject to anchor presence)
     if env_truthy:

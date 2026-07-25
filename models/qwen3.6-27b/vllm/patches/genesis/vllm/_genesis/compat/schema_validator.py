@@ -55,6 +55,11 @@ _KNOWN_LIFECYCLE = {"experimental", "stable", "deprecated", "research",
 # Mirrors the `properties` block of patch_entry.schema.json.
 _KNOWN_FIELDS = {
     "title", "env_flag", "default_on", "lifecycle", "category",
+    # 2026-07-25 (patch-id lint): legacy / parent flags that still arm this
+    # patch after its canonical `env_flag` was split off a shared name
+    # (P67b, PN40c). Honored by dispatcher.should_apply; mirrors the field
+    # sndr's decision.py has honored since 2026-06-19.
+    "env_flag_aliases",
     "credit", "deprecation_note", "experimental_note", "research_note",
     "community_credit", "stable_since", "since_version", "deprecated_since",
     "removal_planned", "deprecated", "superseded_by", "upstream_pr",
@@ -137,6 +142,36 @@ def validate_entry(patch_id: str, meta: dict[str, Any]) -> list[SchemaIssue]:
                 message=f"env_flag {meta['env_flag']!r} doesn't match "
                         f"^GENESIS_[A-Z][A-Z0-9_]*$",
             ))
+
+    # env_flag_aliases — same name pattern as env_flag, and never a repeat
+    # of the entry's own canonical flag (that would be a no-op that reads
+    # like a working alias).
+    if "env_flag_aliases" in meta:
+        aliases = meta["env_flag_aliases"]
+        if not isinstance(aliases, (list, tuple)):
+            issues.append(SchemaIssue(
+                patch_id=patch_id, field="env_flag_aliases", severity="ERROR",
+                message=f"env_flag_aliases must be a list, got "
+                        f"{type(aliases).__name__}",
+            ))
+        else:
+            for alias in aliases:
+                if not isinstance(alias, str) or not re.match(
+                    r"^GENESIS_[A-Z][A-Z0-9_]*$", alias
+                ):
+                    issues.append(SchemaIssue(
+                        patch_id=patch_id, field="env_flag_aliases",
+                        severity="ERROR",
+                        message=f"alias {alias!r} doesn't match "
+                                f"^GENESIS_[A-Z][A-Z0-9_]*$",
+                    ))
+                elif alias == meta.get("env_flag"):
+                    issues.append(SchemaIssue(
+                        patch_id=patch_id, field="env_flag_aliases",
+                        severity="ERROR",
+                        message=f"alias {alias!r} repeats the entry's own "
+                                f"canonical env_flag",
+                    ))
 
     # Lifecycle enum
     lc = meta.get("lifecycle")

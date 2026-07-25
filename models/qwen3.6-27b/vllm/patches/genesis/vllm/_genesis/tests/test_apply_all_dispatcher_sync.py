@@ -34,12 +34,13 @@ _KNOWN_REGISTRY_ONLY = frozenset({
     # they ship as one wiring function. Registry tracks them separately
     # for `genesis explain` / docs disambiguation.
     "P69",
-    # PN40-classifier is a sub-component of PN40 sub-D — it is wired
-    # inside `apply_patch_N40_dflash_omnibus()` (the PN40 omnibus apply
-    # path). Registered separately so the dispatcher v2 validator does
-    # not warn when scheduler.py reports `PN40-classifier` as applied,
-    # but no standalone wiring function exists.
-    "PN40-classifier",
+    # PN40c (renamed from "PN40-classifier" 2026-07-25 — the hyphen was
+    # truncated by the boot recorder's id regex) is a sub-component of PN40
+    # sub-D — it is wired inside `apply_patch_N40_dflash_omnibus()` (the PN40
+    # omnibus apply path). Registered separately so the dispatcher v2 validator
+    # does not warn when scheduler.py reports `PN40c` as applied, but no
+    # standalone wiring function exists.
+    "PN40c",
     # P51 is a runtime layer-level TQ-active library guard living in
     # kernels/dequant_buffer.py — no env toggle, no apply_patch_* needed.
     # Registered for visibility in `genesis explain` and audit tooling.

@@ -86,6 +86,18 @@ _HOUSE_COLLIDING_IDS = {
 # no DISABLE conflict. See P74 rename directive (name-collision → rename).
 _LANE1_HARDOWNED_SHARED = {"P74"}
 
+# Lane-1 ids that were RENAMED (id-shape / collision fixes) while lane-2 still
+# carries the OLD key — the vendored tree stays byte-identical, so a lane-1
+# rename cannot be mirrored there. Without this map the lane-2 copy drops out
+# of the `shared` intersection below and is treated as NET-NEW, silently losing
+# the step-1 suppression that keeps lane-1 authoritative for the pair.
+#   lane-2 key  ->  lane-1 key
+_LANE1_RENAMED_SHARED = {
+    # 2026-07-25 patch-id lint: hyphen made the id unrecordable (the boot
+    # recorder truncated "PN40-classifier" to "PN40").
+    "PN40-classifier": "PN40c",
+}
+
 
 def _lane_enabled() -> bool:
     return os.environ.get("GENESIS_SNDR_LANE", "1").strip().lower() not in (
@@ -141,8 +153,13 @@ def apply_policy() -> dict[str, Any]:
     from vllm._genesis.dispatcher import PATCH_REGISTRY as OUR_REGISTRY
 
     his_reg = sndr_dispatcher.PATCH_REGISTRY
-    shared = sorted(set(his_reg) & set(OUR_REGISTRY))
-    net_new = sorted(set(his_reg) - set(OUR_REGISTRY))
+    shared_set = set(his_reg) & set(OUR_REGISTRY)
+    shared_set |= {
+        old for old, new in _LANE1_RENAMED_SHARED.items()
+        if old in his_reg and new in OUR_REGISTRY
+    }
+    shared = sorted(shared_set)
+    net_new = sorted(set(his_reg) - shared_set)
 
     # 1. shared suppression (unless operator handed the id to lane-2)
     suppressed, handed_over, lane1_hardowned = [], [], []
@@ -220,7 +237,7 @@ def apply_policy() -> dict[str, Any]:
     alias_mirrored = []
     for pid in _HOUSE_COLLIDING_IDS:
         meta = his_reg.get(pid)
-        if not meta or pid in OUR_REGISTRY:
+        if not meta or pid in shared_set:
             continue  # shared ids are lane-1-owned; alias only net-new
         flag = meta.get("env_flag")
         if not flag:
