@@ -112,7 +112,15 @@ def main() -> int:
         print(f"{LOG} already applied (idempotent)")
         return 0
     # Upstream-merged drift: helper properties already exist.
-    if "has_quantized_kv_cache" in text or "has_block_dropping_layers" in text:
+    # [2026-07-25] vllm#47574 merged upstream (8ce53a616e) with a DIFFERENT
+    # formulation than the PR head this backport mirrors: a single
+    # `has_mixed_precision_kv_cache` property now feeds needs_kv_cache_zeroing
+    # (covers the quantized-hybrid stale-bytes case this patch targets).
+    if (
+        "has_quantized_kv_cache" in text
+        or "has_block_dropping_layers" in text
+        or "has_mixed_precision_kv_cache" in text
+    ):
         print(f"{LOG} upstream drift: quantized/hybrid zeroing properties "
               f"already present — self-retire (no-op)")
         return 0

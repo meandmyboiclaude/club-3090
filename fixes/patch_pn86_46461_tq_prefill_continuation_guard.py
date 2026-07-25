@@ -104,12 +104,16 @@ def main() -> int:
         print(f"{LOG} already applied (idempotent)")
         return 0
     # Upstream-merged drift: the continuation guard already exists.
-    if "def _prefill_attention" in text:
-        body = text.split("def _prefill_attention", 1)[1][:8000]
-        if "_has_continuation" in body:
-            print(f"{LOG} upstream drift: continuation guard already present "
-                  f"— self-retire (no-op)")
-            return 0
+    # [2026-07-25] whole-file check — `_has_continuation` only ever exists as
+    # this guard (upstream PR #46461, genesis PN401's improved form, or ours).
+    # The old 8000-char window after the first "def _prefill_attention" match
+    # missed PN401's guard when sibling patches (P44/P101/PN31...) shifted
+    # offsets or inserted an earlier occurrence of the split string, turning
+    # a benign already-guarded state into a boot-bricking FATAL.
+    if "_has_continuation" in text:
+        print(f"{LOG} upstream drift: continuation guard already present "
+              f"— self-retire (no-op)")
+        return 0
     if OLD not in text:
         print(f"{LOG} FATAL: anchor-not-found (prefill fast path) — upstream "
               f"refactor of _prefill_attention; re-derive before boot (mixed "

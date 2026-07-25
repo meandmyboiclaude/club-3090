@@ -44,9 +44,12 @@ TARGET_EAGLE = VLLM / "transformers_utils/configs/eagle.py"
 MARKER = "# PN92:"
 
 # --- sub-patch A: record explicitness before normalization -------------------
+# [2026-07-25 re-anchor] anchor narrowed to the infer-method comment alone:
+# nightly-0ba2aa35 replaced the "custom module path" comment+check with
+# _is_custom_proposer_path(); the comment line exists (once) in both versions
+# and the splice result is identical.
 A_OLD = (
     "        # infer method from user args\n"
-    "        # Check if the model field contains a custom module path (e.g., 'pkg.Mod')\n"
 )
 A_NEW = (
     "        # infer method from user args\n"
@@ -55,8 +58,6 @@ A_NEW = (
     "        # draft checkpoint may only fill in a missing method, never\n"
     "        # override an explicit one.\n"
     "        method_was_explicit = self.method is not None\n"
-    "\n"
-    "        # Check if the model field contains a custom module path (e.g., 'pkg.Mod')\n"
 )
 
 # --- sub-patch B: narrow medusa model_type injection to legacy checkpoints ---
@@ -144,6 +145,57 @@ D_NEW = (
     "                self._resolve_draft_method(method_was_explicit)\n"
 )
 
+# [2026-07-25 re-anchor] nightly-0ba2aa35 variant of the legacy chain
+# (adds Gemma4DSparkModel arch hint + inkling_mtp warning exemption) —
+# tried when the dev1060 form does not match. The replacement helpers
+# below carry both new behaviors (inert on older pins).
+D_OLD_V2 = (
+    "                # Automatically detect the method\n"
+    "                if self.method in (\"eagle\", \"eagle3\", \"dflash\", \"dspark\"):\n"
+    "                    pass\n"
+    "                # examples:\n"
+    "                # yuhuili/EAGLE-LLaMA3-Instruct-8B\n"
+    "                # yuhuili/EAGLE3-LLaMA3.1-Instruct-8B\n"
+    "                # AngelSlim/Qwen3-8B_eagle3\n"
+    "                # deepseek-ai/dspark_qwen3_8b_block7\n"
+    "                elif \"eagle-\" in self.draft_model_config.model.lower():\n"
+    "                    self.method = \"eagle\"\n"
+    "                elif \"eagle3\" in self.draft_model_config.model.lower():\n"
+    "                    self.method = \"eagle3\"\n"
+    "                elif \"dflash\" in self.draft_model_config.model.lower():\n"
+    "                    self.method = \"dflash\"\n"
+    "                elif (\n"
+    "                    \"dspark\" in self.draft_model_config.model.lower()\n"
+    "                    or \"Qwen3DSparkModel\" in self.draft_model_config.architectures\n"
+    "                    or \"Gemma4DSparkModel\" in self.draft_model_config.architectures\n"
+    "                ):\n"
+    "                    self.method = \"dspark\"\n"
+    "                elif self.draft_model_config.hf_config.model_type == \"medusa\":\n"
+    "                    self.method = \"medusa\"\n"
+    "                elif self.draft_model_config.hf_config.model_type == \"mlp_speculator\":\n"
+    "                    self.method = \"mlp_speculator\"\n"
+    "                elif self.draft_model_config.hf_config.model_type in get_args(\n"
+    "                    MTPModelTypes\n"
+    "                ):\n"
+    "                    self.method = \"mtp\"\n"
+    "                    if (\n"
+    "                        self.num_speculative_tokens > 1\n"
+    "                        and self.draft_model_config.hf_config.model_type\n"
+    "                        not in (\"step3p5_mtp\", \"inkling_mtp\")\n"
+    "                    ):\n"
+    "                        logger.warning(\n"
+    "                            \"Enabling num_speculative_tokens > 1 will run \"\n"
+    "                            \"multiple times of forward on same MTP layer\"\n"
+    "                            \",which may result in lower acceptance rate\"\n"
+    "                        )\n"
+    "                elif self.method == \"draft_model\":\n"
+    "                    pass\n"
+    "                else:\n"
+    "                    raise NotImplementedError(\n"
+    "                        f\"Unsupported speculative method: '{self.method}'\"\n"
+    "                    )\n"
+)
+
 # --- sub-patch E: insert the resolution helpers ------------------------------
 E_OLD = (
     "            return AttentionBackendEnum[value.upper()]\n"
@@ -193,8 +245,13 @@ E_NEW = (
     '            return "eagle3"\n'
     '        if "dflash" in model_name:\n'
     '            return "dflash"\n'
-    '        if "dspark" in model_name or "Qwen3DSparkModel" in (\n'
-    "            self.draft_model_config.architectures or []\n"
+    "        # [2026-07-25] Gemma4DSparkModel added upstream (nightly-0ba2aa35\n"
+    "        # chain variant); inert on pins whose checkpoints never carry it.\n"
+    "        _archs = self.draft_model_config.architectures or []\n"
+    "        if (\n"
+    '            "dspark" in model_name\n'
+    '            or "Qwen3DSparkModel" in _archs\n'
+    '            or "Gemma4DSparkModel" in _archs\n'
     "        ):\n"
     '            return "dspark"\n'
     "        hf_config = self.draft_model_config.hf_config\n"
@@ -259,7 +316,10 @@ E_NEW = (
     "        if (\n"
     '            self.method == "mtp"\n'
     "            and self.num_speculative_tokens > 1\n"
-    '            and self.draft_model_config.hf_config.model_type != "step3p5_mtp"\n'
+    "            # [2026-07-25] inkling_mtp exemption added upstream\n"
+    "            # (nightly-0ba2aa35 chain variant); inert on older pins.\n"
+    "            and self.draft_model_config.hf_config.model_type\n"
+    '            not in ("step3p5_mtp", "inkling_mtp")\n'
     "        ):\n"
     "            logger.warning(\n"
     '                "Enabling num_speculative_tokens > 1 will run "\n'
@@ -275,7 +335,7 @@ SPEC_SUBS = (
     ("explicitness-record", A_OLD, A_NEW),
     ("legacy-medusa-narrowing", B_OLD, B_NEW),
     ("medusa-vocab-align", C_OLD, C_NEW),
-    ("detect-chain-replacement", D_OLD, D_NEW),
+    ("detect-chain-replacement", (D_OLD, D_OLD_V2), D_NEW),
     ("resolution-helpers", E_OLD, E_NEW),
 )
 
@@ -308,7 +368,23 @@ EAGLE_NEW = (
 def apply_subs(path, subs, log_name):
     text = path.read_text()
     for name, old, new in subs:
-        if old not in text:
+        # [2026-07-25] `old` may be a tuple of candidate anchors (pin variants),
+        # tried in order; exactly one must match exactly once.
+        candidates = old if isinstance(old, tuple) else (old,)
+        matched = None
+        for cand in candidates:
+            n = text.count(cand)
+            if n == 1:
+                matched = cand
+                break
+            if n > 1:
+                print(
+                    f"{LOG} FATAL: ambiguous anchor ({log_name}:{name}, "
+                    f"{n} matches)",
+                    file=sys.stderr,
+                )
+                return None
+        if matched is None:
             print(
                 f"{LOG} FATAL: anchor-not-found ({log_name}:{name}) — upstream "
                 f"refactor; re-derive before boot (explicit method:'mtp' loses "
@@ -316,14 +392,7 @@ def apply_subs(path, subs, log_name):
                 file=sys.stderr,
             )
             return None
-        if text.count(old) != 1:
-            print(
-                f"{LOG} FATAL: ambiguous anchor ({log_name}:{name}, "
-                f"{text.count(old)} matches)",
-                file=sys.stderr,
-            )
-            return None
-        text = text.replace(old, new, 1)
+        text = text.replace(matched, new, 1)
     return text
 
 
