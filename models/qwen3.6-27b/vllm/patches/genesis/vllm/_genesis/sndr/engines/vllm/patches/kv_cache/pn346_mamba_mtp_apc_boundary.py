@@ -122,6 +122,44 @@ Source rationale: Sander 2026-06-09 — comprehensive 3-week
 multi-agent research synthesis (see journal
 2026-06-09-comprehensive-research-roadmap.md).
 
+SUPERSEDED 2026-07-25 — do NOT re-anchor (verdict + evidence)
+=============================================================
+
+PN346 reports ``required_anchor_missing`` on the wheel-v2 boot. It is
+NOT a wheel-v2 regression and it is NOT a capability loss:
+
+  1. The anchor is stale on EVERY pinned image, not just wheel v2.
+     ``single_type_kv_cache_manager.py`` was extracted from
+     dev1060cherry-20260713, wheel v1 dev1474cherry-1711 and wheel v2
+     dev1474cherrymax-1757; ``PN346_ANCHOR_OLD`` is count==0 in all
+     three. Upstream inserted the fine-grained hash-lookup branch
+     (``alignment_tokens < block_size`` early-return) between the
+     ``block_size = kv_cache_spec.block_size`` line and the
+     ``max_num_blocks = ...`` line the 4-line anchor spanned.
+
+  2. The capability is delivered by ``/fixes`` **pn87**
+     (``patch_pn87_43650_mamba_eagle_cache_hit_boundary.py``), which
+     applied on the wheel-v2 boot. pn87's COARSE hunk emits the exact
+     same guard PN346 emits (``if drop_eagle_block and max_num_blocks >
+     0: max_num_blocks -= 1`` immediately before the right-to-left search
+     loop) and additionally fixes the FINE-grained loop PN346 never knew
+     about (``max_num_partial_units``) — that second loop is the one the
+     upstream refactor added, so pn87 is a strict superset of PN346 on
+     this pin. Its two anchors are count==1 in all three images.
+
+  3. Forcing PN346 would be actively harmful. Lane-2 sndr dispatches
+     before the ``/fixes`` lane, so a re-anchored PN346 would consume
+     pn87's COARSE anchor and either (a) make pn87 FATAL on its anchor
+     check, losing the fine-loop half, or (b) double-decrement
+     ``max_num_blocks``, walking the cache-hit boundary back two blocks.
+
+  Coordinator half is separately intact: PN346B (curr_hit_length min()
+  clamp, vllm#45614) and PN384 (skip_eagle_pop threading, vllm#44986)
+  both report RESULT applied on the same boot.
+
+The ``PN346_ANCHOR_OLD``/``_NEW`` constants are retained because P85's
+dual Site-2 anchor is assembled from them — do not delete them.
+
 Author: Sander Barzov Aleksandr (Sandermage, Ukraine, Odessa).
 Vendor target: vllm-project/vllm#43650 (open as of 2026-06-09).
 Closes vllm#43559.
