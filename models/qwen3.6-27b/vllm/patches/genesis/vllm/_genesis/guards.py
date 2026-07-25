@@ -504,6 +504,8 @@ KNOWN_GOOD_VLLM_PINS: tuple[str, ...] = (
     # fla third_party re-anchors + PN86/88/92, P34/P74, PN293/367/384/389
     # re-derived this session (branch bump-vllm-9e57de71-tools-text).
     "0.23.1rc1.dev1474+g0ba2aa35a",
+    # dev1474 cherry wheel (setuptools-scm degenerate version, shallow CI clone)
+    "0.1.dev1+g91fdf2451.d20260725",
 )
 
 

@@ -732,6 +732,8 @@ KNOWN_GOOD_VLLM_PINS: tuple[str, ...] = (
     # fla third_party alias + v0ba anchor generations landed this session.
     "0.23.1rc1.dev1474+g0ba2aa35a",
     "nightly-0ba2aa35a81dcc3246b26291368b53fa2389c7d7",
+    # dev1474 cherry wheel (setuptools-scm degenerate version, shallow CI clone)
+    "0.1.dev1+g91fdf2451.d20260725",
 )
 
 

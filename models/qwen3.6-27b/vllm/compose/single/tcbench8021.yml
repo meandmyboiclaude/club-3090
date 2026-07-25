@@ -36,7 +36,10 @@ services:
     # (= stock nightly-9e57de71 + club-dev1060-cherry@3da1671f wheel, 7 picks:
     # #48361 #45660 #48475 #46461 #47574 #48483 #48363 — triage vs new main in
     # docs/UPSTREAM.md). Rollback: revert this image: line to the dev1060cherry tag.
-    image: docker.io/vllm/vllm-openai@sha256:e4f855492d6c95b00cdd21ec642f00d9747df43a3bbedab903316be1a5cd2207
+    # [2026-07-25 17:1x] wheel v1 bake: stock nightly-0ba2aa35 base + club-dev1474-cherry
+    # wheel (11 picks, GLIBC<=2.34, CI run 30161714847). v2 (max+kvq+mtpq) builds as
+    # CI 30163221644. Rollback: stock digest sha256:e4f85549... (line above history).
+    image: localhost/vllm-qwen36-endgame:dev1474cherry-1711-20260725
     container_name: vllm-tcbench-8021
     restart: unless-stopped
     healthcheck:
@@ -175,6 +178,9 @@ services:
       # our offline-GPTQ + integrated-MTP config it NO-OPS (harmless). The real
       # drafter VRAM lever = quantizing the fp16 MTP head weights (build item).
       - GENESIS_ENABLE_PN8_MTP_DRAFT_ONLINE_QUANT=1
+      # [2026-07-25] ladder knobs (inert defaults; flip per-boot via unit env)
+      - VLLM_MTP_HEAD_QUANT=${VLLM_MTP_HEAD_QUANT:-off}
+      - VLLM_TQ_LAYER_BITS=${VLLM_TQ_LAYER_BITS:-}
       - GENESIS_ENABLE_PN17_FA2_LSE_CLAMP=1
       - GENESIS_ENABLE_PN19_SCOPED_MAX_SPLIT=1
       # [2026-07-14] PN59 (streaming GDN) DISABLED so chunk.py keeps a plain fused-replaceable
