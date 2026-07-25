@@ -300,6 +300,24 @@ def verify_capability(cap: dict, insp, env: dict[str, str], mode: str) -> dict:
                        "carries the verdict",
                 "flag": fstate}
 
+    # Markers written only under a SECONDARY env gate (a debug knob, an opt-in
+    # instrumentation half) are not effect handles unless that gate is on.
+    # P83's "Genesis P83 DEBUG instrumentation v7.53.6" is built inside
+    # `if os.environ.get("GENESIS_P83_DEBUG") == "1"` and was scoring the row
+    # PARTIAL on every boot that did not set a debug variable.
+    cond = cap.get("markers_conditional") or {}
+    if cond and markers:
+        off = [m for m, g in cond.items() if not _truthy(env.get(g))]
+        if off:
+            markers = [m for m in markers if m not in off]
+            notes.append(f"{len(off)} conditional marker(s) excluded "
+                         f"(gate off: {sorted({cond[m] for m in off})})")
+            if not markers:
+                return {"state": DARK,
+                        "why": "every marker is gated behind a secondary env "
+                               f"knob that is unset ({sorted({cond[m] for m in off})})",
+                        "flag": fstate}
+
     # --- marker sweep: the primary EFFECT check -----------------------------
     if markers and targets:
         if mode == "image":
@@ -390,6 +408,19 @@ def verify_capability(cap: dict, insp, env: dict[str, str], mode: str) -> dict:
         if insp.exists(src):
             if fstate == "off":
                 return {"state": DARK, "why": "module present, flag off", "flag": fstate}
+            # Presence is the documented handle for kind=="module" ONLY.  For a
+            # patch that is supposed to CHANGE something, "its own source file
+            # is where the read-only bind mount put it" is not evidence of any
+            # kind — it is true whether the patch ran, skipped or crashed.  Say
+            # UNVERIFIABLE, which is the state the README defines for exactly
+            # this ("no effect handle exists at all; it still announces an
+            # APPLY decision.  Fix by giving it a marker").
+            if kind != "module":
+                return {"state": UNVERIFIABLE,
+                        "why": "no effect handle: the only thing checkable is "
+                               "its own source file, which is a read-only bind "
+                               "mount and is present regardless. Give it a marker.",
+                        "flag": fstate}
             return {"state": LIVE, "why": "module present at its container path",
                     "flag": fstate}
         return {"state": MISSING, "why": f"module absent: {src}", "flag": fstate}

@@ -54,17 +54,196 @@ ID_PATTERNS = [
 
 # ------------------------------------------------------------- ast helpers --
 
-def _const_str(node) -> str | None:
-    """Fold a string expression: literals, implicit concat, and `A + B`."""
+def _const_str(node, consts: dict[str, str] | None = None) -> str | None:
+    """Fold a string expression: literals, implicit concat, `A + B`, and —
+    when `consts` is supplied — module-level names and f-strings built from
+    them.
+
+    The f-string case is not cosmetic.  `MARKER = f"{BASE} {VERSION}"` is how
+    three lane-2 modules spell their marker; without folding, the extractor
+    harvested `BASE` and `VERSION` as two INDEPENDENT markers and then scored
+    a row PARTIAL for "missing 'v7.62.2'" — a bare version tag that is not an
+    effect handle at all.
+    """
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-        a, b = _const_str(node.left), _const_str(node.right)
+        a, b = _const_str(node.left, consts), _const_str(node.right, consts)
         if a is not None and b is not None:
             return a + b
-    if isinstance(node, ast.JoinedStr):
-        return None
+    if consts is not None:
+        if isinstance(node, ast.Name):
+            return consts.get(node.id)
+        if isinstance(node, ast.JoinedStr):
+            out = []
+            for part in node.values:
+                if isinstance(part, ast.Constant) and isinstance(part.value, str):
+                    out.append(part.value)
+                elif isinstance(part, ast.FormattedValue):
+                    s = _const_str(part.value, consts)
+                    if s is None:
+                        return None
+                    out.append(s)
+                else:
+                    return None
+            return "".join(out)
     return None
+
+
+def _module_str_consts(tree: ast.Module) -> dict[str, str]:
+    """Module-level NAME -> folded string value, in source order so a constant
+    may reference one defined above it (which is how the f-string markers are
+    written)."""
+    consts: dict[str, str] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        s = _const_str(node.value, consts)
+        if s is None:
+            continue
+        for t in node.targets:
+            if isinstance(t, ast.Name):
+                consts[t.id] = s
+    return consts
+
+
+_ENV_READ = ("environ", "getenv")
+
+
+def _env_gate_of(test) -> str | None:
+    """The env var name an `if` test reads, if it reads exactly one."""
+    names: list[str] = []
+    for n in ast.walk(test):
+        if not isinstance(n, ast.Call):
+            continue
+        fn = n.func
+        attr = getattr(fn, "attr", None) or getattr(fn, "id", None)
+        base = getattr(getattr(fn, "value", None), "id", None) or \
+            getattr(getattr(fn, "value", None), "attr", None)
+        if attr in ("get", "getenv") and (base in _ENV_READ or attr == "getenv"):
+            if n.args and isinstance(n.args[0], ast.Constant) \
+                    and isinstance(n.args[0].value, str):
+                names.append(n.args[0].value)
+        elif isinstance(fn, ast.Name) and fn.id in ("is_enabled", "_is_enabled"):
+            if n.args and isinstance(n.args[0], ast.Constant) \
+                    and isinstance(n.args[0].value, str):
+                names.append(n.args[0].value)
+    for n in ast.walk(test):
+        if isinstance(n, ast.Subscript) and \
+                getattr(getattr(n, "value", None), "attr", None) == "environ" and \
+                isinstance(n.slice, ast.Constant) and isinstance(n.slice.value, str):
+            names.append(n.slice.value)
+    uniq = sorted(set(names))
+    return uniq[0] if len(uniq) == 1 else None
+
+
+_WRITE_CALLS = ("write_text", "replace", "sub", "format", "TextPatcher",
+                "TextPatchGroup", "TextPatch")
+_VERSION_ONLY = re.compile(r"^v?\d+(\.\d+)+[a-z0-9_.-]*$", re.I)
+
+
+def _write_used_names(tree: ast.Module) -> set[str]:
+    """Names that participate in BUILDING text, as opposed to being compared
+    against it or used as an attribute name.
+
+    The distinction is the whole difference between an effect handle and a
+    documentation constant.  Three shapes are NOT handles and were all being
+    scored:
+      * `if MARKER_V2 in text:` — the marker of the PREVIOUS version, kept only
+        so a stale apply is detectable.  It is absent BY DESIGN (PN71).
+      * `setattr(wrapped, GENESIS_PN364_MARKER, True)` — an attribute NAME on a
+        function object.  It cannot appear in a file, ever (PN364).
+      * a `*_MARKER` constant defined and then never referenced at all (PN127
+        writes a jinja asset; the constant is decorative).
+    """
+    used: set[str] = set()
+    skip: set[int] = set()          # Name nodes in an excluded slot
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Compare):
+            # `if MARKER in text:` — an idempotency / stale-apply probe.
+            for n in ast.walk(node):
+                if isinstance(n, ast.Name):
+                    skip.add(id(n))
+        elif isinstance(node, ast.Call):
+            fn = getattr(node.func, "id", None)
+            if fn in ("setattr", "getattr", "hasattr", "delattr") \
+                    and len(node.args) >= 2 and isinstance(node.args[1], ast.Name):
+                skip.add(id(node.args[1]))
+        elif isinstance(node, ast.Assign):
+            for t in node.targets:
+                for n in ast.walk(t):
+                    if isinstance(n, ast.Name):
+                        skip.add(id(n))
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and id(node) not in skip \
+                and isinstance(node.ctx, ast.Load):
+            used.add(node.id)
+    return used
+
+
+def _conditional_markers(tree: ast.Module, consts: dict[str, str]) -> dict[str, str]:
+    """marker -> env var, for markers whose TextPatcher is only ever built
+    under an env-gated `if`.
+
+    P83 is the reference case: `_make_patcher_kv_cache_manager()` builds a
+    second patcher whose marker is "Genesis P83 DEBUG instrumentation v7.53.6",
+    and `apply()` calls it only inside
+    `if os.environ.get("GENESIS_P83_DEBUG", "") == "1":`.  With that env unset
+    -- which is every normal boot -- the marker is CORRECTLY absent, and the
+    ledger scored the row DEGRADED/PARTIAL for it on every run.  A debug knob
+    nobody set is not a lost sub-patch.
+    """
+    fn_markers: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        found: set[str] = set()
+        for sub in ast.walk(node):
+            if not isinstance(sub, ast.Call):
+                continue
+            call_name = getattr(sub.func, "id", None) or getattr(sub.func, "attr", None)
+            if call_name not in ("TextPatcher", "TextPatchGroup"):
+                continue
+            for kw in sub.keywords or []:
+                if kw.arg == "marker":
+                    s = _const_str(kw.value, consts)
+                    if s:
+                        found.add(s)
+        if found:
+            fn_markers[node.name] = found
+
+    gated: dict[str, str] = {}
+    ungated: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for sub in ast.walk(node):
+            if not isinstance(sub, ast.If):
+                continue
+            gate = _env_gate_of(sub.test)
+            if not gate:
+                continue
+            for inner in ast.walk(sub):
+                if isinstance(inner, ast.Call):
+                    cn = getattr(inner.func, "id", None)
+                    for m in fn_markers.get(cn or "", ()):
+                        gated[m] = gate
+    # A marker built by a factory that is ALSO called outside any env gate is
+    # not conditional.  Only demote the ones whose every construction site is
+    # gated.
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        gated_calls = {id(c) for sub in ast.walk(node)
+                       if isinstance(sub, ast.If) and _env_gate_of(sub.test)
+                       for c in ast.walk(sub) if isinstance(c, ast.Call)}
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Call) and id(sub) not in gated_calls:
+                cn = getattr(sub.func, "id", None)
+                ungated |= fn_markers.get(cn or "", set())
+    return {m: g for m, g in gated.items() if m not in ungated}
 
 
 def _path_strs(node) -> list[str]:
@@ -129,26 +308,16 @@ def scan_module(path: str, lane: str, mount_host_root: str) -> dict | None:
         return None
 
     fname = os.path.basename(path)
+    const_map = _module_str_consts(tree)
+    write_names = _write_used_names(tree)
+    marker_names: set[str] = set()   # constants reachable from a `marker=` kwarg
     markers: list[str] = []
+    doc_markers: list[str] = []      # MARKER-named constants NEVER passed as marker=
     targets: list[str] = []
 
-    # module-level constant assignments
-    for node in tree.body:
-        if not isinstance(node, ast.Assign):
-            continue
-        names = [t.id for t in node.targets if isinstance(t, ast.Name)]
-        for name in names:
-            up = name.upper()
-            if "MARKER" in up and "DRIFT" not in up and "UPSTREAM" not in up:
-                s = _const_str(node.value)
-                if s:
-                    markers.append(s)
-                elif isinstance(node.value, (ast.Tuple, ast.List)):
-                    markers += [x for x in (_const_str(e) for e in node.value.elts) if x]
-            if up.startswith("TARGET") or up.endswith("_TARGET") or up in ("PATHS", "FILES"):
-                targets += _path_strs(node.value)
-
-    # TextPatcher(...) / resolve_vllm_file(...) anywhere in the module
+    # TextPatcher(...) / resolve_vllm_file(...) anywhere in the module.
+    # Done FIRST because the marker= kwargs decide which module-level MARKER
+    # constants are effect handles and which are documentation.
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -160,11 +329,56 @@ def scan_module(path: str, lane: str, mount_host_root: str) -> dict | None:
         elif fname_call in ("TextPatcher", "TextPatchGroup"):
             for kw in node.keywords or []:
                 if kw.arg == "marker":
-                    s = _const_str(kw.value)
+                    marker_names |= {n.id for n in ast.walk(kw.value)
+                                     if isinstance(n, ast.Name)}
+                    s = _const_str(kw.value, const_map)
                     if s:
                         markers.append(s)
                 elif kw.arg == "target_file":
                     targets += _path_strs(kw.value)
+
+    # module-level constant assignments
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        for name in names:
+            up = name.upper()
+            if "MARKER" in up and "DRIFT" not in up and "UPSTREAM" not in up:
+                vals = []
+                s = _const_str(node.value, const_map)
+                if s:
+                    vals.append(s)
+                elif isinstance(node.value, (ast.Tuple, ast.List)):
+                    vals += [x for x in (_const_str(e, const_map)
+                                         for e in node.value.elts) if x]
+                # A constant that neither reaches a `marker=` kwarg nor
+                # participates in building text cannot be written into any
+                # target file.  Scoring it anyway produced 4 of the 5 false
+                # PARTIAL rows on the 07-25 baseline (PN29/PN298 legacy
+                # re-exports, PN55's v1 marker) plus the PN127/PN364
+                # "marker absent anywhere" rows.
+                vals = [v for v in vals if not _VERSION_ONLY.match(v.strip())]
+                for v in vals:
+                    # Third signal, and the one that carries the /fixes lane:
+                    # those patches spell `MARKER = "# PN99:"` and then write
+                    # it as literal text INSIDE a replacement hunk, so the name
+                    # is only ever read by `if MARKER in text`.  A value that
+                    # occurs more than once in the module source is baked into
+                    # some other string literal, i.e. into a replacement.
+                    is_handle = (name in marker_names or name in write_names
+                                 or src.count(v) > 1)
+                    (markers if is_handle else doc_markers).append(v)
+            if up.startswith("TARGET") or up.endswith("_TARGET") or up in ("PATHS", "FILES"):
+                targets += _path_strs(node.value)
+
+    # A module left with NO effect handle is reported UNVERIFIABLE, which is
+    # the honest state: per the README that is "no effect handle exists at all
+    # — a blind spot; it still announces an APPLY decision.  Fix by giving it a
+    # marker."  Restoring the doc constants to avoid that would just re-create
+    # the false MISSING they caused (PN127 announces `RESULT applied` while its
+    # constant is defined once and read by nothing).
+    conditional = _conditional_markers(tree, const_map)
 
     # kind classification — decides HOW it can be verified at all
     has_text = "TextPatcher(" in src or "write_text(" in src or ".replace(" in src and "MARKER" in src
@@ -204,19 +418,29 @@ def scan_module(path: str, lane: str, mount_host_root: str) -> dict | None:
     prs = sorted({("vllm#" + m) for m in re.findall(r"vllm#(\d{4,6})", src)})
     prs += sorted({("sglang#" + m) for m in re.findall(r"SGLang#(\d{4,6})", src, re.I)})
 
-    return {
+    eff = sorted(set(m for m in markers if len(m) >= 4))
+    rec = {
         "id": _derive_id(fname, src),
         "lane": lane,
         "source_host": os.path.relpath(path, REPO),
         "source_container": cpath,
         "kind": kind,
         "targets": sorted(set(_norm_target(t) for t in targets)),
-        "markers": sorted(set(m for m in markers if len(m) >= 4)),
+        "markers": eff,
         "flags": flags,
         "upstream": prs,
         "status": status,
         "summary": summary,
     }
+    doc_only = sorted(set(m for m in doc_markers if len(m) >= 4) - set(eff))
+    if doc_only:
+        # Kept so an operator grepping the OLD marker string still finds the
+        # module.  Never scored: the verifier would report a permanent PARTIAL.
+        rec["markers_doc"] = doc_only
+    cond = {m: g for m, g in conditional.items() if m in eff}
+    if cond:
+        rec["markers_conditional"] = cond
+    return rec
 
 
 def load_registry(path: str) -> dict:
@@ -384,13 +608,10 @@ def main() -> int:
     # sndr_lane.apply_policy() computes this as
     #     shared = set(lane2_registry) & set(lane1_registry)   (+ a rename map)
     # i.e. on REGISTRY KEYS.  Keying it on the extractor's own filename-derived
-    # id instead marked 6 rows suppressed that the boot plainly applies: the
+    # id instead marked 8 rows suppressed that the boot plainly applies: the
     # chunk_o consolidated module is registry id PN298 (no lane-1 twin) but its
     # filename `pn29_pn298_...` derives to PN29, which lane-1 does own.  Its
     # boot line reads `APPLY PN298`, and the ledger called it partially lost.
-    # Cross-checked all 7 flips against the boot's own words: P18B_TEXT,
-    # PN16_V6 and PN298 log APPLY; P23_WIRE, P29_HEAL and PN102 log a plain
-    # "opt-in only"; only P18b logs "explicitly disabled by operator".
     # Rows with no registry join keep the filename-derived fallback.
     l1_ids = {c["id"] for c in caps if c["lane"].startswith("lane1")}
     l1_reg_ids = {str(k).upper() for k in reg1}
