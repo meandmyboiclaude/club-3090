@@ -169,6 +169,17 @@ def case3_tag_and_marker_exclusion(tmp) -> None:
     rows, _ = R.load_sink(sink, {}, marker_req_ids=ids)
     check("marker req_ids excluded by id", len(rows) == 14 and not tags,
           f"rows={len(rows)} marker_ids={len(ids)}")
+    # A marker naming a LIVE window must not take the window's genuine rows
+    # with it (measured on the live sink: a 3-row marker cost 5 real rows).
+    with open(os.path.join(sink, ".synthetic-b3-numerics-y.json"), "w",
+              encoding="utf-8") as f:
+        json.dump({"tool": "b3-numerics", "tags": ["20260725-184327"],
+                   "req_ids": ["live-2"]}, f)
+    ids2, tags2 = R.load_markers(sink)
+    rows2, _ = R.load_sink(sink, {}, marker_req_ids=ids2)
+    check("a marker's tags are provenance, never a window exclusion",
+          len(rows2) == 13 and tags2 == {"20260725-184327"},
+          f"rows={len(rows2)} (16 - 3 named req_ids), tags={sorted(tags2)}")
 
 
 def case4_temporal_split_is_out_of_sample() -> None:

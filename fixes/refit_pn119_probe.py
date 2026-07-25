@@ -196,11 +196,19 @@ def _iter_meta_lines(path: str):
 
 
 def load_markers(sink_dir: str) -> tuple[set[str], set[str]]:
-    """`.synthetic-*.json` markers: {"tag": ..., "req_ids": [...]}.
+    """`.synthetic-*.json` markers: {"tags": [...], "req_ids": [...]}.
 
     Capture tools that must hit the LIVE endpoint (and therefore the live
     sink) drop one of these naming the rows they caused, so their traffic
     is excluded even if the operator forgets --exclude-tag.
+
+    Exclusion is BY REQ_ID ONLY. The marker's `tags` are provenance — the
+    windows the rows landed in — and must never become tag exclusions: a
+    live sink window holds the diagnostic's rows and the genuine traffic
+    that was flowing at the same moment, and dropping the window throws the
+    genuine rows away too (measured 2026-07-25: 5 real rows lost to one
+    3-row marker). Whole-window exclusion stays an explicit operator
+    decision, i.e. --exclude-tag.
     """
     req_ids: set[str] = set()
     tags: set[str] = set()
@@ -726,7 +734,9 @@ def main() -> int:
                     pass
 
     marker_ids, marker_tags = load_markers(args.sink)
-    exclude_tags = list(args.exclude_tag) + sorted(marker_tags)
+    counts["marker_req_ids"] = len(marker_ids)
+    counts["marker_tags_seen"] = len(marker_tags)   # provenance, NOT exclusions
+    exclude_tags = list(args.exclude_tag)
     t_parse = time.time()
     raw, file_sizes = load_sink(args.sink, counts, exclude_tags, marker_ids)
     counts["parse_s"] = round(time.time() - t_parse, 2)
