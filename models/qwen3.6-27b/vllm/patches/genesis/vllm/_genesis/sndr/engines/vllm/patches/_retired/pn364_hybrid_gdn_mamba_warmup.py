@@ -357,6 +357,21 @@ def _env_disabled() -> bool:
     )
 
 
+_PN364_RETIRED_20260726 = (
+    "PN364 retired 2026-07-26 (exec-discard triage). The install is a plain "
+    "setattr on Worker.compile_or_warm_up_model made inside "
+    "apply_all's own process, which the entrypoint then replaces with "
+    "`exec vllm serve` — so it printed RESULT applied on every boot of this "
+    "rig and never ran once. A P103/P39a self-install hook would fix that, "
+    "and was priced and declined: the payoff is first-request TTFT only, "
+    "the host-mounted Triton cache pays that cost once per pin, the 3-warm-"
+    "run bench protocol hides it, and the hook site runs AFTER KV cache "
+    "allocation — the tightest VRAM point of a 0.935-util boot. It does NOT "
+    "address BUG-128. Grounds per module in patches/_retired/README.md. "
+    "Set GENESIS_ALLOW_RETIRED=1 to engage anyway."
+)
+
+
 def apply() -> tuple[str, str]:
     """Install PN364 wrapper on Worker.compile_or_warm_up_model.
 
@@ -391,6 +406,10 @@ def apply() -> tuple[str, str]:
     per-class idempotency check via ``GENESIS_PN364_MARKER`` —
     that's the only correct one.
     """
+    if os.environ.get("GENESIS_ALLOW_RETIRED", "").strip().lower() not in (
+        "1", "true", "yes", "on",
+    ):
+        return "skipped", _PN364_RETIRED_20260726
     if _env_disabled():
         return "skipped", "PN364 disabled via GENESIS_DISABLE_PN364=1"
 

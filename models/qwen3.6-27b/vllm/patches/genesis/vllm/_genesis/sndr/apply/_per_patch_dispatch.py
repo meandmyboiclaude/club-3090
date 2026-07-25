@@ -1535,7 +1535,7 @@ def apply_patch_pn128_spec_decode_helper_warmup() -> PatchResult:
     if not _state._APPLY_MODE:
         return _applied(name, "dry-run: runtime hook ready")
     try:
-        from sndr.engines.vllm.patches.compile_safety import (
+        from sndr.engines.vllm.patches._retired import (
             pn128_spec_decode_helper_warmup as _wiring,
         )
     except Exception as e:
@@ -1560,7 +1560,7 @@ def apply_patch_pn129_slot_mapping_warmup() -> PatchResult:
     if not _state._APPLY_MODE:
         return _applied(name, "dry-run: runtime hook ready")
     try:
-        from sndr.engines.vllm.patches.compile_safety import (
+        from sndr.engines.vllm.patches._retired import (
             pn129_slot_mapping_warmup as _wiring,
         )
     except Exception as e:
@@ -1584,7 +1584,7 @@ def apply_patch_pn130_tq_decode_warmup() -> PatchResult:
     if not _state._APPLY_MODE:
         return _applied(name, "dry-run: runtime hook ready")
     try:
-        from sndr.engines.vllm.patches.compile_safety import (
+        from sndr.engines.vllm.patches._retired import (
             pn130_turboquant_decode_warmup as _wiring,
         )
     except Exception as e:
@@ -1639,7 +1639,7 @@ def apply_patch_pn126_v1_decode_kernel_warmup() -> PatchResult:
     if not _state._APPLY_MODE:
         return _applied(name, "dry-run: runtime hook ready")
     try:
-        from sndr.engines.vllm.patches.compile_safety import (
+        from sndr.engines.vllm.patches._retired import (
             pn126_v1_decode_kernel_warmup as _wiring,
         )
     except Exception as e:
@@ -5242,7 +5242,7 @@ def apply_patch_N364_hybrid_gdn_mamba_warmup() -> PatchResult:
     mean (less variance from mid-bench JIT events). No effect on
     steady-state wall_TPS in mean. Auto-skip on V2 / enforce_eager /
     non-hybrid. Opt-in via GENESIS_ENABLE_PN364_HYBRID_GDN_WARMUP=1."""
-    from sndr.engines.vllm.patches.compile_safety import (
+    from sndr.engines.vllm.patches._retired import (
         pn364_hybrid_gdn_mamba_warmup as _wiring,
     )
     status, detail = _wiring.apply()

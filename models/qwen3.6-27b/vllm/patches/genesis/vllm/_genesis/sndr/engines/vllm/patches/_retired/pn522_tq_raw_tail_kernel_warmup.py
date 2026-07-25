@@ -204,8 +204,27 @@ def raw_tail_kernel_warmup(worker) -> None:
                  n, k1)
 
 
+_PN522_RETIRED_20260726 = (
+    "PN522 retired 2026-07-26 (exec-discard triage). The install is a plain "
+    "setattr on model_executor.warmup.kernel_warmup made inside "
+    "apply_all's own process, which the entrypoint then replaces with "
+    "`exec vllm serve` — so it printed RESULT applied on every boot of this "
+    "rig and never ran once. A P103/P39a self-install hook would fix that, "
+    "and was priced and declined: the payoff is first-request TTFT only, "
+    "the host-mounted Triton cache pays that cost once per pin, the 3-warm-"
+    "run bench protocol hides it, and the hook site runs AFTER KV cache "
+    "allocation — the tightest VRAM point of a 0.935-util boot. It does NOT "
+    "address BUG-128. Grounds per module in patches/_retired/README.md. "
+    "Set GENESIS_ALLOW_RETIRED=1 to engage anyway."
+)
+
+
 def apply() -> tuple[str, str]:
     """Wrap kernel_warmup to pre-compile the PN521 raw-tail kernel."""
+    if os.environ.get("GENESIS_ALLOW_RETIRED", "").strip().lower() not in (
+        "1", "true", "yes", "on",
+    ):
+        return "skipped", _PN522_RETIRED_20260726
     global _APPLIED, _ORIGINAL_KERNEL_WARMUP
 
     if not _env_enabled():

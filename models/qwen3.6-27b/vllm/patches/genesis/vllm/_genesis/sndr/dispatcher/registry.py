@@ -918,8 +918,23 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
         # so it cannot be a requires_patches target; PN522.apply() checks the
         # PN521 env flag directly at runtime and no-ops when it is off.
         "requires_patches": ["P67", "P67b"],
-        "apply_module": "sndr.engines.vllm.patches.compile_safety.pn522_tq_raw_tail_kernel_warmup",
-        "lifecycle": "experimental",
+        "apply_module": "sndr.engines.vllm.patches._retired.pn522_tq_raw_tail_kernel_warmup",
+        "lifecycle": "retired",
+        "retired_waiver": True,
+        "retired_reason": (
+            "RETIRED 2026-07-26 (exec-discard triage). Installs by setattr on\n"
+            "            Worker.compile_or_warm_up_model inside apply_all's own process,\n"
+            "            which `exec vllm serve` then replaces -- so it announced \"RESULT\n"
+            "            applied\" on every boot of this rig and never ran once. Restoring\n"
+            "            it (P103/P39a self-install hook into v1/worker/gpu_worker.py) was\n"
+            "            priced and declined: the payoff is first-request TTFT only, the\n"
+            "            Triton cache is host-mounted so that cost is paid once per pin,\n"
+            "            the 3-warm-run bench protocol hides it, and compile_or_warm_up_model\n"
+            "            runs AFTER KV allocation -- the tightest VRAM point of the boot on a\n"
+            "            0.935-util 3090. It does NOT address BUG-128: that death is in\n"
+            "            get_kv_cache_configs, strictly before this hook is reached. Grounds\n"
+            "            per module in patches/_retired/README.md."
+        ),
         "implementation_status": "full",
     },
     "PN521_SPLIT_K": {
@@ -2394,10 +2409,25 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
         "implementation_status": "full",
         "source": "vllm_pr_backport",
         "apply_module": (
-            "sndr.engines.vllm.patches.compile_safety."
+            "sndr.engines.vllm.patches._retired."
             "pn128_spec_decode_helper_warmup"
         ),
-        "lifecycle": "experimental",
+        "lifecycle": "retired",
+        "retired_waiver": True,
+        "retired_reason": (
+            "RETIRED 2026-07-26 (exec-discard triage). Installs by setattr on\n"
+            "            Worker.compile_or_warm_up_model inside apply_all's own process,\n"
+            "            which `exec vllm serve` then replaces -- so it announced \"RESULT\n"
+            "            applied\" on every boot of this rig and never ran once. Restoring\n"
+            "            it (P103/P39a self-install hook into v1/worker/gpu_worker.py) was\n"
+            "            priced and declined: the payoff is first-request TTFT only, the\n"
+            "            Triton cache is host-mounted so that cost is paid once per pin,\n"
+            "            the 3-warm-run bench protocol hides it, and compile_or_warm_up_model\n"
+            "            runs AFTER KV allocation -- the tightest VRAM point of the boot on a\n"
+            "            0.935-util 3090. It does NOT address BUG-128: that death is in\n"
+            "            get_kv_cache_configs, strictly before this hook is reached. Grounds\n"
+            "            per module in patches/_retired/README.md."
+        ),
         "experimental_note": (
             "Genesis backport of vllm-project/vllm#41481 (OPEN). Closes "
             "4 of 8 JIT spikes on the first user request: "
@@ -2436,10 +2466,25 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
         "implementation_status": "full",
         "source": "vllm_pr_backport",
         "apply_module": (
-            "sndr.engines.vllm.patches.compile_safety."
+            "sndr.engines.vllm.patches._retired."
             "pn129_slot_mapping_warmup"
         ),
-        "lifecycle": "experimental",
+        "lifecycle": "retired",
+        "retired_waiver": True,
+        "retired_reason": (
+            "RETIRED 2026-07-26 (exec-discard triage). Installs by setattr on\n"
+            "            Worker.compile_or_warm_up_model inside apply_all's own process,\n"
+            "            which `exec vllm serve` then replaces -- so it announced \"RESULT\n"
+            "            applied\" on every boot of this rig and never ran once. Restoring\n"
+            "            it (P103/P39a self-install hook into v1/worker/gpu_worker.py) was\n"
+            "            priced and declined: the payoff is first-request TTFT only, the\n"
+            "            Triton cache is host-mounted so that cost is paid once per pin,\n"
+            "            the 3-warm-run bench protocol hides it, and compile_or_warm_up_model\n"
+            "            runs AFTER KV allocation -- the tightest VRAM point of the boot on a\n"
+            "            0.935-util 3090. It does NOT address BUG-128: that death is in\n"
+            "            get_kv_cache_configs, strictly before this hook is reached. Grounds\n"
+            "            per module in patches/_retired/README.md."
+        ),
         "experimental_note": (
             "Genesis backport of vllm-project/vllm#42165 (OPEN). Closes "
             "the _compute_slot_mapping_kernel JIT spike + (attempts) "
@@ -2477,10 +2522,25 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
         "implementation_status": "full",
         "source": "vllm_pr_backport",
         "apply_module": (
-            "sndr.engines.vllm.patches.compile_safety."
+            "sndr.engines.vllm.patches._retired."
             "pn130_turboquant_decode_warmup"
         ),
-        "lifecycle": "experimental",
+        "lifecycle": "retired",
+        "retired_waiver": True,
+        "retired_reason": (
+            "RETIRED 2026-07-26 (exec-discard triage). Installs by setattr on\n"
+            "            Worker.compile_or_warm_up_model inside apply_all's own process,\n"
+            "            which `exec vllm serve` then replaces -- so it announced \"RESULT\n"
+            "            applied\" on every boot of this rig and never ran once. Restoring\n"
+            "            it (P103/P39a self-install hook into v1/worker/gpu_worker.py) was\n"
+            "            priced and declined: the payoff is first-request TTFT only, the\n"
+            "            Triton cache is host-mounted so that cost is paid once per pin,\n"
+            "            the 3-warm-run bench protocol hides it, and compile_or_warm_up_model\n"
+            "            runs AFTER KV allocation -- the tightest VRAM point of the boot on a\n"
+            "            0.935-util 3090. It does NOT address BUG-128: that death is in\n"
+            "            get_kv_cache_configs, strictly before this hook is reached. Grounds\n"
+            "            per module in patches/_retired/README.md."
+        ),
         "experimental_note": (
             "Genesis backport of vllm-project/vllm#42215 (OPEN). Closes "
             "the _tq_grouped_decode_stage1 JIT spike and prevents workspace "
@@ -2557,10 +2617,25 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
         "implementation_status": "full",
         "source": "genesis_original",
         "apply_module": (
-            "sndr.engines.vllm.patches.compile_safety."
+            "sndr.engines.vllm.patches._retired."
             "pn126_v1_decode_kernel_warmup"
         ),
-        "lifecycle": "experimental",
+        "lifecycle": "retired",
+        "retired_waiver": True,
+        "retired_reason": (
+            "RETIRED 2026-07-26 (exec-discard triage). Installs by setattr on\n"
+            "            Worker.compile_or_warm_up_model inside apply_all's own process,\n"
+            "            which `exec vllm serve` then replaces -- so it announced \"RESULT\n"
+            "            applied\" on every boot of this rig and never ran once. Restoring\n"
+            "            it (P103/P39a self-install hook into v1/worker/gpu_worker.py) was\n"
+            "            priced and declined: the payoff is first-request TTFT only, the\n"
+            "            Triton cache is host-mounted so that cost is paid once per pin,\n"
+            "            the 3-warm-run bench protocol hides it, and compile_or_warm_up_model\n"
+            "            runs AFTER KV allocation -- the tightest VRAM point of the boot on a\n"
+            "            0.935-util 3090. It does NOT address BUG-128: that death is in\n"
+            "            get_kv_cache_configs, strictly before this hook is reached. Grounds\n"
+            "            per module in patches/_retired/README.md."
+        ),
         "experimental_note": (
             "Genesis-original 2026-05-15. Closes V1 vs V2 model runner gap: "
             "V2 calls warmup_kernels() at end of compile_or_warm_up_model "
@@ -6535,8 +6610,23 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
         "family": "compile_safety",
         "env_flag": "GENESIS_ENABLE_PN364_HYBRID_GDN_WARMUP",
         "default_on": False,
-        "apply_module": "sndr.engines.vllm.patches.compile_safety.pn364_hybrid_gdn_mamba_warmup",
-        "lifecycle": "experimental",
+        "apply_module": "sndr.engines.vllm.patches._retired.pn364_hybrid_gdn_mamba_warmup",
+        "lifecycle": "retired",
+        "retired_waiver": True,
+        "retired_reason": (
+            "RETIRED 2026-07-26 (exec-discard triage). Installs by setattr on\n"
+            "            Worker.compile_or_warm_up_model inside apply_all's own process,\n"
+            "            which `exec vllm serve` then replaces -- so it announced \"RESULT\n"
+            "            applied\" on every boot of this rig and never ran once. Restoring\n"
+            "            it (P103/P39a self-install hook into v1/worker/gpu_worker.py) was\n"
+            "            priced and declined: the payoff is first-request TTFT only, the\n"
+            "            Triton cache is host-mounted so that cost is paid once per pin,\n"
+            "            the 3-warm-run bench protocol hides it, and compile_or_warm_up_model\n"
+            "            runs AFTER KV allocation -- the tightest VRAM point of the boot on a\n"
+            "            0.935-util 3090. It does NOT address BUG-128: that death is in\n"
+            "            get_kv_cache_configs, strictly before this hook is reached. Grounds\n"
+            "            per module in patches/_retired/README.md."
+        ),
         "category": "ttft_warmup",
         "credit": (
             "Genesis backport of OPEN PR vllm#43642 (hybrid GDN/Mamba/MRoPE "

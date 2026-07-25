@@ -24,6 +24,35 @@ function it needs is already bound in the partially-initialised module object
 in `sys.modules`, so the circular import resolves. A hook at the top would
 not.
 
+Wire this BEFORE enabling any of these
+--------------------------------------
+The 2026-07-26 exec-discard triage found these lane-2 rows to be setattr-only
+with their gating flag currently UNSET. Nothing is lost while they are off —
+which is exactly why none of them was given a hook. Turning one on without
+wiring it first buys a `RESULT applied` line and no capability, so the flag
+flip and the hook belong in the same change:
+
+    PN72   spec_decode/pn72_frequency_ngram_drafter.py   NgramProposer.propose
+    PN77   quantization/pn77_fp8_lm_head.py              (+ its kernels_legacy
+           helper lm_head_fp8_compressor.py, which is imported, not dispatched)
+    PN302  detection/pn302_model_profile_init.py         — doubly dead: its job
+           is to stamp GENESIS_MODEL_* into os.environ, and apply_all is a
+           separate process from the shell that execs `vllm serve`, so the
+           stamps do not reach the server either way.
+    PN352B moe/pn352b_marlin_moe_sum.py                  MarlinExpertsBase.moe_sum
+           — its parked sibling PN352 is already a text patch; copy that shape.
+           Wire it before the larger-M A/B its registry note asks for, or the
+           A/B measures nothing.
+    PN520  model_compat/qwen3_5/pn520_..._47058_revert.py
+    SNDR_EAGLE3_AUX_HIDDEN_001  spec_decode/sndr_eagle3_aux_hidden_001.py
+
+Not on the list and not fixable here: the lane-2 copies of the shared ids
+P14 / P22 / P31 / P38 / P40 / P28(P73) / PN26 / PN61 / PN62 never run at all —
+`sndr_lane.apply_policy()` hands those ids to lane 1 and injects
+GENESIS_DISABLE_<bare>, so the boot reports them "explicitly disabled by
+operator". A hook on the lane-2 copy would be dead code; the live form is
+lane 1's, and so is the fix.
+
 Usage
 -----
     from ..probes.self_install import make_self_install_patcher
