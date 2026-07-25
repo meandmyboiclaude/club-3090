@@ -29,7 +29,11 @@ def apply_patch():
         print("[cliff2b] ERROR: cannot find vllm package", file=sys.stderr)
         sys.exit(1)
 
-    ops_dir = os.path.join(vllm_root, "model_executor", "layers", "fla", "ops")
+    # [2026-07-25] vllm#48500 moved fla ops to third_party/ — resolve
+    # whichever home this image has (old path = dev1060cherry/prod).
+    ops_dir = os.path.join(vllm_root, "third_party", "flash_linear_attention", "ops")
+    if not os.path.isdir(ops_dir):
+        ops_dir = os.path.join(vllm_root, "model_executor", "layers", "fla", "ops")
     if not os.path.isdir(ops_dir):
         print(f"[cliff2b] SKIP: {ops_dir} does not exist (no FLA ops)", file=sys.stderr)
         return

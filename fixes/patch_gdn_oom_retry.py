@@ -17,10 +17,17 @@ if not log.handlers:
 # Fix any broken chunk.py / chunk_o.py / chunk_delta_h.py from previous patches
 from pathlib import Path
 
+_VLLM = Path("/usr/local/lib/python3.12/dist-packages/vllm")
+# [2026-07-25] vllm#48500 moved fla ops to third_party/ — resolve whichever
+# home this image has (old path = dev1060cherry/prod).
+_FLA_DIR = _VLLM / "third_party/flash_linear_attention/ops"
+if not _FLA_DIR.is_dir():
+    _FLA_DIR = _VLLM / "model_executor/layers/fla/ops"
+
 TARGETS = [
-    Path("/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fla/ops/chunk_delta_h.py"),
-    Path("/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fla/ops/chunk_o.py"),
-    Path("/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fla/ops/chunk.py"),
+    _FLA_DIR / "chunk_delta_h.py",
+    _FLA_DIR / "chunk_o.py",
+    _FLA_DIR / "chunk.py",
 ]
 
 def clean_old_patches():

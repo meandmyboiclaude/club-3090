@@ -29,9 +29,18 @@ import sys
 
 LOG = "[pn91g-gdn-spec-state-index-clamp]"
 VLLM = pathlib.Path("/usr/local/lib/python3.12/dist-packages/vllm")
+
+
+def _fla(name: str) -> pathlib.Path:
+    # [2026-07-25] vllm#48500 moved fla ops to third_party/ — resolve
+    # whichever home this image has (old path = dev1060cherry/prod).
+    new = VLLM / "third_party/flash_linear_attention/ops" / name
+    return new if new.exists() else VLLM / "model_executor/layers/fla/ops" / name
+
+
 TARGETS = (
-    VLLM / "model_executor/layers/fla/ops/fused_recurrent.py",
-    VLLM / "model_executor/layers/fla/ops/fused_sigmoid_gating.py",
+    _fla("fused_recurrent.py"),
+    _fla("fused_sigmoid_gating.py"),
 )
 MARKER = "# PN91g:"
 

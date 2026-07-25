@@ -195,16 +195,15 @@ CHUNK_O_LAUNCH_NEW = (
 KKT_IMPORT_OLD = "from .op import exp\n"
 KKT_IMPORT_NEW = "from .op import exp, exp2\n"
 
+# [2026-07-25 re-anchor] nightly-0ba2aa35's RDNA rework inserts
+# CAST_DOT_TO_K_DTYPE between USE_G and `):` — anchor narrowed to the
+# USE_G line alone (unique in both old and new kkt; same splice result).
 KKT_SIG_OLD = (
-    "    IS_VARLEN: tl.constexpr,\n"
     "    USE_G: tl.constexpr,\n"
-    "):\n"
 )
 KKT_SIG_NEW = (
-    "    IS_VARLEN: tl.constexpr,\n"
     "    USE_G: tl.constexpr,\n"
     "    USE_EXP2: tl.constexpr,\n"
-    "):\n"
 )
 
 KKT_EXP_OLD = (
@@ -232,20 +231,15 @@ KKT_WRAP_SIG_NEW = (
     ") -> torch.Tensor:\n"
 )
 
+# [2026-07-25 re-anchor] new kkt appends CAST_DOT_TO_K_DTYPE=... after
+# BT=BT before `)` — anchor narrowed to the BT=BT line alone (unique in
+# both old and new kkt; same splice result).
 KKT_LAUNCH_OLD = (
-    "        Hg=Hg,\n"
-    "        K=K,\n"
     "        BT=BT,\n"
-    "    )\n"
-    "    return A\n"
 )
 KKT_LAUNCH_NEW = (
-    "        Hg=Hg,\n"
-    "        K=K,\n"
     "        BT=BT,\n"
     "        USE_EXP2=use_exp2,\n"
-    "    )\n"
-    "    return A\n"
 )
 
 
