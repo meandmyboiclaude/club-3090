@@ -340,8 +340,9 @@ KNOWN_SPEC_ONLY_PATCHES: frozenset[str] = frozenset({
                        # p67b_spec_verify_routing.py to select the split-K launcher.
                        # Opt-in (default-OFF); recovers A5000 occupancy at B=1.
     "PN522",           # Pre-capture warmup of the PN521 raw-tail kernel variant.
-                       # apply_module set (compile_safety.pn522_tq_raw_tail_kernel_
-                       # warmup) + own apply(), registry-driven canonical path with
+                       # apply_module set (_retired.pn522_tq_raw_tail_kernel_
+                       # warmup — RETIRED 2026-07-26, exec-discard triage)
+                       # + own apply(), registry-driven canonical path with
                        # no legacy @register_patch hook by design (category c, same
                        # class as PN519). Wraps Worker.compile_or_warm_up_model;
                        # non-pow2-GQA + PN521 gated, bit-exact no-op otherwise.
