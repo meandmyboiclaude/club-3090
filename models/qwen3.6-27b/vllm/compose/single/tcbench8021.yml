@@ -193,6 +193,25 @@ services:
       - GENESIS_ENABLE_H119_ROUTE_BUDGET=${GENESIS_ENABLE_H119_ROUTE_BUDGET:-0}
       - H119_DEEP_BUDGET=${H119_DEEP_BUDGET:-10240}
       - H119_LEAN_BUDGET=${H119_LEAN_BUDGET:-800}
+      # [H119 route-API 2026-07-25] the OTHER half — hand the route to the
+      # CALLER so the client can apply the FULL deep/lean treatment (banner AND
+      # budget) out of band, which is how the original result was produced.
+      # DEFAULT OFF. Independent of GENESIS_ENABLE_H119_ROUTE_BUDGET above:
+      # this one mutates NOTHING in the engine, so PN119_MODE=shadow is enough
+      # and is the zero-risk configuration.
+      # Transport: the scheduler folds {"h119": {...}} into
+      # EngineCoreOutput.kv_transfer_params, a field declared and threaded
+      # EngineCore -> API server -> ChatCompletionResponse and never populated
+      # on this stack (no KV connector). ROUTES itself is unreachable from the
+      # API-server process — different process — which is the trap this avoids.
+      # Surfaces: X-H119-Route/-Score/-Source/-Mode/-Req headers +
+      # `kv_transfer_params.h119` on NON-STREAMING /v1/chat/completions, and
+      # POST /v1/h119/score (an ordinary chat body, run at max_tokens=1,
+      # returns the route without answering) — that one is what unblocks
+      # picking the PN102 banner, which the in-engine consumer cannot do.
+      # H119_API_BODY=0 keeps the headers but strips the body field.
+      - GENESIS_ENABLE_H119_ROUTE_API=${GENESIS_ENABLE_H119_ROUTE_API:-0}
+      - H119_API_BODY=${H119_API_BODY:-1}
       - TRITON_CACHE_DIR=/root/.triton/cache
       # Genesis opt-ins
       # [BUG-071 CORRECTED 2026-07-14] GENESIS_PREALLOC_TOKEN_BUDGET=16384 REMOVED —
@@ -828,6 +847,14 @@ services:
         # v1 scheduler (GENESIS_PN83_CHAT_SEQS); rerank fills the raised seat count.
         # FAIL-LOUD: never boot 29 seats without the chat cap.
         python3 /fixes/patch_pn83_rerank_micro_slots.py
+        # [H119 route-API — 2026-07-25] LAST on purpose: its two anchors
+        # (scheduler.py `_free_request` call, chat_completion/api_router.py
+        # JSONResponse) must be counted against fully-patched content, and
+        # five earlier patches rewrite scheduler.py.
+        # Inert unless GENESIS_ENABLE_H119_ROUTE_API=1; a drifted anchor with
+        # the flag ON prints a boxed ERROR instead of a silent no-op.
+        # Anchors on all three pins: python3 fixes/verify_h119_route_api_anchors.py
+        python3 /fixes/patch_h119_route_api.py
         exec vllm serve "$@"
       - --
     command:
