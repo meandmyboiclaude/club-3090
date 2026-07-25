@@ -20,6 +20,21 @@ Project: github.com/Sandermage/genesis-vllm-patches
 Version: see vllm/_genesis/__version__.py — single source of truth
 """
 
+# Logging sink FIRST — before any submodule can log.
+#
+# vLLM's DEFAULT_LOGGING_CONFIG attaches its handler to the "vllm" logger
+# only, so the "genesis.*" / "sndr.*" trees are handler-less and effectively
+# WARNING inside `vllm serve`. This package __init__ is the one import site
+# Python guarantees runs before any `vllm._genesis.<sub>` module body, which
+# makes it the only place a bridge is certain to beat the first log call.
+# See _log_bridge.py for why this is a handler bridge and not a rename, and
+# for how the apply_all process is left untouched.
+try:
+    from vllm._genesis import _log_bridge as _log_bridge  # noqa: F401
+    _log_bridge.install()
+except Exception:  # pragma: no cover - never let logging break an import
+    pass
+
 # Single source of truth lives in __version__.py — re-exported here.
 from vllm._genesis.__version__ import __version__, VERSION  # noqa: F401
 __author__ = "Sandermage(Sander)-Barzov Aleksandr"

@@ -34,6 +34,18 @@ from sndr.version import __version__, __version_major__
 
 log = logging.getLogger("sndr")
 
+# The worker can reach sndr without ever touching `vllm._genesis` (e.g.
+# gpu_model_runner imports sndr.cache._pn95_runtime directly), and the
+# "sndr" tree has the same problem the "genesis" tree does: vLLM only ever
+# configures its own "vllm" logger, so these records land nowhere inside
+# `vllm serve`. Guarded — sndr does not require vLLM to be importable.
+try:
+    from vllm._genesis._log_bridge import install as _install_log_bridge
+
+    _install_log_bridge()
+except Exception:  # pragma: no cover - engine-agnostic package, best effort
+    pass
+
 # Module-level state. Treat as private.
 _initialized: bool = False
 _active_engine: EngineAdapter | None = None

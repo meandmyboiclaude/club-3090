@@ -59,6 +59,10 @@ import torch
 
 log = logging.getLogger("genesis.kernels.pn50")
 
+# One WARNING per process for the per-forward Triton fallback; see the
+# fast-path except-block below.
+_KERNEL_RAISE_ANNOUNCED = False
+
 _TRITON_OK = False
 try:
     import triton
@@ -251,7 +255,14 @@ def fused_qkvzba_split_reshape_cat_contiguous(
         )
         return mixed_qkv, z, b, a
     except Exception as e:
-        log.warning(
+        # Per-forward path: once the kernel starts raising it raises for every
+        # layer of every step, so only the first one is a WARNING. Losing the
+        # announcement entirely is the bug we are fixing; repeating it 60x/s
+        # into journald's pipe is the other failure mode.
+        global _KERNEL_RAISE_ANNOUNCED
+        emit = log.debug if _KERNEL_RAISE_ANNOUNCED else log.warning
+        _KERNEL_RAISE_ANNOUNCED = True
+        emit(
             "PN50 kernel raised (%s); falling through to PyTorch reference. "
             "Shape: qkvz=%s ba=%s qk=%d v=%d",
             e, tuple(mixed_qkvz.shape), tuple(mixed_ba.shape), num_heads_qk, num_heads_v,

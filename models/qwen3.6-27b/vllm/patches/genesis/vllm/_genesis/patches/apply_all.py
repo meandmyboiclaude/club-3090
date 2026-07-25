@@ -4640,7 +4640,19 @@ def run(verbose: bool = True, apply: bool = False) -> PatchStats:
     Returns:
         PatchStats with counts and details per patch.
     """
-    # Configure logging if not already configured
+    # Configure logging if not already configured.
+    #
+    # The "[LEVEL:name]" format below is an interface, not a preference:
+    # scripts/report.sh greps '\[INFO:genesis\.apply_all\] ... Results'. The
+    # serve-time log bridge (vllm/_genesis/_log_bridge.py) must therefore not
+    # be holding the "genesis" tree here. It already excludes this process by
+    # argv, but that is a heuristic — drop it unconditionally so the apply
+    # log format cannot drift no matter how apply_all was invoked.
+    try:
+        from vllm._genesis import _log_bridge
+        _log_bridge.uninstall()
+    except Exception:
+        pass
     if not logging.getLogger().handlers:
         logging.basicConfig(
             level=logging.INFO,

@@ -217,7 +217,10 @@ class FFNIntermediateCache:
             dtype=dtype, device=device,
         )
         cls._BUFFER_REGISTRY[key] = new_buf
-        log.info(
+        # DEBUG: growth is driven by the batch's token count, so this fires
+        # repeatedly during warmup as the high-water mark climbs. The first
+        # allocation above stays INFO — that one is the footprint fact.
+        log.debug(
             "[PN12] grew silu_out buffer: %d → %d rows for %s on %s",
             cached_max, num_tokens, dtype, device,
         )

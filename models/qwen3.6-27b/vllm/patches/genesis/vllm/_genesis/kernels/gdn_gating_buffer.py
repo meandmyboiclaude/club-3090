@@ -110,7 +110,9 @@ class GdnGatingBufferManager:
                 (1, batch, num_heads), dtype=dtype, device=device,
             )
             cls._G_POOLS[key] = t
-            log.info(
+            # DEBUG: the pool key includes the runtime batch size, so this
+            # fires once per distinct batch — bookkeeping, not a signal.
+            log.debug(
                 "[P46] allocated persistent `g` buffer (1,%d,%d) dtype=%s "
                 "device=%s", batch, num_heads, dtype, device,
             )
@@ -140,7 +142,7 @@ class GdnGatingBufferManager:
                 (1, batch, num_heads), dtype=dtype, device=device,
             )
             cls._BETA_POOLS[key] = t
-            log.info(
+            log.debug(  # per distinct batch size — see acquire_g above
                 "[P46] allocated persistent `beta_output` buffer (1,%d,%d) "
                 "dtype=%s device=%s", batch, num_heads, dtype, device,
             )
