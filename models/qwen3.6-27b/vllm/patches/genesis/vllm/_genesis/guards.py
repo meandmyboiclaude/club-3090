@@ -497,6 +497,13 @@ KNOWN_GOOD_VLLM_PINS: tuple[str, ...] = (
     # dev1060 + 7 cherry-picks custom wheel (club-dev1060-cherry @ 3da1671f; setuptools-scm
     # degenerate version from shallow CI clone — same code base as dev1060):
     "0.1.dev1+g3da1671fc.d20260713",
+    # [2026-07-25] nightly-0ba2aa35 bump (stock main 07-25, digest-pinned).
+    # Validated on :8021: record 142/174/0-fail, verify-bug076 42/42, GPQA
+    # same-30 23/30 no-kill, prod_mixed_v2 30-screen 0 aborts / parse parity
+    # (decode TPS −10% on prod prompts — flagged in VLLM-UPDATE-20260725.md).
+    # fla third_party re-anchors + PN86/88/92, P34/P74, PN293/367/384/389
+    # re-derived this session (branch bump-vllm-9e57de71-tools-text).
+    "0.23.1rc1.dev1474+g0ba2aa35a",
 )
 
 

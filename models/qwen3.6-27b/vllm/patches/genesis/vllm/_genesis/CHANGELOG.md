@@ -6,6 +6,24 @@
 > labels — the engineering log is conventionally one version ahead when
 > there's in-flight work between releases.
 
+## v7.74 — 2026-07-25 (nightly-0ba2aa35 pin re-derivation wave)
+
+Pin 0.23.1rc1.dev1474+g0ba2aa35a added to KNOWN_GOOD (lane-1 + sndr lists).
+vllm#48500 moved fla ops to third_party/flash_linear_attention/ — both
+resolvers gained a bidirectional path alias; P39a (both lanes) got the new
+module path as first candidate. Content re-derivations (all dual/tri-pin via
+content-sniffed anchors — dev1060cherry keeps its old shapes): PN354 kkt
+SIG/LAUNCH narrowed (RDNA CAST_DOT_TO_K_DTYPE rework); P34 ported to the
+#47782 Marconi end/stops shape (#40757 still open); P74 anchor narrowed past
+the moved max_num_partial_prefills check; PN293 v2 (ReplaySSM comment); PN367
+v2 (torch.accelerator probe + worker re-indent); PN384 v0ba generation
+(3-tuple find_longest_cache_hit + reworked unitary/manager sites). P88
+retired-by-marker (upstream #48860 records prefix stats at admission —
+natively replaces the stash/commit). PN389: fixed the 07-13 re-wire's
+exactly-1 patcher gate ("3/1" silent skip since dev1060) — now applies 9/9
+subs on both pins. Boot-validated on :8021: 142 total / 174 sub / 0 fail /
+3 drift; gates in VLLM-UPDATE-20260725.md.
+
 ## v7.73 — 2026-07-13 (P40 MSE-key/TQ3 grouped-decode generalization)
 
 Branch `p40-tq3-grouped-decode` (off `reanchor-dev1060`).

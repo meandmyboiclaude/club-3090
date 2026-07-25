@@ -728,6 +728,10 @@ KNOWN_GOOD_VLLM_PINS: tuple[str, ...] = (
     "0.23.1rc1.dev424+g3f5a1e173",   # dev424 promote + BUG-028 fix
     "0.23.1rc1.dev799+g69715823d",   # dev799 bump (validated-qwopus tag)
     "0.23.1rc1.dev1060+g9e57de719",  # dev1060 re-anchor wave (PN8/PN12/P34/P83)
+    # [2026-07-25] nightly-0ba2aa35 bump — gates on :8021 (VLLM-UPDATE-20260725.md);
+    # fla third_party alias + v0ba anchor generations landed this session.
+    "0.23.1rc1.dev1474+g0ba2aa35a",
+    "nightly-0ba2aa35a81dcc3246b26291368b53fa2389c7d7",
 )
 
 
