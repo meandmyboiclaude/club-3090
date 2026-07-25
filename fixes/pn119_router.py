@@ -92,6 +92,10 @@ appends (bf16 features row, meta line w/ score+mode+explore) to PN119_SINK;
 request finish appends a label line (generated, thinking flag, true rtok =
 tokens before </think>, cap_hit) keyed by req_id. Shadow traffic is
 uncensored → doubles as the v2 training bootstrap.
+The sink is BUFFERED IN RAM and drained by a daemon thread, so the request
+path holds no disk I/O at all (PN119_SINK_BUF_ROWS / _BUF_SECS / _BUF_MAX;
+0 rows = legacy synchronous mode). Clean shutdown always drains via atexit;
+a hard kill loses at most one buffer. On-disk bytes are unchanged.
 
 v2 loop (fixes/refit_pn119_probe.py + pn119-refit.timer): refits the probe
 from the sink on CPU and ATOMICALLY swaps the npz (pn119_atomic.py); this
@@ -103,12 +107,15 @@ Never raises into serving: every entry point is fully guarded.
 """
 from __future__ import annotations
 
+import atexit
 import collections
 import hashlib
 import json
 import logging
 import os
+import threading
 import time
+import weakref
 
 import torch
 
@@ -117,6 +124,22 @@ logger = logging.getLogger("genesis.pn119")
 LAYERS = (42, 47, 51)
 D_MODEL = 5120
 FEAT_DIM = len(LAYERS) * 2 * D_MODEL  # 30720
+
+# Live sinks, so a clean interpreter exit always drains their RAM buffers.
+# WeakSet: a router that is garbage collected takes its buffer with it and
+# has nothing left to flush.
+_SINKS: weakref.WeakSet = weakref.WeakSet()
+
+
+def _flush_all_sinks() -> None:
+    for r in list(_SINKS):
+        try:
+            r._sink_close()
+        except Exception:  # noqa: BLE001 — atexit must never raise
+            pass
+
+
+atexit.register(_flush_all_sinks)
 
 ROUTE_DEEP = "deep"
 ROUTE_LEAN = "lean"
@@ -292,10 +315,34 @@ class PN119Router:
         # a score. Keeps the warning + the sink line to one per request.
         self.unscored: dict[str, str] = {}
         self._warned = 0
-        # v2 sink
+        # v2 sink — RAM-buffered, flushed off the request path (see
+        # _sink_append).  The sink is pure observability; the routing decision
+        # never reads it, so it has no business owning a syscall per request.
         self.sink_dir = _env("PN119_SINK")
         self._sink_feat = self._sink_meta = None
         self._sink_rows = 0
+        self._sbuf_feat: list[bytes] = []
+        self._sbuf_meta: list[str] = []
+        self._sink_lock = threading.Lock()      # guards the two buffers
+        self._sink_io_lock = threading.Lock()   # serialises writers (ORDER)
+        self._sink_wake = threading.Event()
+        self._sink_thread = None
+        self._sink_stop = False
+        self._sink_pid = os.getpid()
+        # Thresholds are counted in SINK EVENTS (= meta lines), because every
+        # event writes one: a scored request emits 2 (score + finish) and one
+        # feature row, an unscoreable one emits 2 and no row.  So the default
+        # 64 events is ~32 requests of exposure, bounded by BUF_SECS anyway.
+        try:
+            self._buf_rows = int(_env("PN119_SINK_BUF_ROWS", "64") or 64)
+            self._buf_secs = max(
+                float(_env("PN119_SINK_BUF_SECS", "2") or 2), 0.05)
+            self._buf_max = max(
+                int(_env("PN119_SINK_BUF_MAX", "512") or 512),
+                max(self._buf_rows, 1))
+        except ValueError:
+            logger.warning("[PN119] bad PN119_SINK_BUF_* — using defaults")
+            self._buf_rows, self._buf_secs, self._buf_max = 64, 2.0, 512
         if self.sink_dir:
             try:
                 os.makedirs(self.sink_dir, exist_ok=True)
@@ -305,6 +352,12 @@ class PN119Router:
                 self._sink_meta = open(
                     os.path.join(self.sink_dir, f"meta-{tag}.jsonl"), "a",
                     encoding="utf-8")
+                self._sink_start()
+                _SINKS.add(self)
+                logger.info("[PN119] sink buffered: buf_rows=%d buf_secs=%.2f "
+                            "buf_max=%d thread=%s", self._buf_rows,
+                            self._buf_secs, self._buf_max,
+                            self._sink_thread is not None)
             except OSError as e:
                 logger.warning("[PN119] sink unavailable (%s) — logging only", e)
                 self._sink_feat = self._sink_meta = None
@@ -531,6 +584,111 @@ class PN119Router:
         self._memo.move_to_end(key)
         return cum.to(device)
 
+    # ── v2 sink plumbing: no disk on the request path ───────────────────────
+    # observe()/on_finish() only append to two RAM lists under a lock; a daemon
+    # thread does every write()+flush().  Measured on the live btrfs sink dir
+    # (2000 rows, 61440 B feature + meta line each):
+    #   inline write+flush per request   13.66 us mean /  58 us max
+    #   inline batch-of-64               (mean drops, but 1.56 ms max — the
+    #                                     64th request eats the whole 3.9 MB)
+    #   buffered + background flush       0.58 us mean / 8.3 us max
+    # The on-disk BYTES are unchanged: feature rows are the same b"".join of
+    # the same per-row .tobytes(), meta lines the same json.dumps + "\n", in
+    # the same order — see test_pn119_sink_buffer.py B1.
+    def _sink_start(self) -> None:
+        """(Re)arm the flusher for the CURRENT process."""
+        self._sink_pid = os.getpid()
+        self._sink_stop = False
+        if self._buf_rows <= 0:
+            self._sink_thread = None    # PN119_SINK_BUF_ROWS=0 => sync escape
+            return
+        self._sink_thread = threading.Thread(
+            target=self._sink_loop, name="pn119-sink", daemon=True)
+        self._sink_thread.start()
+
+    def _sink_loop(self) -> None:
+        while not self._sink_stop:
+            self._sink_wake.wait(self._buf_secs)
+            self._sink_wake.clear()
+            if self._sink_meta is None:
+                return                  # sink disabled or closed
+            self._sink_flush()
+
+    def _sink_append(self, feat: bytes | None, line: str) -> None:
+        """Queue one sink event.  Never raises; never touches the disk unless
+        the hard cap is hit, where blocking this one request beats dropping
+        training data on the floor."""
+        try:
+            if self._sink_meta is None:
+                return
+            if self._sink_pid != os.getpid():
+                # Forked: the flusher thread did not come across.  Re-arm here
+                # rather than let the buffer grow to the cap every time.
+                self._sink_start()
+            with self._sink_lock:
+                if feat is not None:
+                    self._sbuf_feat.append(feat)
+                self._sbuf_meta.append(line)
+                n = len(self._sbuf_meta)
+            if self._buf_rows <= 0 or n >= self._buf_max:
+                self._sink_flush()      # sync mode, or hard-cap backpressure
+            elif n >= self._buf_rows:
+                self._sink_wake.set()
+        except Exception as e:  # noqa: BLE001 — any sink failure disables it
+            logger.warning("[PN119] sink append failed (%s) — disabling sink", e)
+            self._sink_feat = self._sink_meta = None
+
+    def _sink_flush(self) -> None:
+        """Drain both buffers to disk.
+
+        The snapshot is taken INSIDE the io lock: meta "row" values are
+        positional indices into feats-*.bin, so two concurrent flushers that
+        snapshotted in one order and wrote in the other would silently
+        mis-align every row after them.  The buffer lock is held only for the
+        swap, so an appending request never waits on IO.
+        """
+        with self._sink_io_lock:
+            with self._sink_lock:
+                if not self._sbuf_meta and not self._sbuf_feat:
+                    return
+                feats = b"".join(self._sbuf_feat)
+                lines = "".join(self._sbuf_meta)
+                self._sbuf_feat.clear()
+                self._sbuf_meta.clear()
+            f, m = self._sink_feat, self._sink_meta
+            if m is None:
+                return
+            try:
+                # Feature rows FIRST: the only torn state this can leave is
+                # rows with no meta line, which load_sink cannot even see (it
+                # keys on "row").  The reverse leaves dangling indices that
+                # only load_sink's ridx bound check catches.
+                if feats and f is not None:
+                    f.write(feats)
+                    f.flush()
+                m.write(lines)
+                m.flush()
+            except Exception as e:  # noqa: BLE001 — any sink failure disables it
+                logger.warning("[PN119] sink write failed (%s) — disabling sink", e)
+                self._sink_feat = self._sink_meta = None
+
+    def _sink_close(self) -> None:
+        """Stop the flusher and drain.  A clean shutdown loses NOTHING."""
+        self._sink_stop = True
+        self._sink_wake.set()
+        t = self._sink_thread
+        if t is not None and t.is_alive() and t is not threading.current_thread():
+            t.join(timeout=2.0)
+        self._sink_thread = None
+        self._sink_flush()
+        for h in (self._sink_feat, self._sink_meta):
+            try:
+                if h is not None:
+                    h.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self._sink_feat = self._sink_meta = None
+
     # ── explicit fallback for requests that cannot be scored ────────────────
     def _unscoreable(self, req_id, reason: str, missing: int, prompt_len: int) -> None:
         """The one thing that must never happen is a silent pass-through."""
@@ -556,19 +714,14 @@ class PN119Router:
             if explore:
                 EXPLORE.add(req_id)
         if self._sink_meta is not None:
-            try:
-                # NO "row" key and NO feature write: there is no valid feature
-                # vector, and refit_pn119_probe.load_sink keys score lines on
-                # "row", so this line can never become training data.
-                self._sink_meta.write(json.dumps({
-                    "req_id": req_id, "unscoreable": True, "reason": reason,
-                    "missing": missing, "route": route, "prompt_tok": prompt_len,
-                    "ts": time.time(), "mode": self.mode, "explore": explore,
-                }) + "\n")
-                self._sink_meta.flush()
-            except Exception as e:  # noqa: BLE001 — any sink failure disables it
-                logger.warning("[PN119] sink write failed (%s) — disabling sink", e)
-                self._sink_feat = self._sink_meta = None
+            # NO "row" key and NO feature write: there is no valid feature
+            # vector, and refit_pn119_probe.load_sink keys score lines on
+            # "row", so this line can never become training data.
+            self._sink_append(None, json.dumps({
+                "req_id": req_id, "unscoreable": True, "reason": reason,
+                "missing": missing, "route": route, "prompt_tok": prompt_len,
+                "ts": time.time(), "mode": self.mode, "explore": explore,
+            }) + "\n")
 
     def _finalize(self, req_id, acc, last_rows, prompt_len) -> None:
         mean_rows = [acc["sum"][li] / float(prompt_len) for li in range(len(LAYERS))]
@@ -607,20 +760,27 @@ class PN119Router:
             try:
                 # bf16 has no numpy dtype — reinterpret as uint16 for the raw
                 # write (reader: np.fromfile(uint16).view via torch bf16).
-                self._sink_feat.write(
-                    torch.stack(rows).to(torch.bfloat16).view(torch.uint16)
-                    .cpu().numpy().tobytes())
-                self._sink_feat.flush()
-                self._sink_meta.write(json.dumps({
+                # The D2H stays HERE, on the runner thread, deliberately: this
+                # runs in execute_model's postprocess, which has already
+                # synchronised for the sampled tokens, so the marginal cost is
+                # the 61 kB PCIe copy.  Deferring it to the flusher would mean
+                # issuing a CUDA copy from a non-runner thread while the runner
+                # may be replaying a cudagraph — a real hazard traded for a
+                # copy that is not the bottleneck.  (Cost if we ever do defer
+                # it: 30720 dims x 2 B x buf = 3.75 MB VRAM at the default 64,
+                # 30 MB at the 512 hard cap.)
+                feat = (torch.stack(rows).to(torch.bfloat16)
+                        .view(torch.uint16).cpu().numpy().tobytes())
+            except Exception as e:  # noqa: BLE001 — any sink failure disables it
+                logger.warning("[PN119] sink encode failed (%s) — disabling sink", e)
+                self._sink_feat = self._sink_meta = None
+            else:
+                self._sink_append(feat, json.dumps({
                     "req_id": req_id, "row": self._sink_rows, "score": score,
                     "route": route, "prompt_tok": prompt_len, "ts": time.time(),
                     "mode": self.mode, "explore": explore,
                 }) + "\n")
-                self._sink_meta.flush()
                 self._sink_rows += 1
-            except Exception as e:  # noqa: BLE001 — any sink failure disables it
-                logger.warning("[PN119] sink write failed (%s) — disabling sink", e)
-                self._sink_feat = self._sink_meta = None
 
     # ── finish sink (called from _update_states removal loop) ──────────────
     def on_finish(self, req_id, req_state) -> None:
@@ -636,11 +796,10 @@ class PN119Router:
                 # be visible. No "row" key => load_sink never joins it into a
                 # training Row (its features do not exist).
                 if self._sink_meta is not None:
-                    self._sink_meta.write(json.dumps({
+                    self._sink_append(None, json.dumps({
                         "req_id": req_id, "finish": True, "unscoreable": True,
                         "reason": reason, "ts": time.time(), "mode": self.mode,
                     }) + "\n")
-                    self._sink_meta.flush()
                 return
             if score is None or req_state is None:
                 return
@@ -651,13 +810,12 @@ class PN119Router:
             logger.info("[PN119] finish req=%s score=%.4f generated=%d thinking=%s rtok=%s cap_hit=%s",
                         req_id, score, generated, thinking, rtok, cap_hit)
             if self._sink_meta is not None:
-                self._sink_meta.write(json.dumps({
+                self._sink_append(None, json.dumps({
                     "req_id": req_id, "finish": True, "score": score,
                     "generated": generated, "ts": time.time(),
                     "thinking": thinking, "rtok": rtok, "cap_hit": cap_hit,
                     "explore": self._is_explore(req_id), "mode": self.mode,
                 }) + "\n")
-                self._sink_meta.flush()
         except Exception as e:  # noqa: BLE001
             self._warned += 1
             if self._warned <= 5:

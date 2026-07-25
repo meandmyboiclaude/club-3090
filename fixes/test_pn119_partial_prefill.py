@@ -336,8 +336,7 @@ def p7_sink_alignment(new_mod):
         st_ok.prompt_token_ids = list(ids_ok) + [r._think_start]
         r.on_finish("ok", st_ok)
         r.on_finish("miss", st_hit)
-        r._sink_feat.flush()
-        r._sink_meta.flush()
+        r._sink_flush()   # sink is RAM-buffered now; drain before reading
 
         feat = [f for f in os.listdir(d) if f.startswith("feats-")][0]
         n_rows = os.path.getsize(os.path.join(d, feat)) // (30720 * 2)
