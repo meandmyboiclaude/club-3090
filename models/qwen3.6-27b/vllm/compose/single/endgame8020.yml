@@ -30,11 +30,19 @@
 # served aliases identical to old prod.
 services:
   vllm-qwen36-27b:
-    # [2026-07-13 bump candidate] nightly-9e57de71 (main 07-13) — UNPROVEN until
-    # functional + bench ±5% + TQ-KV correctness (51878e5b repacked K/V layout; also
-    # brings 481e481b hybrid partial prefix-cache). Rollback: validated dev799 image
-    # nightly-69715823... via git tag validated-qwopus-69715823.
-    image: localhost/vllm-qwen36-endgame:dev1060cherry-2204-20260713
+    # [2026-07-25 prod prep — USER-ordered 1:1 with bench :8021 bump] main @
+    # 0ba2aa35 (tag nightly-0ba2aa35a81dcc3246b26291368b53fa2389c7d7, pushed
+    # 2026-07-25; digest-pinned amd64 — survives upstream nightly-tag purge).
+    # Bench gates: g1 record 142/174/0-fail (kv 125806 −4.8%, AMBER), g2 42/42,
+    # g3 GPQA 23/30 no-kill; g4/g5 in flight at prep time — DO NOT flip until
+    # gates reviewed. KNOWN LOSS vs dev1060cherry: #45660 Marlin zero-init
+    # (compiled in the old cherry wheel, still open upstream, not text-patchable).
+    # Genesis/fixes trees are dual-pin (resolve both fla homes; content-sniffed
+    # anchors) — same mounted trees serve this pin and the rollback image.
+    # Rollback: revert this image: line to
+    # localhost/vllm-qwen36-endgame:dev1060cherry-2204-20260713 (boot-guard tag
+    # validated-qwopus-3da1671f-w1).
+    image: docker.io/vllm/vllm-openai@sha256:e4f855492d6c95b00cdd21ec642f00d9747df43a3bbedab903316be1a5cd2207
     container_name: vllm-qwen36-endgame
     restart: unless-stopped
     healthcheck:
