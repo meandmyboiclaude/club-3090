@@ -58,6 +58,9 @@ RX_ABORTING = re.compile(r"\[oom_resilience\] CUDA OOM during engine step \(\w+\
 RX_REQUEST = re.compile(r'"POST /v1/(?:chat/)?completions HTTP/1\.1" 200')
 # vLLM log-line stamp: `ERROR 07-24 05:10:12 [core.py:1341] ...` (no year).
 RX_STAMP = re.compile(r"\b(?:DEBUG|INFO|WARNING|ERROR|CRITICAL) (\d\d-\d\d) (\d\d):\d\d:\d\d ")
+# journald `-o short-iso` line prefix: `2026-07-25T18:37:04+02:00 host ctr[pid]: ...`
+# The offset is colon-form on this systemd; accept both, %z parses either.
+RX_ISO_STAMP = re.compile(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:?\d\d)")
 
 
 def db():
@@ -182,12 +185,45 @@ def running_containers(match: str) -> list[str]:
 
 def journal_window(ctr: str, since: datetime, until: datetime) -> str:
     fmt = "%Y-%m-%d %H:%M:%S"
+    # short-iso (not cat): every entry carries its stamp, which is what lets
+    # window_first_stamp() detect a window journald has already vacuumed. The
+    # counting regexes are substring searches, so the added prefix is inert.
     return subprocess.run(
         ["journalctl", f"CONTAINER_NAME={ctr}",
          "--since", since.strftime(fmt), "--until", until.strftime(fmt),
-         "--no-pager", "-o", "cat"],
+         "--no-pager", "-o", "short-iso"],
         capture_output=True, text=True,
     ).stdout
+
+
+def journal_retains_before(when: datetime) -> bool:
+    """True if journald still holds at least one entry older than `when`.
+
+    This is the truncation oracle, and it must NOT be container-filtered: a gap
+    in one container's log is normal (it was simply quiet), whereas the SYSTEM
+    journal having nothing before `when` can only mean vacuum. Cheap — journald
+    seeks backward from --until, so this reads a single entry."""
+    out = subprocess.run(
+        ["journalctl", "--until", when.strftime("%Y-%m-%d %H:%M:%S"),
+         "-n", "1", "--no-pager", "-o", "short-iso"],
+        capture_output=True, text=True,
+    ).stdout
+    return any(RX_ISO_STAMP.match(line) for line in out.splitlines())
+
+
+def window_first_stamp(text: str) -> datetime | None:
+    """Timestamp of the earliest entry journald actually still HAS for this
+    window, or None if the window came back empty. If it is later than the
+    window start, the journal has been vacuumed and the counts are a partial
+    read — a LOWER BOUND on the truth, never the truth."""
+    for line in text.splitlines():
+        m = RX_ISO_STAMP.match(line)
+        if m:
+            try:
+                return datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S%z")
+            except ValueError:
+                return None
+    return None
 
 
 def cmd_scan(a):
@@ -205,22 +241,66 @@ def cmd_scan(a):
                 for hour in (prev, curr):
                     text = journal_window(ctr, hour, hour + timedelta(hours=1))
                     d = extract(text)
-                    # Re-scans converge each hour row to its final value; an
-                    # all-zero row is still written so "no data" and "no
-                    # aborts" stay distinguishable.
+                    first = window_first_stamp(text)
+                    # Truncated = journald no longer holds anything older than
+                    # this window's start, so its head has been vacuumed away.
+                    # Asking the SYSTEM journal (not this container's entries)
+                    # avoids flagging an hour where the container was merely
+                    # quiet for its first few seconds.
+                    truncated = not journal_retains_before(hour)
+
+                    # MONOTONIC upsert (GREATEST, not assignment). journald is a
+                    # LOSSY source with a size cap: this box keeps ~45M of journal
+                    # and one vLLM bench hour is ~2M+, so a closed hour's log gets
+                    # vacuumed head-first within a couple of hours. A plain
+                    # `SET col=EXCLUDED.col` therefore does not "converge" a row --
+                    # it OVERWRITES banked counts with an ever-smaller partial read,
+                    # silently walking a real abort storm back toward zero and
+                    # DEFLATING the rate the alert thresholds judge. Observed live:
+                    # 18h requests 76 (19:40 scan) -> 38 (19:47 rescan) with no new
+                    # data, purely from vacuum.
+                    #
+                    # Monotonic max is correct because only two things move a
+                    # (container, hour) count, and both point the same way: the
+                    # OPEN hour accrues more entries, and any hour LOSES entries to
+                    # vacuum. Nothing can legitimately lower a count, so the largest
+                    # read ever seen is the best estimate. Postgres is the durable
+                    # store; journald is just the sampler feeding it.
+                    #
+                    # Per-column max is safe: each column is independently a lower
+                    # bound of the same underlying hour, and aborts/requests move
+                    # together (an aborted request still logs its POST ... 200 --
+                    # that HTTP-200 invisibility is the whole point of BUG-127).
+                    #
+                    # An all-zero row is still written so "no data" and "no aborts"
+                    # stay distinguishable.
                     cur.execute(
                         """INSERT INTO abort_hourly
                              (container, hour, aborts, oom_events, requests)
                            VALUES (%s,%s,%s,%s,%s)
                            ON CONFLICT (container, hour) DO UPDATE SET
-                             aborts=EXCLUDED.aborts, oom_events=EXCLUDED.oom_events,
-                             requests=EXCLUDED.requests, captured_at=now()""",
+                             aborts=GREATEST(abort_hourly.aborts, EXCLUDED.aborts),
+                             oom_events=GREATEST(abort_hourly.oom_events,
+                                                 EXCLUDED.oom_events),
+                             requests=GREATEST(abort_hourly.requests,
+                                               EXCLUDED.requests),
+                             captured_at=now()""",
                         (ctr, hour, d["aborts"], d["oom_events"], d["requests"]),
                     )
-                    pct = 100.0 * d["aborts"] / d["requests"] if d["requests"] else 0.0
-                    print(f"{ctr} {hour:%Y-%m-%d %H}h: aborts={d['aborts']} "
-                          f"oom_lines={d['oom_events']} requests={d['requests']} "
-                          f"abort_pct={pct:.1f}%")
+                    cur.execute(
+                        "SELECT aborts, oom_events, requests FROM abort_hourly"
+                        " WHERE container=%s AND hour=%s", (ctr, hour))
+                    ab, oom, req = cur.fetchone()
+                    pct = 100.0 * ab / req if req else 0.0
+                    note = ""
+                    if truncated:
+                        seen = f"{first:%H:%M:%S}" if first else "none"
+                        note = (f"  [journal VACUUMED past this window (earliest "
+                                f"surviving entry {seen}) — this read is a partial "
+                                f"{d['requests']} req; row keeps the banked max]")
+                    print(f"{ctr} {hour:%Y-%m-%d %H}h: aborts={ab} "
+                          f"oom_lines={oom} requests={req} "
+                          f"abort_pct={pct:.1f}%{note}")
         con.commit()
     return 0
 
