@@ -309,6 +309,11 @@ def _make_struct_out_patcher() -> TextPatcher | None:
                       replacement=NEW_METHODS_NEW, required=True),
         ],
         upstream_drift_markers=[
+            # [2026-07-25] vllm#44993 merged (0416dab275d, in nightly-0ba2aa35):
+            # native mid-window reasoning-end grammar handling — the P62 bug
+            # class is upstream-absorbed; these markers = the merged form.
+            "is_reasoning_end_streaming",
+            "post_reasoning_end_in_window",
             "def update_reasoning_ended",  # upstream-merged version present
         ],
     )
@@ -425,6 +430,11 @@ def _make_scheduler_patcher() -> TextPatcher | None:
                       replacement=SCHED_UDTIO_NEW, required=True),
         ],
         upstream_drift_markers=[
+            # [2026-07-25] vllm#44993 merged (0416dab275d, in nightly-0ba2aa35):
+            # native mid-window reasoning-end grammar handling — the P62 bug
+            # class is upstream-absorbed; these markers = the merged form.
+            "is_reasoning_end_streaming",
+            "post_reasoning_end_in_window",
             "validate_tokens_reasoning_aware",  # upstream-merged version present
         ],
     )

@@ -72,6 +72,9 @@ services:
       # switched to the model's OWN native template (XReyRobert/Qwopus3.6-27B-v2-GPTQ-Pro-MTP-BF16).
       - ../../patches/qwopus-chat-template/chat_template_v2json.jinja:/chat_template.jinja:ro
       - ../../../../../fixes:/fixes:ro
+      # [PN119 2026-07-25] lens-router probe (ro) + v2 self-training sink (rw)
+      - /home/user/shared/needfit/pn119-probe-lens_only.npz:/pn119/probe.npz:ro
+      - /home/user/shared/needfit/pn119-sink:/pn119-sink
       - ./cache-override.yaml:/config/cache-override.yaml:ro
     environment:
       # - CUDA_VISIBLE_DEVICES=0
@@ -114,6 +117,13 @@ services:
       - VLLM_MARLIN_USE_ATOMIC_ADD=1
       # [PN105 2026-07-18] per-request NaN-logits counts (abort wiring)
       - VLLM_COMPUTE_NANS_IN_LOGITS=1
+      # [PN119 2026-07-25] lens-router: SHADOW mode (log+sink only, acts on
+      # nothing). Enforce = USER decision. PN119-BUILD-PACK.md is the spec.
+      - GENESIS_ENABLE_PN119_ROUTER=1
+      - PN119_MODE=shadow
+      - PN119_TDEEP=0.5
+      - GENESIS_PN119_PROBE=/pn119/probe.npz
+      - PN119_SINK=/pn119-sink
       - TRITON_CACHE_DIR=/root/.triton/cache
       # Genesis opt-ins
       # [BUG-071 CORRECTED 2026-07-14] GENESIS_PREALLOC_TOKEN_BUDGET=16384 REMOVED —
@@ -581,6 +591,7 @@ services:
         # Design: ~/shared/PN114-DESIGN-probe-stability-20260723.md.
         python3 /fixes/pn114_boot_ids.py
         python3 /fixes/patch_pn114_forced_span.py
+        python3 /fixes/patch_pn119_lens_router.py
         # [PN109 RETIRED 2026-07-20 BUG-107h] the 107e diagnosis was wrong —
         # this pin's chat_completion/protocol.py carries thinking_token_budget
         # natively (:244 -> :774); budgets were engine-enforced all along.

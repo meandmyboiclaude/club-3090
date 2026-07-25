@@ -71,6 +71,9 @@ UPSTREAM_DRIFT_MARKERS = [
     # Any future fix that replaces the single-line alignment with a
     # `max(..., block_size)` minimum guard.
     "max(num_new_tokens // block_size * block_size",
+    # [2026-07-25] club-dev1474-cherry wheel bakes the guard in the #47782
+    # Marconi end/stops shape (see the wheel's scheduler.py #40757 comment).
+    "aligned = end // block_size * block_size",
 ]
 
 # Anchor is the exact baseline line (v0.19.2rc1.dev134+gfe9c3d6c5) plus
