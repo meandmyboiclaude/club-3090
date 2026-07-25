@@ -15,7 +15,6 @@
   "  status   ''  overrides the heuristic status",
   "  note     ''  free text, shown in --json output"
  ],
-
  "_BLIND_SPOTS": [
   "These five capabilities have NO verification signal of any kind - not a",
   "marker, not an attribute, not a metric.  If the ledger's promise is 'an",
@@ -29,44 +28,98 @@
   "  PN203   lane-2 streaming/pn203_cold_prefix_offload",
   "  G4_T1   lane-2 tool_parsing/g4_t1_pr42006_marker"
  ],
-
  "PN91G": {
-  "note": "fixes-lane vllm#48475 GDN spec-decode state-index clamp. Targets are built by a helper (_fla()) so the AST cannot see them; resolved by the whole-tree marker sweep. VERIFIED MISSING 2026-07-25 on the live tcbench container: third_party/flash_linear_attention/ops/fused_recurrent.py exists and contains ZERO '# PN91g:' - the patch is always-on in the entrypoint and had no effect. This is a live BUG-122-class instance, not a tooling artifact."
+  "note": "CORRECTED 2026-07-26 - the previous note here was a FALSE BUG-122 alarm and is the reason it is being rewritten rather than extended. It read 'VERIFIED MISSING ... contains ZERO \"# PN91g:\" ... always-on in the entrypoint and had no effect. This is a live BUG-122-class instance, not a tooling artifact.' It counted the absence of OUR marker without reading the branch the patcher takes one line earlier. The boot says: 'fused_recurrent.py: upstream drift - clamp already present, self-retire (no-op)' and the same for fused_sigmoid_gating.py. That is the README's own trap - the `why` field tells you where to look, not what happened - committed inside the ledger's own overlay.",
+  "state_hint": "N/A",
+  "superseded_by": "vllm#48475, on the build line as 76c86291e 'Cherry #48475: GDN spec-decode state-index clamp (rebased head, third_party layout)'. Absorbing code, third_party/flash_linear_attention/ops/fused_recurrent.py:110 in the PRISTINE boot pin: 'i_t = tl.maximum(tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1, 0)' under 'if IS_CONTINUOUS_BATCHING: if IS_SPEC_DECODING:'. The capability is in force; only the patch is redundant."
  },
-
  "P39": {
   "note": "P39a FLA chunk_scaled_dot_kkt persistent A pool. Was setattr-only and therefore INERT across `exec vllm serve` for months while logging 'applied' every boot. 69cae1bd gave it a self-install hook text-patched into chunk_scaled_dot_kkt.py, gated OFF by default behind GENESIS_ENABLE_P39A_SELFINSTALL. Zero markers with the flag unset is CORRECT. Live behaviour remains unverified until a boot with the flag on."
  },
-
  "P89": {
   "note": "completion_tokens_details.reasoning_tokens in chat usage. 'Upstream has this natively' is FALSE: reasoning_tokens exists only under entrypoints/openai/responses/; chat_completion has zero hits on all three image pins. The populated reasoning_tokens in bench rows was computed CLIENT-side (qbench45/bench/client.py). Three sub-anchors had drifted on EVERY pin, so P89 was silently inert for a long time rather than newly broken. Re-anchored 6edf8386 (content-sniffed, dual-pin safe)."
  },
-
  "PN119": {
   "note": "AMBIGUOUS ID - two different patches. lane-2 PN119 = TurboQuant k8v4 GQA head-grouping kernel (vllm#40792). The house lens-router formerly called PN119 was renamed to H119 in bb501000 (fixes/patch_h119_lens_router.py) precisely to end this collision; the old flag name survives as a ':-' chain shim in the compose entrypoint. Renaming lane-2's PN119 is REJECTED: the vendored tree must stay byte-identical for git read-tree grafts, and P18B_TEXT anchors on PN119's post-apply output."
  },
-
  "P18B_TEXT": {
   "note": "TQ decode stage1 kernel-literal tune. COUPLED TO PN119: both anchors key on the launch shape PN119 EMITS, so if PN119 stops applying, P18B_TEXT necessarily misses too. Re-anchor the pair in ONE pass, never separately. Its own flag is commented out in the composes - it only announces APPLY via GENESIS_SNDR_TRUST_DEFAULT_ON=1."
  },
-
  "PN346": {
   "note": "RETIRED - do NOT re-anchor. PN346_ANCHOR_OLD count is 0 on all three image pins. The house /fixes pn87 applies, emits the byte-identical guard AND additionally fixes the fine-grained max_num_partial_units loop - a strict superset. Forcing PN346 would be HARMFUL, not neutral: lane-2 dispatches before /fixes and would consume pn87's coarse anchor. Documented in f5632b96."
  },
-
  "P87": {
   "note": "ABSORBED, closed on two independent grounds. (1) marlin_padded_nk (#45295) is native in nightly-0ba2aa35 and pads K as well as N; P87's drift markers now recognise it and self-skip cleanly. (2) Independently useless: #40361 was closed-unmerged, the text anchor is gone on BOTH engine pins, and P87 was never active on any validated boot - so even a revert of #45295 leaves it retired. docs/UPSTREAM.md:100."
  },
-
  "PN79": {
   "note": "RETIRED 2026-07-23 (BUG-119). The #46067 crash class is handled IN-TREE by turboquant_attn.py, which pre-reserves decode scratch and locks the workspace. The patch had silently SKIPped on every boot since the pin bump - weeks of conc-4 cudagraph+TQ+MTP bench load ran without it and produced zero device asserts, which is the evidence. Archived to fixes/_archive/."
  },
-
  "PN73@fixes:patch_pn73_vendor_legacy_reasoning_parser": {
   "note": "Superseded by PN76 (engine-level deferred tool-call commit) and deliberately COMMENTED OUT in both compose entrypoints, kept for instant rollback if functional test D regresses. Not invoked == not a loss."
  },
-
  "PN81": {
   "note": "/rerank on :8020, adapting TEI + Cohere wire formats onto upstream /generative_scoring. Requires PN82. USER 2026-07-25: nothing consumes it; do NOT build out PN81 further and do NOT load a reranker model. Kill-switch GENESIS_PN81_RERANK=0."
+ },
+ "P88": {
+  "note": "Prefix-cache stats retry de-duplication. Boot line: 'upstream marker \"def record_prefix_cache_stats\" detected - patch obsolete, skip' -> 'RESULT skipped: P88 ... upstream_merged - marker'. Honest self-retire, not a loss.",
+  "state_hint": "N/A",
+  "superseded_by": "vllm#48860 (MERGED upstream; note vllm#45202, which P88 rewrote, closed UNMERGED - #48860 is the one that landed). Absorbing code in the pristine boot pin: v1/core/kv_cache_manager.py:214 'def record_prefix_cache_stats(self, request, num_hits)' which early-returns unless the request actually did a lookup, plus its sole call site at v1/core/sched/scheduler.py:1035, moved to ADMISSION and guarded by 'if did_prefix_cache_lookup'. That relocation IS the double-count fix P88 provided."
+ },
+ "PN390": {
+  "note": "Streaming-LSE rejection sampler. Boot: 'upstream marker \"    BLOCK_SIZE: tl.constexpr = 8192\\n\" detected - patch obsolete, skip'. Worth logging: that drift marker is a generic Triton tile constant and a WEAK proxy - a future pin could carry the constant without the capability. The durable marker is 'compute_target_normalization'; re-point it on the next touch.",
+  "state_hint": "N/A",
+  "superseded_by": "vllm#45369, on the build line as 01d50ae77 'Cherry #45369: avoid materializing target probs in spec rejection sampling'. Absorbing code in the pristine boot pin: v1/sample/rejection_sampler.py:867 'def compute_target_normalization(...)' and its use at :560 'target_max, target_inv_sum = compute_target_normalization(target_logits, vocab_size, TARGET_NORMALIZATION_BLOCK_SIZE)' - the online-softmax state is computed without materializing the [num_tokens, vocab_size] tensor, which is exactly what PN390 vendored."
+ },
+ "PN401": {
+  "note": "TurboQuant prefill continuation guard. Boot: 'upstream marker \"_has_continuation\" detected - patch obsolete, skip'. SAME CAPABILITY IN TWO LANES: /fixes patch_pn86_46461_tq_prefill_continuation_guard.py is the house twin of the same PR and self-retired on the same boot ('upstream drift: continuation guard already present'). Retire them together or neither.",
+  "state_hint": "N/A",
+  "superseded_by": "vllm#46461, on the build line as 60085ab6b 'Cherry #46461: TurboQuant prefill continuation guard'. Absorbing code in the pristine boot pin: v1/attention/backends/turboquant_attn.py:717-734 computes '_has_continuation' from query_start_loc_cpu vs seq_lens_cpu and gates the flash_attn first-chunk fast path on 'and not _has_continuation'."
+ },
+ "PN127": {
+  "note": "NOT a loss, and not one problem but two. (1) The row was scored on GENESIS_PN127_MARKER, a constant defined once and read by NOTHING - there is no TextPatcher in the module at all; apply() does write_text() of a jinja asset. Fixed at source in the extractor's marker classification, so the row is now UNVERIFIABLE rather than MISSING, which is the honest state. (2) Separately, the capability is applied but UNUSED by config: the boot says 'installed: enhanced chat-template copied to /tmp/genesis/chat_templates/qwen3.6_enhanced.jinja', but the compose serves '--chat-template /chat_template.jinja' from patches/qwopus-chat-template/ and GENESIS_AUTO_CHAT_TEMPLATE_PATH is unset. That is a deliberate 2026-07-14 USER decision (the Froggeric template corrupted chat + thinking on Qwopus3.6), not drift.",
+  "state_hint": "N/A"
+ },
+ "PN364": {
+  "note": "Two findings, and the second is bigger than the row. (1) The row was scored on GENESIS_PN364_MARKER = '_genesis_pn364_hybrid_gdn_warmup_installed', which is the ATTRIBUTE NAME in 'setattr(wrapped, GENESIS_PN364_MARKER, True)'. It is a name on a function object and can never appear in a file, so the row read 'marker absent anywhere in installed vllm' forever. Fixed at source in the extractor. (2) The capability is GENUINELY INERT: it wraps Worker.compile_or_warm_up_model by assignment in the apply_all process, and `exec vllm serve` replaces that process. So does the whole JIT-warmup family - PN126, PN128, PN129 and PN130 are the same shape, all announce 'RESULT applied' every boot, and all reach nothing. PN364 was the only one the ledger flagged, and it flagged it for the wrong reason. COST TO RESTORE: convert all five to text patches writing a self-install hook into v1/worker/gpu_worker.py (the P103/P39a pattern, now packaged as sndr/engines/vllm/patches/spec_decode/probes/self_install.py), re-anchor compile_or_warm_up_model on the cherrymax pin, and accept a boot with the '[PN364] Pass N done' lines visible in the SERVER log as the acceptance test. Payoff is TTFT-only (first request after a restart), no steady-state TPS. PN364 chains after the other four, so a partial restore gets the smallest share."
+ },
+ "PN126": {
+  "note": "JIT-warmup family, same shape as PN364: wraps Worker.compile_or_warm_up_model by assignment, announces 'RESULT applied' every boot, and cannot reach the served process because `exec vllm serve` replaces the apply_all process. Contains zero TextPatcher occurrences. Reported LIVE off module presence until the 2026-07-26 verifier fix; see PN364 for the restore cost, which is shared across all five."
+ },
+ "PN128": {
+  "note": "JIT-warmup family, same shape as PN364: wraps Worker.compile_or_warm_up_model by assignment, announces 'RESULT applied' every boot, and cannot reach the served process because `exec vllm serve` replaces the apply_all process. Contains zero TextPatcher occurrences. Reported LIVE off module presence until the 2026-07-26 verifier fix; see PN364 for the restore cost, which is shared across all five."
+ },
+ "PN129": {
+  "note": "JIT-warmup family, same shape as PN364: wraps Worker.compile_or_warm_up_model by assignment, announces 'RESULT applied' every boot, and cannot reach the served process because `exec vllm serve` replaces the apply_all process. Contains zero TextPatcher occurrences. Reported LIVE off module presence until the 2026-07-26 verifier fix; see PN364 for the restore cost, which is shared across all five."
+ },
+ "PN130": {
+  "note": "JIT-warmup family, same shape as PN364: wraps Worker.compile_or_warm_up_model by assignment, announces 'RESULT applied' every boot, and cannot reach the served process because `exec vllm serve` replaces the apply_all process. Contains zero TextPatcher occurrences. Reported LIVE off module presence until the 2026-07-26 verifier fix; see PN364 for the restore cost, which is shared across all five."
+ },
+ "SELF_INSTALL": {
+  "note": "NOT a patch. sndr/engines/vllm/patches/spec_decode/probes/self_install.py is the shared exec-survival helper PN241/PN258/PN282 call to text-patch a P103/P39a import-time hook into their targets. It contains 'TextPatcher(' so the extractor classifies it text_patch and it has no marker of its own, hence a permanent UNVERIFIABLE row. Correct and harmless: the effect it produces is verified on the three rows that USE it, which is where the markers live."
+ },
+ "P7@lane1-genesis:patch_7_gdn_dual_stream": {
+  "note": "TWO gates, and the registry only knows about one. The dispatcher gate is GENESIS_LEGACY_P7 (default_on True, so flag_state reads 'on'), but apply() then checks its OWN GENESIS_ENABLE_P7 and returns 'deferred - incompatible with torch.compile fullgraph (CUDA streams not SymPy-graphable)' when it is unset. Zero markers is therefore CORRECT and the honest state is DARK. Re-anchored 2026-07-26 for the mamba/gdn/qwen_gdn_linear_attn.py rename and the flattened forward_cuda; verified count==1 offline against post-boot bytes, but LIVE behaviour is unverified and stays that way until somebody boots with GENESIS_ENABLE_P7=1 AND --enforce-eager. P7b is the graph-safe successor and was re-anchored in the same pass.",
+  "effective_env_flag": "GENESIS_ENABLE_P7"
+ },
+ "UPSTREAM_BINDINGS": {
+  "note": "NOT a patch, despite the LIVE-by-presence row. sndr/engines/vllm/upstream_bindings.py is a stdlib AST static-binding resolver for the anchor-drift checker (extract_vllm_imports, resolve_binding, check_module_bindings, iter_declared_bindings). It was in the orphan list only because the extractor's `\"def apply(\" in src` substring test matched a `def apply():` inside the module DOCSTRING's code example. Its declared-accessor convention is honoured by pn520_qwen3_5_gdn_load_weights_47058_revert.py:221 _upstream_bindings(); the tool that consumes its API is not vendored into this tree."
+ },
+ "REBIND": {
+  "note": "NOT a patch. sndr/engines/vllm/wiring/rebind.py is the AttributeRebinder framework class used across the lane and exported by wiring/__init__.py:15. It was in the orphan list because the extractor's substring test matched `AttributeRebinder.apply(self)` — a METHOD, not a module-level apply()."
+ },
+ "PN80@fixes:patch_pn80_tq_v1_runner_cache_dtype_preserve": {
+  "note": "Announced-but-inert by the marker check, honest self-retire in fact. Boot line, captured 2026-07-26 by replaying the full patch pass: 'upstream drift: exemption already present - self-retire (no-op)'. The verifier reads EFFECT, and 'no effect because upstream already does it' produces the identical file to 'no effect because the patch broke' - which is why this note exists. NOT yet backed by a named upstream commit; that is the remaining work on this row, and until it is done the row is deliberately left MISSING rather than promoted to N/A on a log line."
+ },
+ "PN86": {
+  "note": "Announced-but-inert by the marker check, honest self-retire in fact. Boot line, captured 2026-07-26 by replaying the full patch pass: 'upstream drift: continuation guard already present - self-retire (no-op)'. The verifier reads EFFECT, and 'no effect because upstream already does it' produces the identical file to 'no effect because the patch broke' - which is why this note exists. NOT yet backed by a named upstream commit; that is the remaining work on this row, and until it is done the row is deliberately left MISSING rather than promoted to N/A on a log line."
+ },
+ "PN88": {
+  "note": "Announced-but-inert by the marker check, honest self-retire in fact. Boot line, captured 2026-07-26 by replaying the full patch pass: 'upstream drift: quantized/hybrid zeroing properties already present - self-retire (no-op)'. The verifier reads EFFECT, and 'no effect because upstream already does it' produces the identical file to 'no effect because the patch broke' - which is why this note exists. NOT yet backed by a named upstream commit; that is the remaining work on this row, and until it is done the row is deliberately left MISSING rather than promoted to N/A on a log line."
+ },
+ "PN94": {
+  "note": "Announced-but-inert by the marker check, honest self-retire in fact. Boot line, captured 2026-07-26 by replaying the full patch pass: 'upstream drift: EAGLE-only width guard already present - self-retire (no-op)'. The verifier reads EFFECT, and 'no effect because upstream already does it' produces the identical file to 'no effect because the patch broke' - which is why this note exists. NOT yet backed by a named upstream commit; that is the remaining work on this row, and until it is done the row is deliberately left MISSING rather than promoted to N/A on a log line."
+ },
+ "PN90@fixes:patch_pn90_47828_mtp_quant_leak_guard": {
+  "note": "Not upstream absorption - a PRECONDITION check that found the bug unreachable here. Boot line: 'verified NO-OP: dense-safety invariants intact in Qwen3_5DecoderLayer (explicit quant_config= on self_attn + Qwen3NextMLP); #47828 leak unreachable on dense qwen3_5_text - guard not applied'. Zero markers is the correct outcome on THIS model; the patch would engage on a model where the invariant does not hold, so it is not retirable."
  }
 }

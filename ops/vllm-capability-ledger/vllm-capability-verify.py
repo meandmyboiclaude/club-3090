@@ -86,6 +86,14 @@ PATH_ALIASES = [
     ("/third_party/flash_linear_attention/ops/", "/model_executor/layers/fla/ops/"),
     ("/model_executor/layers/fla/", "/third_party/flash_linear_attention/"),
     ("/third_party/flash_linear_attention/", "/model_executor/layers/fla/"),
+    # 2026-07-26: GDN split per model family. This table has to mirror
+    # guards._PATH_ALIASES or the verifier reports a re-anchor item for a
+    # patch the resolver reaches fine — which is exactly what it was doing to
+    # P7 while P7's real problem was a drifted anchor, not a missing file.
+    ("/model_executor/layers/mamba/gdn_linear_attn.py",
+     "/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py"),
+    ("/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py",
+     "/model_executor/layers/mamba/gdn_linear_attn.py"),
 ]
 
 
@@ -130,6 +138,17 @@ def flag_state(cap: dict, env: dict[str, str]) -> tuple[str, str]:
     Four false MISSING rows, all from the same union.
     """
     reg = cap.get("registry") or {}
+    # Some modules apply a SECOND, internal gate after the dispatcher's.  P7's
+    # registry flag is GENESIS_LEGACY_P7 with default_on True, so this reads
+    # "on", while apply() then checks its own GENESIS_ENABLE_P7 and defers.
+    # Gating on the registry alone calls that announced-but-inert.  The
+    # override is hand-written in inventory-overlay.json because only a human
+    # reading apply() can tell the two gates apart.
+    if cap.get("effective_env_flag"):
+        f = cap["effective_env_flag"]
+        if _truthy(env.get(f)):
+            return "on", f
+        return ("off" if f in env else "unset"), f
     if reg.get("env_flag"):
         flags = [reg["env_flag"]] + [a for a in (reg.get("env_flag_aliases") or [])
                                      if a != reg["env_flag"]]
@@ -203,6 +222,16 @@ def zero_marker_verdict(cap: dict, fstate: str, notes: list[str]) -> dict | None
     reg = cap.get("registry") or {}
     if fstate == "off":
         return {"state": DARK, "why": "flag explicitly off; 0 markers as expected"}
+    # A hand-written absorption verdict from inventory-overlay.json. Kept
+    # separate from the registry's own `superseded_by` because the two have
+    # different provenance: the registry field is the patch AUTHOR's claim,
+    # this one is a verdict somebody checked against the image and had to name
+    # the absorbing commit for. The README's standing complaint is that 15
+    # rows claim "absorbed upstream" and only two carried named evidence.
+    if cap.get("superseded_by"):
+        return {"state": NA,
+                "why": f"superseded (overlay evidence) — "
+                       f"{str(cap['superseded_by'])[:120]}"}
     if cap.get("lane2_suppressed_by_lane1"):
         return {"state": DARK,
                 "why": "lane-2 copy of a lane-1-owned shared id; sndr_lane "
@@ -217,6 +246,14 @@ def zero_marker_verdict(cap: dict, fstate: str, notes: list[str]) -> dict | None
         # as lost work buries the rows that really are.
         return {"state": NA,
                 "why": f"superseded — {str(reg['superseded_by'])[:90]}"}
+    if cap.get("effective_env_flag") and fstate in ("unset", "off"):
+        # The registry's default_on describes the DISPATCHER gate, which is not
+        # the gate that decided here.  P7 is default_on=True on GENESIS_LEGACY_P7
+        # and still self-defers on an unset GENESIS_ENABLE_P7.
+        return {"state": DARK,
+                "why": f"the module's own gate {cap['effective_env_flag']} is "
+                       f"{fstate}; 0 markers as expected (the registry's "
+                       f"default_on describes the dispatcher gate, not this one)"}
     if fstate == "unset" and not reg.get("default_on"):
         return {"state": DARK,
                 "why": "no gating flag set anywhere and default_on is false "
@@ -425,6 +462,15 @@ def verify_capability(cap: dict, insp, env: dict[str, str], mode: str) -> dict:
                            "not present in a bare image",
                     "flag": fstate}
         if insp.exists(src):
+            if "retired" in notes:
+                # A module PARKED in _retired/ or _archive/ is present because
+                # the tree is a bind mount, and that is all "present" means
+                # here.  Calling it LIVE would resurrect nine modules that
+                # were deliberately moved out of reach.
+                return {"state": NA,
+                        "why": "parked in _retired/ or _archive/; present only "
+                               "because the lane is a read-only bind mount",
+                        "flag": fstate}
             if fstate == "off":
                 return {"state": DARK, "why": "module present, flag off", "flag": fstate}
             # Presence is the documented handle for kind=="module" ONLY.  For a

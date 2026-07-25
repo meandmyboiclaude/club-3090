@@ -54,9 +54,34 @@
    ],
    "status": "live",
    "summary": "H119 \u2014 lens-router capture tap wiring (boot patcher).",
-   "key": "H119",
+   "key": "H119@fixes:patch_h119_lens_router",
    "compose_invoked": [
     "endgame8020",
+    "tcbench8021"
+   ],
+   "compose_commented": []
+  },
+  {
+   "id": "H119",
+   "lane": "fixes",
+   "source_host": "fixes/patch_h119_route_api.py",
+   "source_container": "/fixes/patch_h119_route_api.py",
+   "kind": "text_patch",
+   "targets": [],
+   "markers": [
+    "# H119-API:"
+   ],
+   "flags": [
+    "GENESIS_ENABLE_H119_LENS_",
+    "GENESIS_ENABLE_H119_LENS_ROUTER",
+    "GENESIS_ENABLE_H119_ROUTE_API",
+    "GENESIS_ENABLE_H119_ROUTE_BUDGET"
+   ],
+   "upstream": [],
+   "status": "live",
+   "summary": "H119 \u2014 expose the lens router's deep/lean route over the HTTP API.",
+   "key": "H119@fixes:patch_h119_route_api",
+   "compose_invoked": [
     "tcbench8021"
    ],
    "compose_commented": []
@@ -207,6 +232,28 @@
    "key": "PATCH_PR44812_TOOL_GUARD",
    "compose_invoked": [
     "endgame8020",
+    "tcbench8021"
+   ],
+   "compose_commented": []
+  },
+  {
+   "id": "PATCH_PR48361_MAMBA_ALIGN_SPLIT",
+   "lane": "fixes",
+   "source_host": "fixes/patch_pr48361_mamba_align_split.py",
+   "source_container": "/fixes/patch_pr48361_mamba_align_split.py",
+   "kind": "text_patch",
+   "targets": [],
+   "markers": [
+    "# PR48361:"
+   ],
+   "flags": [
+    "GENESIS_DISABLE_PR48361"
+   ],
+   "upstream": [],
+   "status": "live",
+   "summary": "PR #48361 \u2014 stop `mamba_cache_mode=align` writing prefix-cache entries whose",
+   "key": "PATCH_PR48361_MAMBA_ALIGN_SPLIT",
+   "compose_invoked": [
     "tcbench8021"
    ],
    "compose_commented": []
@@ -594,6 +641,29 @@
   {
    "id": "PN114",
    "lane": "fixes",
+   "source_host": "fixes/patch_pn114_seed_span.py",
+   "source_container": "/fixes/patch_pn114_seed_span.py",
+   "kind": "text_patch",
+   "targets": [],
+   "markers": [
+    "# PN114-SEED"
+   ],
+   "flags": [
+    "GENESIS_ENABLE_PN114_SEED_SPAN",
+    "GENESIS_PN114_SEED_MODE"
+   ],
+   "upstream": [],
+   "status": "live",
+   "summary": "PN114-SEED \u2014 move the PN102 think-seed from the PROMPT into a FORCED SPAN.",
+   "key": "PN114@fixes:patch_pn114_seed_span",
+   "compose_invoked": [
+    "tcbench8021"
+   ],
+   "compose_commented": []
+  },
+  {
+   "id": "PN114",
+   "lane": "fixes",
    "source_host": "fixes/pn114_boot_ids.py",
    "source_container": "/fixes/pn114_boot_ids.py",
    "kind": "module",
@@ -635,6 +705,48 @@
    "compose_commented": []
   },
   {
+   "id": "PN114",
+   "lane": "fixes",
+   "source_host": "fixes/pn114_seed.py",
+   "source_container": "/fixes/pn114_seed.py",
+   "kind": "module",
+   "targets": [],
+   "markers": [],
+   "flags": [
+    "GENESIS_ENABLE_PN114_SEED_SPAN",
+    "GENESIS_PN102_TOKENS_PER_STEP",
+    "GENESIS_PN114_SEED_MODE"
+   ],
+   "upstream": [],
+   "status": "live",
+   "summary": "PN114-SEED \u2014 the PN102 think-seed as a FORCED SPAN (installed by",
+   "key": "PN114@fixes:pn114_seed",
+   "compose_invoked": [],
+   "compose_commented": []
+  },
+  {
+   "id": "PN114",
+   "lane": "fixes",
+   "source_host": "fixes/pn114_seed_ids.py",
+   "source_container": "/fixes/pn114_seed_ids.py",
+   "kind": "module",
+   "targets": [],
+   "markers": [],
+   "flags": [
+    "GENESIS_ENABLE_PN114_SEED_SPAN",
+    "GENESIS_PN114_SEED_MAX_N",
+    "GENESIS_PN114_TOKENIZER_PATH"
+   ],
+   "upstream": [],
+   "status": "live",
+   "summary": "PN114-SEED boot-time token-id derivation (2026-07-25).",
+   "key": "PN114@fixes:pn114_seed_ids",
+   "compose_invoked": [
+    "tcbench8021"
+   ],
+   "compose_commented": []
+  },
+  {
    "id": "PN119",
    "lane": "fixes",
    "source_host": "fixes/pn119_atomic.py",
@@ -654,9 +766,30 @@
   {
    "id": "PN119",
    "lane": "fixes",
+   "source_host": "fixes/pn119_doctor.py",
+   "source_container": "/fixes/pn119_doctor.py",
+   "kind": "module",
+   "targets": [],
+   "markers": [],
+   "flags": [
+    "GENESIS_ENABLE_H119_LENS_ROUTER",
+    "GENESIS_ENABLE_H119_ROUTE_BUDGET",
+    "GENESIS_ENABLE_PN119_ROUTER"
+   ],
+   "upstream": [],
+   "status": "live",
+   "summary": "pn119-doctor \u2014 read the H119 lens router's health surface and judge it.",
+   "key": "PN119@fixes:pn119_doctor",
+   "compose_invoked": [],
+   "compose_commented": [],
+   "note": "AMBIGUOUS ID - two different patches. lane-2 PN119 = TurboQuant k8v4 GQA head-grouping kernel (vllm#40792). The house lens-router formerly called PN119 was renamed to H119 in bb501000 (fixes/patch_h119_lens_router.py) precisely to end this collision; the old flag name survives as a ':-' chain shim in the compose entrypoint. Renaming lane-2's PN119 is REJECTED: the vendored tree must stay byte-identical for git read-tree grafts, and P18B_TEXT anchors on PN119's post-apply output."
+  },
+  {
+   "id": "PN119",
+   "lane": "fixes",
    "source_host": "fixes/pn119_router.py",
    "source_container": "/fixes/pn119_router.py",
-   "kind": "module",
+   "kind": "text_patch",
    "targets": [],
    "markers": [],
    "flags": [
@@ -684,13 +817,57 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/openai/chat_completion/protocol.py"
    ],
    "markers": [
-    "# PATCH: pn71_reasoning_alias_v2"
+    "# PATCH: pn71_reasoning_alias_v3"
    ],
    "flags": [],
    "upstream": [],
    "status": "live",
    "summary": "PN71 reasoning-alias \u2014 accept `reasoning: off|low|medium|high|xhigh|max` (and a raw int,",
+   "markers_doc": [
+    "# PATCH: pn71_reasoning_alias_v2"
+   ],
    "key": "PN71@fixes:patch_pn71_reasoning_alias",
+   "compose_invoked": [
+    "endgame8020",
+    "tcbench8021"
+   ],
+   "compose_commented": []
+  },
+  {
+   "id": "PN71",
+   "lane": "fixes",
+   "source_host": "fixes/pn71_truncation_signal.py",
+   "source_container": "/fixes/pn71_truncation_signal.py",
+   "kind": "module",
+   "targets": [],
+   "markers": [],
+   "flags": [],
+   "upstream": [],
+   "status": "live",
+   "summary": "PN71T \u2014 truncation signal: turn a silent empty completion into a measurable one.",
+   "key": "PN71@fixes:pn71_truncation_signal",
+   "compose_invoked": [],
+   "compose_commented": []
+  },
+  {
+   "id": "PN71T",
+   "lane": "fixes",
+   "source_host": "fixes/patch_pn71t_truncation_signal.py",
+   "source_container": "/fixes/patch_pn71t_truncation_signal.py",
+   "kind": "text_patch",
+   "targets": [
+    "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/openai/chat_completion/serving.py"
+   ],
+   "markers": [
+    "# PN71T:"
+   ],
+   "flags": [
+    "GENESIS_ENABLE_PN101_ANSWER_RESCUE"
+   ],
+   "upstream": [],
+   "status": "live",
+   "summary": "PN71T \u2014 wire the truncation signal into both chat-completion response paths.",
+   "key": "PN71T",
    "compose_invoked": [
     "endgame8020",
     "tcbench8021"
@@ -727,13 +904,14 @@
    "source_container": "/fixes/patch_pn73_vendor_legacy_reasoning_parser.py",
    "kind": "text_patch",
    "targets": [],
-   "markers": [
-    "# [PN73]"
-   ],
+   "markers": [],
    "flags": [],
    "upstream": [],
    "status": "live",
    "summary": "PN73 \u2014 vendor the legacy (non-engine) Qwen3 reasoning parser onto the new base.",
+   "markers_doc": [
+    "# [PN73]"
+   ],
    "key": "PN73@fixes:patch_pn73_vendor_legacy_reasoning_parser",
    "compose_invoked": [],
    "compose_commented": [
@@ -749,13 +927,14 @@
    "source_container": "/fixes/patch_pn73t_vendor_legacy_tool_parser.py",
    "kind": "text_patch",
    "targets": [],
-   "markers": [
-    "# [PN73T]"
-   ],
+   "markers": [],
    "flags": [],
    "upstream": [],
    "status": "live",
    "summary": "PN73T \u2014 vendor the legacy (non-engine) qwen3_coder TOOL parser onto the new base.",
+   "markers_doc": [
+    "# [PN73T]"
+   ],
    "key": "PN73T",
    "compose_invoked": [],
    "compose_commented": [
@@ -879,7 +1058,8 @@
     "endgame8020",
     "tcbench8021"
    ],
-   "compose_commented": []
+   "compose_commented": [],
+   "note": "Announced-but-inert by the marker check, honest self-retire in fact. Boot line, captured 2026-07-26 by replaying the full patch pass: 'upstream drift: exemption already present - self-retire (no-op)'. The verifier reads EFFECT, and 'no effect because upstream already does it' produces the identical file to 'no effect because the patch broke' - which is why this note exists. NOT yet backed by a named upstream commit; that is the remaining work on this row, and until it is done the row is deliberately left MISSING rather than promoted to N/A on a log line."
   },
   {
    "id": "PN81",
@@ -1031,7 +1211,8 @@
     "endgame8020",
     "tcbench8021"
    ],
-   "compose_commented": []
+   "compose_commented": [],
+   "note": "Announced-but-inert by the marker check, honest self-retire in fact. Boot line, captured 2026-07-26 by replaying the full patch pass: 'upstream drift: continuation guard already present - self-retire (no-op)'. The verifier reads EFFECT, and 'no effect because upstream already does it' produces the identical file to 'no effect because the patch broke' - which is why this note exists. NOT yet backed by a named upstream commit; that is the remaining work on this row, and until it is done the row is deliberately left MISSING rather than promoted to N/A on a log line."
   },
   {
    "id": "PN87",
@@ -1081,7 +1262,8 @@
     "endgame8020",
     "tcbench8021"
    ],
-   "compose_commented": []
+   "compose_commented": [],
+   "note": "Announced-but-inert by the marker check, honest self-retire in fact. Boot line, captured 2026-07-26 by replaying the full patch pass: 'upstream drift: quantized/hybrid zeroing properties already present - self-retire (no-op)'. The verifier reads EFFECT, and 'no effect because upstream already does it' produces the identical file to 'no effect because the patch broke' - which is why this note exists. NOT yet backed by a named upstream commit; that is the remaining work on this row, and until it is done the row is deliberately left MISSING rather than promoted to N/A on a log line."
   },
   {
    "id": "PN89",
@@ -1134,7 +1316,8 @@
     "endgame8020",
     "tcbench8021"
    ],
-   "compose_commented": []
+   "compose_commented": [],
+   "note": "Not upstream absorption - a PRECONDITION check that found the bug unreachable here. Boot line: 'verified NO-OP: dense-safety invariants intact in Qwen3_5DecoderLayer (explicit quant_config= on self_attn + Qwen3NextMLP); #47828 leak unreachable on dense qwen3_5_text - guard not applied'. Zero markers is the correct outcome on THIS model; the patch would engage on a model where the invariant does not hold, so it is not retirable."
   },
   {
    "id": "PN91G",
@@ -1159,7 +1342,9 @@
     "tcbench8021"
    ],
    "compose_commented": [],
-   "note": "fixes-lane vllm#48475 GDN spec-decode state-index clamp. Targets are built by a helper (_fla()) so the AST cannot see them; resolved by the whole-tree marker sweep. VERIFIED MISSING 2026-07-25 on the live tcbench container: third_party/flash_linear_attention/ops/fused_recurrent.py exists and contains ZERO '# PN91g:' - the patch is always-on in the entrypoint and had no effect. This is a live BUG-122-class instance, not a tooling artifact."
+   "note": "CORRECTED 2026-07-26 - the previous note here was a FALSE BUG-122 alarm and is the reason it is being rewritten rather than extended. It read 'VERIFIED MISSING ... contains ZERO \"# PN91g:\" ... always-on in the entrypoint and had no effect. This is a live BUG-122-class instance, not a tooling artifact.' It counted the absence of OUR marker without reading the branch the patcher takes one line earlier. The boot says: 'fused_recurrent.py: upstream drift - clamp already present, self-retire (no-op)' and the same for fused_sigmoid_gating.py. That is the README's own trap - the `why` field tells you where to look, not what happened - committed inside the ledger's own overlay.",
+   "state_hint": "N/A",
+   "superseded_by": "vllm#48475, on the build line as 76c86291e 'Cherry #48475: GDN spec-decode state-index clamp (rebased head, third_party layout)'. Absorbing code, third_party/flash_linear_attention/ops/fused_recurrent.py:110 in the PRISTINE boot pin: 'i_t = tl.maximum(tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1, 0)' under 'if IS_CONTINUOUS_BATCHING: if IS_SPEC_DECODING:'. The capability is in force; only the patch is redundant."
   },
   {
    "id": "PN92",
@@ -1234,7 +1419,8 @@
     "endgame8020",
     "tcbench8021"
    ],
-   "compose_commented": []
+   "compose_commented": [],
+   "note": "Announced-but-inert by the marker check, honest self-retire in fact. Boot line, captured 2026-07-26 by replaying the full patch pass: 'upstream drift: EAGLE-only width guard already present - self-retire (no-op)'. The verifier reads EFFECT, and 'no effect because upstream already does it' produces the identical file to 'no effect because the patch broke' - which is why this note exists. NOT yet backed by a named upstream commit; that is the remaining work on this row, and until it is done the row is deliberately left MISSING rather than promoted to N/A on a log line."
   },
   {
    "id": "PN95",
@@ -1438,8 +1624,7 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fla/ops/chunk.py"
    ],
    "markers": [
-    "Genesis P103 self-install hook (v7.69, club-3090#19 finding 2)",
-    "_genesis_p103_chunked_wrap"
+    "Genesis P103 self-install hook (v7.69, club-3090#19 finding 2)"
    ],
    "flags": [
     "GENESIS_ENABLE_P103",
@@ -1448,6 +1633,9 @@
    "upstream": [],
    "status": "live",
    "summary": "Wiring for Patch 103 \u2014 FLA Cliff 2 chunked fwd_h+fwd_o orchestrator.",
+   "markers_doc": [
+    "_genesis_p103_chunked_wrap"
+   ],
    "registry": {
     "title": "FLA Cliff 2 chunked fwd_h+fwd_o orchestrator (qwen36-27b-single-3090#1)",
     "env_flag": "GENESIS_ENABLE_P103",
@@ -1514,7 +1702,8 @@
     "env_flag": "GENESIS_LEGACY_P12",
     "default_on": true,
     "category": "structured_output",
-    "lifecycle": "legacy"
+    "lifecycle": "retired",
+    "superseded_by": "vllm#45413 + vllm#45588 (streaming parser-engine refactor, MERGED 2026-06-15). Target DELETED. vllm/parser/qwen3.py ships an is_reasoning_end() that returns True on an UNPAIRED <tool_call> (it scans forward for a matching </tool_call> and only then continues) plus the (REASONING, TOOL_START) FSM transition. The FIRST-vs-LAST-occurrence bug this row's v7.62.5 update fixed is structurally impossible now: ParserEngine.extract_content_ids slices on the </think> token only, never on <tool_call>. Verified 2026-07-26 against the live adapter on the boot pin: unpaired <tool_call> -> is_reasoning_end True, paired -> False, and a two-tool prompt returned BOTH calls. lane-2's twin row was already capped <0.23.0; lane-1 was the half that never got the verdict."
    },
    "registry_id": "P12",
    "key": "P12@lane1-genesis:patch_12_tool_call_reasoning",
@@ -1528,14 +1717,15 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/wiring/legacy/patch_14_block_table.py",
    "kind": "monkey_patch",
    "targets": [],
-   "markers": [
-    "_genesis_p14_append_wrapped",
-    "_genesis_p14_move_wrapped"
-   ],
+   "markers": [],
    "flags": [],
    "upstream": [],
    "status": "live",
    "summary": "Wiring for Patch 14 \u2014 BlockTable tail zero-fill runtime hook.",
+   "markers_doc": [
+    "_genesis_p14_append_wrapped",
+    "_genesis_p14_move_wrapped"
+   ],
    "registry": {
     "title": "block_table tail zero-fill",
     "env_flag": "GENESIS_LEGACY_P14",
@@ -1688,15 +1878,16 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/wiring/legacy/patch_22_tq_prealloc.py",
    "kind": "monkey_patch",
    "targets": [],
-   "markers": [
-    "_genesis_p22_wrapped"
-   ],
+   "markers": [],
    "flags": [
     "VLLM_WORKER_MULTIPROC_METHOD"
    ],
    "upstream": [],
    "status": "live",
    "summary": "Wiring for Patch 22 \u2014 TurboQuant K/V dequant buffer prealloc hook.",
+   "markers_doc": [
+    "_genesis_p22_wrapped"
+   ],
    "registry": {
     "title": "TurboQuant shared dequant prealloc",
     "env_flag": "GENESIS_LEGACY_P22",
@@ -1790,7 +1981,8 @@
     "env_flag": "GENESIS_LEGACY_P27",
     "default_on": true,
     "category": "structured_output",
-    "lifecycle": "legacy"
+    "lifecycle": "retired",
+    "superseded_by": "vllm#45413 + vllm#45588 (streaming parser-engine refactor, MERGED 2026-06-15). Target DELETED. The DATA LOSS this patch existed to fix is gone: the old parser did model_output.partition('<think>') and kept only parts[2], discarding anything emitted before the tag. The FSM starts in ParserState.REASONING and (REASONING, THINK_START) consumes the tag with no event, so pre-<think> text is emitted rather than dropped. Verified 2026-07-26 on the boot pin: 'Here is my answer. <think>Let me check.</think>42' -> ('Here is my answer. Let me check.', '42'). CAVEAT, stated so it is not rediscovered as a bug: upstream routes that text to REASONING, P27 routed it to CONTENT. That preference, if still wanted, is a new FSM-level patch (flush accumulated text as TEXT_CHUNK on the THINK_START transition), not a re-anchor \u2014 there is no line left to anchor to."
    },
    "registry_id": "P27",
    "key": "P27@lane1-genesis:patch_27_reasoning_before_think",
@@ -1863,13 +2055,14 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/wiring/legacy/patch_31_router_softmax.py",
    "kind": "monkey_patch",
    "targets": [],
-   "markers": [
-    "_genesis_p31_wrapped"
-   ],
+   "markers": [],
    "flags": [],
    "upstream": [],
    "status": "live",
    "summary": "Wiring for Patch 31 \u2014 fp32 upcast on MoE router softmax.",
+   "markers_doc": [
+    "_genesis_p31_wrapped"
+   ],
    "registry": {
     "title": "MoE router fp32 softmax",
     "env_flag": "GENESIS_LEGACY_P31",
@@ -2003,9 +2196,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/wiring/legacy/patch_38_tq_continuation_memory.py",
    "kind": "monkey_patch",
    "targets": [],
-   "markers": [
-    "_genesis_p38_wrapped"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_BUFFER_MODE",
     "GENESIS_TQ_MAX_MODEL_LEN"
@@ -2015,6 +2206,9 @@
    ],
    "status": "live",
    "summary": "Wiring for Patch 38 \u2014 TurboQuant `_continuation_prefill` memory fix.",
+   "markers_doc": [
+    "_genesis_p38_wrapped"
+   ],
    "registry": {
     "title": "TQ _continuation_prefill persistent workspace",
     "env_flag": "GENESIS_LEGACY_P38",
@@ -2065,8 +2259,7 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/third_party/flash_linear_attention/ops/chunk_scaled_dot_kkt.py"
    ],
    "markers": [
-    "Genesis P39a self-install hook (exec-survival, club-3090#19 class)",
-    "_genesis_p39a_wrapped"
+    "Genesis P39a self-install hook (exec-survival, club-3090#19 class)"
    ],
    "flags": [
     "GENESIS_ENABLE_P39A_SELFINSTALL",
@@ -2079,6 +2272,9 @@
    ],
    "status": "default-dark",
    "summary": "Wiring for Patch 39a \u2014 FLA `chunk_scaled_dot_kkt_fwd` persistent A pool.",
+   "markers_doc": [
+    "_genesis_p39a_wrapped"
+   ],
    "key": "P39",
    "note": "P39a FLA chunk_scaled_dot_kkt persistent A pool. Was setattr-only and therefore INERT across `exec vllm serve` for months while logging 'applied' every boot. 69cae1bd gave it a self-install hook text-patched into chunk_scaled_dot_kkt.py, gated OFF by default behind GENESIS_ENABLE_P39A_SELFINSTALL. Zero markers with the flag unset is CORRECT. Live behaviour remains unverified until a boot with the flag on."
   },
@@ -2119,9 +2315,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/wiring/legacy/patch_40_tq_grouped_decode.py",
    "kind": "monkey_patch",
    "targets": [],
-   "markers": [
-    "_genesis_p40_wrapped"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_BUFFER_MODE",
     "GENESIS_ENABLE_P40"
@@ -2129,6 +2323,9 @@
    "upstream": [],
    "status": "retired?",
    "summary": "Wiring for Patch 40 \u2014 TurboQuant GQA-grouped decode stage1 dispatch.",
+   "markers_doc": [
+    "_genesis_p40_wrapped"
+   ],
    "registry": {
     "title": "TurboQuant GQA-grouped decode stage1 (opt-in)",
     "env_flag": "GENESIS_ENABLE_P40",
@@ -2337,7 +2534,10 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/v1/request.py"
    ],
    "markers": [
-    "Genesis P58 async-scheduler -1 placeholder fix v7.59_p62_compat"
+    "Genesis P58 async-scheduler -1 placeholder fix v7.59_p62_compat",
+    "Genesis P58 async-scheduler -1 placeholder fix v7.59_p62_compat :: async_scheduler.py",
+    "Genesis P58 async-scheduler -1 placeholder fix v7.59_p62_compat :: request.py",
+    "Genesis P58 async-scheduler -1 placeholder fix v7.59_p62_compat :: scheduler.py"
    ],
    "flags": [
     "GENESIS_ENABLE_P58_ASYNC_PLACEHOLDER_FIX",
@@ -2385,7 +2585,9 @@
     "env_flag": "GENESIS_ENABLE_P59_QWEN3_TOOL_RECOVERY",
     "default_on": false,
     "category": "structured_output",
-    "upstream_pr": 39055
+    "lifecycle": "retired",
+    "upstream_pr": 39055,
+    "superseded_by": "vllm#45413 + vllm#45588 (streaming parser-engine refactor, MERGED 2026-06-15). The target reasoning/qwen3_reasoning_parser.py is DELETED; Qwen3Parser's (REASONING, TOOL_START) FSM transition promotes a <tool_call> emitted inside <think> into content natively. Verified 2026-07-26 by instantiating the live Qwen3ParserReasoningAdapter on the boot pin under the served config (--reasoning-parser qwen3 + --tool-call-parser hermes): extract_reasoning returned ('reasoning\\n', '<tool_call>...</tool_call>\\ndone'), i.e. the block is stripped out of reasoning and handed to content, which is where hermes reads it."
    },
    "registry_id": "P59",
    "key": "P59"
@@ -2461,7 +2663,10 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu_model_runner.py"
    ],
    "markers": [
-    "Genesis P60 GDN+ngram state recovery v7.13"
+    "Genesis P60 GDN+ngram state recovery v7.13",
+    "Genesis P60 GDN+ngram state recovery v7.13 :: gdn_attn.py",
+    "Genesis P60 GDN+ngram state recovery v7.13 :: gdn_linear_attn.py",
+    "Genesis P60 GDN+ngram state recovery v7.13 :: gpu_model_runner.py"
    ],
    "flags": [
     "GENESIS_ENABLE_P60_GDN_NGRAM_FIX",
@@ -2496,7 +2701,9 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/mamba/ops/causal_conv1d.py"
    ],
    "markers": [
-    "Genesis P60b GDN+ngram Triton kernel offset v7.13"
+    "Genesis P60b GDN+ngram Triton kernel offset v7.13",
+    "Genesis P60b GDN+ngram Triton kernel offset v7.13 :: causal_conv1d.py",
+    "Genesis P60b GDN+ngram Triton kernel offset v7.13 :: gdn_linear_attn.py"
    ],
    "flags": [
     "GENESIS_ENABLE_P60B_TRITON_KERNEL",
@@ -2601,7 +2808,9 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/v1/structured_output/__init__.py"
    ],
    "markers": [
-    "Genesis P62 structured-output spec-decode timing v7.70 (post-PR41199 update \u2014 uses _get_reasoner)"
+    "Genesis P62 structured-output spec-decode timing v7.70 (post-PR41199 update \u2014 uses _get_reasoner)",
+    "Genesis P62 structured-output spec-decode timing v7.70 (post-PR41199 update \u2014 uses _get_reasoner) :: scheduler.py",
+    "Genesis P62 structured-output spec-decode timing v7.70 (post-PR41199 update \u2014 uses _get_reasoner) :: structured_output"
    ],
    "flags": [
     "GENESIS_ENABLE_P62_STRUCT_OUT_SPEC_TIMING",
@@ -2671,7 +2880,9 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/tool_parsers/qwen3coder_tool_parser.py"
    ],
    "markers": [
-    "Genesis P64 qwen3coder MTP streaming early-return fix v7.13"
+    "Genesis P64 qwen3coder MTP streaming early-return fix v7.13",
+    "Genesis P64 qwen3coder MTP streaming early-return fix v7.13 :: qwen3coder_tool_parser.py",
+    "Genesis P64 qwen3coder MTP streaming early-return fix v7.13 :: serving.py"
    ],
    "flags": [
     "GENESIS_ENABLE_P64_QWEN3CODER_MTP_STREAMING",
@@ -3320,7 +3531,9 @@
    },
    "registry_id": "P7",
    "key": "P7@lane1-genesis:patch_7_gdn_dual_stream",
-   "peer_lifecycle": "legacy"
+   "peer_lifecycle": "legacy",
+   "note": "TWO gates, and the registry only knows about one. The dispatcher gate is GENESIS_LEGACY_P7 (default_on True, so flag_state reads 'on'), but apply() then checks its OWN GENESIS_ENABLE_P7 and returns 'deferred - incompatible with torch.compile fullgraph (CUDA streams not SymPy-graphable)' when it is unset. Zero markers is therefore CORRECT and the honest state is DARK. Re-anchored 2026-07-26 for the mamba/gdn/qwen_gdn_linear_attn.py rename and the flattened forward_cuda; verified count==1 offline against post-boot bytes, but LIVE behaviour is unverified and stays that way until somebody boots with GENESIS_ENABLE_P7=1 AND --enforce-eager. P7b is the graph-safe successor and was re-anchored in the same pass.",
+   "effective_env_flag": "GENESIS_ENABLE_P7"
   },
   {
    "id": "P7B",
@@ -3450,6 +3663,9 @@
    ],
    "status": "live",
    "summary": "Wiring for Patch 83 \u2014 MTP keep-last-cached-block (vllm#38182 mitigation).",
+   "markers_conditional": {
+    "Genesis P83 DEBUG instrumentation v7.53.6": "GENESIS_P83_DEBUG"
+   },
    "registry": {
     "title": "MTP keep-last-cached-block (vllm#38182 downstream symptom \u2014 P84 is real fix)",
     "env_flag": "GENESIS_ENABLE_P83",
@@ -3472,7 +3688,8 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/v1/engine/core.py"
    ],
    "markers": [
-    "Genesis P84 hash_block_size override (vllm#38182 actual root cause) v7.53.3_dual_site"
+    "Genesis P84 hash_block_size override (vllm#38182 actual root cause) v7.53.3_dual_site",
+    "Genesis P84 hash_block_size override (vllm#38182 actual root cause) v7.53.3_dual_site_engine_core"
    ],
    "flags": [
     "GENESIS_ENABLE_P84",
@@ -3646,7 +3863,9 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/parameter.py"
    ],
    "markers": [
-    "Genesis P91 AutoRound row-group cdiv (vllm#39460) v7.62.1"
+    "Genesis P91 AutoRound row-group cdiv (vllm#39460) v7.62.1",
+    "Genesis P91 AutoRound row-group cdiv (vllm#39460) v7.62.1_gptq_marlin",
+    "Genesis P91 AutoRound row-group cdiv (vllm#39460) v7.62.1_parameter"
    ],
    "flags": [
     "GENESIS_P91_MARKER"
@@ -4038,7 +4257,9 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/v1/spec_decode/dflash.py"
    ],
    "markers": [
-    "Genesis PN21 DFlash SWA support v7.65"
+    "Genesis PN21 DFlash SWA support v7.65",
+    "Genesis PN21 DFlash SWA support v7.65 (algos)",
+    "Genesis PN21 DFlash SWA support v7.65 (dflash)"
    ],
    "flags": [
     "GENESIS_ENABLE_PN21_DFLASH_SWA",
@@ -4072,7 +4293,8 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/qwen3_dflash.py"
    ],
    "markers": [
-    "Genesis PN22 local argmax TP for spec-decode draft v7.65"
+    "Genesis PN22 local argmax TP for spec-decode draft v7.65",
+    "Genesis PN22 local argmax TP for spec-decode draft v7.65 (dflash)"
    ],
    "flags": [
     "GENESIS_ENABLE_PN22_LOCAL_ARGMAX_TP",
@@ -4197,9 +4419,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/wiring/perf_hotfix/patch_N26_sparse_v_kernel.py",
    "kind": "monkey_patch",
    "targets": [],
-   "markers": [
-    "_genesis_pn26_sparse_v_wrapped"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_PN26_SPARSE_V",
     "GENESIS_PN26_SPARSE_V_LOG_EVERY",
@@ -4211,6 +4431,9 @@
    ],
    "status": "live",
    "summary": "Wiring for Patch N26 sub-component \u2014 SPARSE_V kernel dispatcher.",
+   "markers_doc": [
+    "_genesis_pn26_sparse_v_wrapped"
+   ],
    "registry": {
     "title": "TQ unified perf pack (centroids prebake + sparse V scaffold)",
     "env_flag": "GENESIS_ENABLE_PN26_TQ_UNIFIED",
@@ -4232,7 +4455,8 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/turboquant/centroids.py"
    ],
    "markers": [
-    "Genesis PN26 TQ unified perf (centroids+sparseV) v7.65"
+    "Genesis PN26 TQ unified perf (centroids+sparseV) v7.65",
+    "Genesis PN26 TQ unified perf (centroids+sparseV) v7.65 (centroids)"
    ],
    "flags": [
     "GENESIS_ENABLE_PN26_SPARSE_V",
@@ -4385,7 +4609,10 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/mamba_utils.py"
    ],
    "markers": [
-    "Genesis PN30 DS conv state + spec-decode AL>1 (issue #17) v7.68"
+    "Genesis PN30 DS conv state + spec-decode AL>1 (issue #17) v7.68",
+    "Genesis PN30 DS conv state + spec-decode AL>1 (issue #17) v7.68 part1",
+    "Genesis PN30 DS conv state + spec-decode AL>1 (issue #17) v7.68 part2",
+    "Genesis PN30 DS conv state + spec-decode AL>1 (issue #17) v7.68 part3 dst-shaped-temp"
    ],
    "flags": [
     "GENESIS_ENABLE_PN30_DS_LAYOUT_SPEC_DECODE",
@@ -4551,7 +4778,9 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu_model_runner.py"
    ],
    "markers": [
-    "Genesis PN35 inputs_embeds optional for text-only (vllm#35975) v7.69"
+    "Genesis PN35 inputs_embeds optional for text-only (vllm#35975) v7.69",
+    "Genesis PN35 inputs_embeds optional for text-only (vllm#35975) v7.69 part1",
+    "Genesis PN35 inputs_embeds optional for text-only (vllm#35975) v7.69 part2"
    ],
    "flags": [
     "GENESIS_DISABLE_PN35_INPUTS_EMBEDS_OPTIONAL",
@@ -4618,7 +4847,6 @@
    "markers": [
     "Genesis PN40 DFlash omnibus v1 (sub-kernel A: fused K-norm)",
     "Genesis PN40 sub-C scheduler k_trim hook v1.1 (per-subpatch marker)",
-    "Genesis PN40 sub-C+D scheduler observe hook v1 (universal MTP/DFlash)",
     "Genesis PN40 sub-C+D scheduler observe hook v1.1 (per-subpatch marker)"
    ],
    "flags": [
@@ -4630,6 +4858,9 @@
    "upstream": [],
    "status": "live",
    "summary": "Wiring for PN40 \u2014 DFlash omnibus optimization.",
+   "markers_doc": [
+    "Genesis PN40 sub-C+D scheduler observe hook v1 (universal MTP/DFlash)"
+   ],
    "key": "PN40@lane1-genesis:patch_N40_dflash_omnibus",
    "peer_lifecycle": "experimental"
   },
@@ -4747,7 +4978,9 @@
     "env_flag": "GENESIS_ENABLE_PN51_QWEN3_STREAMING_THINKING_DISABLED",
     "default_on": false,
     "category": "perf_hotfix",
-    "upstream_pr": 40816
+    "lifecycle": "retired",
+    "upstream_pr": 40816,
+    "superseded_by": "vllm#45413 + vllm#45588 (streaming parser-engine refactor, MERGED 2026-06-15). Target reasoning/qwen3_reasoning_parser.py DELETED. Absorbed STRUCTURALLY, not by a one-line guard: Qwen3Parser.__init__ passes qwen3_config(thinking=self.thinking_enabled), and that config sets initial_state=ParserState.REASONING if thinking else ParserState.CONTENT \u2014 with thinking off the FSM STARTS in CONTENT so every delta is a TEXT_CHUNK, and there is an explicit non-streaming `if not self.thinking_enabled: return None, model_output`. Verified 2026-07-26 on the boot pin: streaming with thinking=False gives content='Hello' reasoning=None (this row's bug was reasoning='Hello'), non-streaming gives (None, 'Hello world!'). lane-2's registry additionally records vllm#40820 as the merged fix for issue #40816."
    },
    "registry_id": "PN51",
    "key": "PN51"
@@ -4928,7 +5161,12 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/v1/structured_output/__init__.py"
    ],
    "markers": [
-    "Genesis PN58 spec-decode reasoning boundary (vllm#40962)"
+    "Genesis PN58 spec-decode reasoning boundary (vllm#40962)",
+    "Genesis PN58 spec-decode reasoning boundary (vllm#40962) (abs)",
+    "Genesis PN58 spec-decode reasoning boundary (vllm#40962) (basic)",
+    "Genesis PN58 spec-decode reasoning boundary (vllm#40962) (envs)",
+    "Genesis PN58 spec-decode reasoning boundary (vllm#40962) (sched)",
+    "Genesis PN58 spec-decode reasoning boundary (vllm#40962) (struct_out)"
    ],
    "flags": [
     "GENESIS_ENABLE_P62",
@@ -6242,9 +6480,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/model_compat/gemma4/g4_01_gemma4_ampere_fp8_block_guard.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_01 gemma4 ampere FP8_BLOCK guard v1 (closes operator confusion from vllm#39407 silent garbage output)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_DISABLE_G4_01_GUARD",
     "GENESIS_ENABLE_G4_01_GEMMA4_FP8_BLOCK_GUARD",
@@ -6255,6 +6491,9 @@
    ],
    "status": "live",
    "summary": "G4_01 \u2014 refuse FP8_BLOCK Gemma 4 checkpoints on Ampere SM 8.6.",
+   "markers_doc": [
+    "Genesis G4_01 gemma4 ampere FP8_BLOCK guard v1 (closes operator confusion from vllm#39407 silent garbage output)"
+   ],
    "registry": {
     "title": "Refuse FP8_BLOCK Gemma 4 checkpoint on Ampere SM 8.6 (closes vllm#39407 user pain)",
     "env_flag": "GENESIS_ENABLE_G4_01_GEMMA4_FP8_BLOCK_GUARD",
@@ -6290,9 +6529,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/model_compat/gemma4/g4_02_gemma4_ampere_marlin_kdim_guard.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_02 gemma4 ampere Marlin K-dim guard v1 (closes operator confusion from vllm#40354 obscure tile-config error)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_DISABLE_G4_02_GUARD",
     "GENESIS_ENABLE_G4_02_GEMMA4_MARLIN_KDIM_GUARD",
@@ -6304,6 +6541,9 @@
    ],
    "status": "live",
    "summary": "G4_02 \u2014 refuse Gemma 4 MoE with K%128\u22600 Marlin shape on Ampere.",
+   "markers_doc": [
+    "Genesis G4_02 gemma4 ampere Marlin K-dim guard v1 (closes operator confusion from vllm#40354 obscure tile-config error)"
+   ],
    "registry": {
     "title": "Refuse Marlin MoE with K%64\u22600 on Gemma 4 26B-A4B (closes vllm#40354 user pain)",
     "env_flag": "GENESIS_ENABLE_G4_02_GEMMA4_MARLIN_KDIM_GUARD",
@@ -6339,9 +6579,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/model_compat/gemma4/g4_03_gemma4_ampere_non_causal_drafter_guard.py",
    "kind": "monkey_patch",
    "targets": [],
-   "markers": [
-    "Genesis G4_03 gemma4 ampere non-causal drafter guard v2 (base-proposer wrap, fail-loud bindings; closes operator confusion from vllm#40382 backend matrix wall)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_DISABLE_G4_03_GUARD",
     "GENESIS_ENABLE_G4_03_GEMMA4_NON_CAUSAL_DRAFTER_GUARD",
@@ -6355,6 +6593,9 @@
    ],
    "status": "retired?",
    "summary": "G4_03 \u2014 refuse non-causal drafter (Eagle3/DFlash) with Gemma 4 on Ampere.",
+   "markers_doc": [
+    "Genesis G4_03 gemma4 ampere non-causal drafter guard v2 (base-proposer wrap, fail-loud bindings; closes operator confusion from vllm#40382 backend matrix wall)"
+   ],
    "registry": {
     "title": "Refuse non-causal drafter (Eagle3/DFlash) on Ampere SM 8.6 (closes vllm#40382 user pain)",
     "env_flag": "GENESIS_ENABLE_G4_03_GEMMA4_NON_CAUSAL_DRAFTER_GUARD",
@@ -6431,9 +6672,8 @@
    "upstream": [
     "vllm#39930"
    ],
-   "status": "orphan-no-registry-row",
+   "status": "retired",
    "summary": "G4_05 \u2014 RETIRED. Superseded by vllm-project/vllm#39930.",
-   "unreachable_by_dispatcher": true,
    "key": "G4_05@lane2-sndr:g4_05_dflash_backend_autoselect",
    "model_family": "gemma4"
   },
@@ -6518,9 +6758,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/model_compat/gemma4/g4_07_gemma4_fp8_block_double_scale_fix.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_07 gemma4 FP8_BLOCK double-scale fix v1 (closes vllm#39407 by skipping the second activation quantization)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_DISABLE_G4_01_GUARD",
     "GENESIS_ENABLE_G4_07_GEMMA4_FP8_BLOCK_FIX",
@@ -6531,6 +6769,9 @@
    ],
    "status": "live",
    "summary": "G4_07 \u2014 FP8_BLOCK Gemma 4 double-scale fix (closes vllm#39407).",
+   "markers_doc": [
+    "Genesis G4_07 gemma4 FP8_BLOCK double-scale fix v1 (closes vllm#39407 by skipping the second activation quantization)"
+   ],
    "registry": {
     "title": "FP8_BLOCK double-scale fix \u2014 custom quant config (closes vllm#39407)",
     "env_flag": "GENESIS_ENABLE_G4_07_GEMMA4_FP8_BLOCK_FIX",
@@ -6556,9 +6797,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/model_compat/gemma4/g4_08_gemma4_marlin_kdim_pad_fallback.py",
    "kind": "monkey_patch",
    "targets": [],
-   "markers": [
-    "Genesis G4_08 gemma4 Marlin K-dim pad fallback v1 (closes vllm#40354 for K%64\u22600 MoE via Triton zero-pad kernel)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_DISABLE_G4_02_GUARD",
     "GENESIS_ENABLE_G4_08_MARLIN_KDIM_PAD",
@@ -6569,6 +6808,9 @@
    ],
    "status": "live",
    "summary": "G4_08 \u2014 Marlin K-dim pad fallback: route through Genesis Triton MoE GEMM.",
+   "markers_doc": [
+    "Genesis G4_08 gemma4 Marlin K-dim pad fallback v1 (closes vllm#40354 for K%64\u22600 MoE via Triton zero-pad kernel)"
+   ],
    "registry": {
     "title": "Marlin K-pad Triton MoE fallback (closes vllm#40354)",
     "env_flag": "GENESIS_ENABLE_G4_08_MARLIN_KDIM_PAD",
@@ -6615,9 +6857,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/model_compat/gemma4/g4_09_gemma4_swa_global_prefill_chunker.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_09 gemma4 SWA\u2192global prefill chunker v1 (workaround for vllm#39914 engine hang at prefill > 4K)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_09_GEMMA4_SWA_PREFILL_CHUNKER",
     "GENESIS_G4_09_CHUNK_SIZE",
@@ -6628,6 +6868,9 @@
    ],
    "status": "live",
    "summary": "G4_09 \u2014 chunked prefill across SWA\u2192global attention boundary (closes #39914).",
+   "markers_doc": [
+    "Genesis G4_09 gemma4 SWA\u2192global prefill chunker v1 (workaround for vllm#39914 engine hang at prefill > 4K)"
+   ],
    "registry": {
     "title": "SWA\u2192global prefill chunker (workaround vllm#39914 engine hang)",
     "env_flag": "GENESIS_ENABLE_G4_09_GEMMA4_SWA_PREFILL_CHUNKER",
@@ -6660,9 +6903,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/model_compat/gemma4/g4_10_gemma4_ampere_non_causal_attn_backend.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_10 gemma4 ampere non-causal drafter enablement guard v2 (stock TRITON_ATTN does the job; bespoke kernel retired 2026-06-16)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_10_GEMMA4_AMPERE_NON_CAUSAL_BACKEND",
     "GENESIS_G4_10_MARKER"
@@ -6673,6 +6914,9 @@
    ],
    "status": "retired?",
    "summary": "G4_10 \u2014 Ampere SM 8.6 non-causal drafter enablement guard for Gemma 4.",
+   "markers_doc": [
+    "Genesis G4_10 gemma4 ampere non-causal drafter enablement guard v2 (stock TRITON_ATTN does the job; bespoke kernel retired 2026-06-16)"
+   ],
    "registry": {
     "title": "Gemma-4 non-causal drafter enablement on Ampere (stock TRITON_ATTN; vllm#40382 closed on dev491)",
     "env_flag": "GENESIS_ENABLE_G4_10_GEMMA4_AMPERE_NON_CAUSAL_BACKEND",
@@ -6698,9 +6942,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/model_compat/gemma4/g4_11_gemma4_chat_template_install.py",
    "kind": "text_patch",
    "targets": [],
-   "markers": [
-    "Genesis G4_11 gemma4 enhanced chat template install v1 (includes vllm#42188 missing-tool-id fix + Genesis hardening)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_11_GEMMA4_CHAT_TEMPLATE_INSTALL",
     "GENESIS_G4_11_MARKER"
@@ -6710,6 +6952,9 @@
    ],
    "status": "live",
    "summary": "G4_11 \u2014 install enhanced Gemma 4 chat template with #42188 tool-id fix.",
+   "markers_doc": [
+    "Genesis G4_11 gemma4 enhanced chat template install v1 (includes vllm#42188 missing-tool-id fix + Genesis hardening)"
+   ],
    "registry": {
     "title": "Gemma 4 enhanced chat template install",
     "env_flag": "GENESIS_ENABLE_G4_11_GEMMA4_CHAT_TEMPLATE_INSTALL",
@@ -6741,9 +6986,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/model_compat/gemma4/g4_12_gemma4_fp8_e4nv_ampere_guard.py",
    "kind": "text_patch",
    "targets": [],
-   "markers": [
-    "Genesis G4_12 gemma4 FP8 e4nv Ampere guard v1 (refuses unsupported FP8 type on consumer Ampere; closes vllm#41014)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_DISABLE_G4_12_GUARD",
     "GENESIS_ENABLE_G4_12_GEMMA4_FP8_E4NV_GUARD",
@@ -6754,6 +6997,9 @@
    ],
    "status": "live",
    "summary": "G4_12 \u2014 refuse FP8 e4nv (no-sat) Gemma 4 checkpoints on Ampere SM 8.6.",
+   "markers_doc": [
+    "Genesis G4_12 gemma4 FP8 e4nv Ampere guard v1 (refuses unsupported FP8 type on consumer Ampere; closes vllm#41014)"
+   ],
    "registry": {
     "title": "Refuse FP8 e4nv on Ampere SM 8.6 (closes vllm#41014)",
     "env_flag": "GENESIS_ENABLE_G4_12_GEMMA4_FP8_E4NV_GUARD",
@@ -6786,9 +7032,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/model_compat/gemma4/g4_13_gemma4_per_token_head_kv_guard.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_13 gemma4 26B-A4B per-token-head KV guard v1 (refuses asymmetric KV-head config that triggers vllm#40388)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_DISABLE_G4_13_GUARD",
     "GENESIS_ENABLE_G4_13_GEMMA4_PER_TOKEN_HEAD_KV_GUARD",
@@ -6800,6 +7044,9 @@
    ],
    "status": "superseded?",
    "summary": "G4_13 \u2014 refuse Gemma 4 26B-A4B per-token-head KV cache mismatch.",
+   "markers_doc": [
+    "Genesis G4_13 gemma4 26B-A4B per-token-head KV guard v1 (refuses asymmetric KV-head config that triggers vllm#40388)"
+   ],
    "registry": {
     "title": "Refuse asymmetric per-layer KV-head config (closes vllm#40388 silent corruption)",
     "env_flag": "GENESIS_ENABLE_G4_13_GEMMA4_PER_TOKEN_HEAD_KV_GUARD",
@@ -6835,9 +7082,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/model_compat/gemma4/g4_14_gemma4_tool_call_parser_pad_token.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_14 gemma4 tool-call parser pad-token strip v1 (closes vllm#39392 \u2014 strips <pad>/<eos>/turn-boundary tokens from streaming tool-call JSON deltas)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_14_GEMMA4_TOOL_CALL_PARSER_PAD",
     "GENESIS_G4_14_MARKER"
@@ -6847,6 +7092,9 @@
    ],
    "status": "retired?",
    "summary": "G4_14 \u2014 Gemma 4 tool-call parser pad-token workaround (closes vllm#39392).",
+   "markers_doc": [
+    "Genesis G4_14 gemma4 tool-call parser pad-token strip v1 (closes vllm#39392 \u2014 strips <pad>/<eos>/turn-boundary tokens from streaming tool-call JSON deltas)"
+   ],
    "registry": {
     "title": "Gemma 4 tool-call parser pad-token strip (closes vllm#39392)",
     "env_flag": "GENESIS_ENABLE_G4_14_GEMMA4_TOOL_CALL_PARSER_PAD",
@@ -6881,9 +7129,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/model_compat/gemma4/g4_15_gemma4_fused_rmsnorm_route.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_15 gemma4 fused RMSNorm route v1 (kernel ported; hot-path wiring deferred to G4_15b \u2014 currently no-op)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_15_GEMMA4_FUSED_RMSNORM",
     "GENESIS_G4_15_MARKER"
@@ -6891,6 +7137,9 @@
    "upstream": [],
    "status": "live",
    "summary": "G4_15 \u2014 fused RMSNorm Triton kernels (PARTIAL \u2014 no-op wrapper in hot path).",
+   "markers_doc": [
+    "Genesis G4_15 gemma4 fused RMSNorm route v1 (kernel ported; hot-path wiring deferred to G4_15b \u2014 currently no-op)"
+   ],
    "registry": {
     "title": "Fused RMSNorm Triton kernels for Gemma 4 (ported from SGLang)",
     "env_flag": "GENESIS_ENABLE_G4_15_GEMMA4_FUSED_RMSNORM",
@@ -6912,9 +7161,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/model_compat/gemma4/g4_16_gemma4_full_piecewise_cudagraph.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_16 gemma4 FULL_AND_PIECEWISE cudagraph mode v1 (parallel to PN125 for model_type=gemma4; +10-30% TPS at low batch)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_16_GEMMA4_FULL_AND_PIECEWISE",
     "GENESIS_G4_16_MARKER"
@@ -6922,6 +7169,9 @@
    "upstream": [],
    "status": "live",
    "summary": "G4_16 \u2014 force FULL_AND_PIECEWISE cudagraph mode for Gemma 4 dense paths.",
+   "markers_doc": [
+    "Genesis G4_16 gemma4 FULL_AND_PIECEWISE cudagraph mode v1 (parallel to PN125 for model_type=gemma4; +10-30% TPS at low batch)"
+   ],
    "registry": {
     "title": "Gemma 4 FULL_AND_PIECEWISE cudagraph mode (parallel to PN125 for gemma4)",
     "env_flag": "GENESIS_ENABLE_G4_16_GEMMA4_FULL_AND_PIECEWISE",
@@ -6953,9 +7203,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/model_compat/gemma4/g4_17_gemma4_vision_tower_text_only_skip.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_17 gemma4 vision-tower skip for text-only inference v1 (saves ~2.3 GB VRAM + ~30 sec cold boot when text-only; genesis_original, no upstream tracker)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_17_GEMMA4_VISION_SKIP",
     "GENESIS_G4_17_MARKER",
@@ -6966,6 +7214,9 @@
    ],
    "status": "live",
    "summary": "G4_17 \u2014 skip vision-tower load when running Gemma 4 multimodal text-only.",
+   "markers_doc": [
+    "Genesis G4_17 gemma4 vision-tower skip for text-only inference v1 (saves ~2.3 GB VRAM + ~30 sec cold boot when text-only; genesis_original, no upstream tracker)"
+   ],
    "registry": {
     "title": "Gemma 4 vision-tower text-only skip",
     "env_flag": "GENESIS_ENABLE_G4_17_GEMMA4_VISION_SKIP",
@@ -6990,9 +7241,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/kv_cache/g4_18_per_layer_kv_page_size.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_18 gemma4 per-layer KV page-size v1 (vendors WIP #40391 for 26B-A4B asymmetric KV-head support)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_18_GEMMA4_PER_LAYER_KV_PAGE_SIZE",
     "GENESIS_G4_18_MARKER"
@@ -7003,6 +7252,9 @@
    ],
    "status": "live",
    "summary": "G4_18 \u2014 per-layer KV cache page-size for Gemma 4 26B-A4B (vendors #40391).",
+   "markers_doc": [
+    "Genesis G4_18 gemma4 per-layer KV page-size v1 (vendors WIP #40391 for 26B-A4B asymmetric KV-head support)"
+   ],
    "registry": {
     "title": "Per-layer KV cache page-size for 26B-A4B (vendors WIP vllm#40391)",
     "env_flag": "GENESIS_ENABLE_G4_18_GEMMA4_PER_LAYER_KV_PAGE_SIZE",
@@ -7028,15 +7280,16 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/g4_19_config_registry.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_19 module-level config registry v1 (replaces vllm_config attach blocked by dev371 strict dataclass)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_G4_19_REGISTRY_MARKER"
    ],
    "upstream": [],
    "status": "live",
    "summary": "Module-level singleton for the active G4-TurboQuant config.",
+   "markers_doc": [
+    "Genesis G4_19 module-level config registry v1 (replaces vllm_config attach blocked by dev371 strict dataclass)"
+   ],
    "key": "G4_19@lane2-sndr:g4_19_config_registry",
    "model_family": "gemma4"
   },
@@ -7047,9 +7300,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/g4_19_turboquant_kv_cache.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_19 gemma4 TurboQuant KV cache v1 (3-bit / 4-bit vector-quantized KV \u2014 unlocks 256K context on 2\u00d7 A5000)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_19_GEMMA4_TURBOQUANT_KV",
     "GENESIS_G4_19_MARKER",
@@ -7067,6 +7318,9 @@
    ],
    "status": "live",
    "summary": "G4_19 \u2014 Genesis G4-TurboQuant KV cache for Gemma 4 (256K context unlock).",
+   "markers_doc": [
+    "Genesis G4_19 gemma4 TurboQuant KV cache v1 (3-bit / 4-bit vector-quantized KV \u2014 unlocks 256K context on 2\u00d7 A5000)"
+   ],
    "registry": {
     "title": "Genesis G4-TurboQuant KV cache for Gemma 4 (3/4-bit VQ, unlocks 256K context on 2\u00d7 A5000)",
     "env_flag": "GENESIS_ENABLE_G4_19_GEMMA4_TURBOQUANT_KV",
@@ -7089,9 +7343,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/g4_19b_tq_kv_spec_integration.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_19b gemma4 TurboQuant KV spec integration v1 (hooks vLLM v1 _check_enough_kv_cache_memory to account for TQ compression)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_19B_GEMMA4_TQ_KV_SPEC",
     "GENESIS_ENABLE_G4_19_GEMMA4_TURBOQUANT_KV",
@@ -7105,6 +7357,9 @@
    ],
    "status": "live",
    "summary": "G4_19b \u2014 TurboQuant KV spec integration with vLLM v1 memory accounting.",
+   "markers_doc": [
+    "Genesis G4_19b gemma4 TurboQuant KV spec integration v1 (hooks vLLM v1 _check_enough_kv_cache_memory to account for TQ compression)"
+   ],
    "registry": {
     "title": "G4-TurboQuant KV spec integration with vLLM v1 _check_enough_kv_cache_memory",
     "env_flag": "GENESIS_ENABLE_G4_19B_GEMMA4_TQ_KV_SPEC",
@@ -7162,9 +7417,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/g4_19c_attention_wrapper.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_19c attention K/V round-trip wrapper v3 (per-layer specialized forward via types.MethodType; allow_in_graph kernel entry; fullgraph-safe hot path)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_19C_ATTN_WRAP",
     "GENESIS_ENABLE_G4_19_GEMMA4_TURBOQUANT_KV",
@@ -7173,9 +7426,11 @@
     "GENESIS_G4_19C_MARKER"
    ],
    "upstream": [],
-   "status": "orphan-no-registry-row",
+   "status": "retired?",
    "summary": "G4_19c \u2014 Round-trip K,V through G4-TurboQuant inside Gemma4Attention.",
-   "unreachable_by_dispatcher": true,
+   "markers_doc": [
+    "Genesis G4_19c attention K/V round-trip wrapper v3 (per-layer specialized forward via types.MethodType; allow_in_graph kernel entry; fullgraph-safe hot path)"
+   ],
    "key": "G4_19C@lane2-sndr:g4_19c_attention_wrapper",
    "model_family": "gemma4"
   },
@@ -7218,9 +7473,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/model_compat/gemma4/g4_23_gemma4_vision_fp16_overflow_fix.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_23 gemma4 vision-tower FP16 overflow guard v1 (forces BF16 on vision tower when operator chose FP16; closes vllm#40124)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_23_GEMMA4_VISION_FP16_OVERFLOW",
     "GENESIS_G4_23_MARKER"
@@ -7230,6 +7483,9 @@
    ],
    "status": "live",
    "summary": "G4_23 \u2014 Gemma 4 vision-tower FP16 overflow guard (closes vllm#40124).",
+   "markers_doc": [
+    "Genesis G4_23 gemma4 vision-tower FP16 overflow guard v1 (forces BF16 on vision tower when operator chose FP16; closes vllm#40124)"
+   ],
    "registry": {
     "title": "Gemma 4 vision-tower FP16 overflow fix (closes vllm#40124)",
     "env_flag": "GENESIS_ENABLE_G4_23_GEMMA4_VISION_FP16_OVERFLOW",
@@ -7265,9 +7521,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/model_compat/gemma4/g4_24_gemma4_fused_softcap_route.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_24 gemma4 fused softcap route v1 (routes FINAL-LOGITS softcap through Triton fused kernel; attention-logits softcap is NOT yet fused \u2014 see G4_24b roadmap; +3-5% TPS at low batch)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_24_GEMMA4_FUSED_SOFTCAP",
     "GENESIS_G4_24_MARKER"
@@ -7275,6 +7529,9 @@
    "upstream": [],
    "status": "retired?",
    "summary": "G4_24 \u2014 route Gemma 4 FINAL-LOGITS softcap through fused Triton kernel.",
+   "markers_doc": [
+    "Genesis G4_24 gemma4 fused softcap route v1 (routes FINAL-LOGITS softcap through Triton fused kernel; attention-logits softcap is NOT yet fused \u2014 see G4_24b roadmap; +3-5% TPS at low batch)"
+   ],
    "registry": {
     "title": "Fused softcap Triton kernel route for Gemma 4 (FINAL logits only; G4_24b will cover attention)",
     "env_flag": "GENESIS_ENABLE_G4_24_GEMMA4_FUSED_SOFTCAP",
@@ -7302,15 +7559,16 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/model_compat/gemma4/g4_25_gemma4_rope_dual_base_freq_guard.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_25 gemma4 dual-RoPE base-freq guard v1 (prevents single-table collapse when rope_theta == global_rope_theta; preserves long-context quality on sliding layers)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_G4_25_MARKER"
    ],
    "upstream": [],
    "status": "live",
    "summary": "G4_25 \u2014 Gemma 4 dual-RoPE base-freq divergence guard.",
+   "markers_doc": [
+    "Genesis G4_25 gemma4 dual-RoPE base-freq guard v1 (prevents single-table collapse when rope_theta == global_rope_theta; preserves long-context quality on sliding layers)"
+   ],
    "registry": {
     "title": "Gemma 4 dual-RoPE base-freq divergence guard (long-context quality)",
     "env_flag": "GENESIS_ENABLE_G4_25_GEMMA4_RoPE_DUAL_BASE_GUARD",
@@ -7382,17 +7640,17 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/_archive/g4_upstream_tq_wip/g4_30_upstream_tq_unblock.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_30 upstream TurboQuant backend multimodal-unblock v1 (allows --attention-backend TURBOQUANT on Gemma 4 text-only inference)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_30_TQ_UNBLOCK",
     "GENESIS_G4_30_MARKER"
    ],
    "upstream": [],
-   "status": "orphan-no-registry-row",
+   "status": "retired",
    "summary": "G4_30 \u2014 unblock upstream TurboQuant backend for multimodal Gemma 4.",
-   "unreachable_by_dispatcher": true,
+   "markers_doc": [
+    "Genesis G4_30 upstream TurboQuant backend multimodal-unblock v1 (allows --attention-backend TURBOQUANT on Gemma 4 text-only inference)"
+   ],
    "key": "G4_30",
    "model_family": "gemma4"
   },
@@ -7403,9 +7661,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/g4_31_preserve_tq_dtype.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_31 preserve operator kv_cache_dtype against AWQ kv_cache_scheme override (Attention.__init__ wrap; TQ arm + sub-SM90 fp8-auto arm per vllm#45038)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_31_TQ_DTYPE_PRESERVE",
     "GENESIS_G4_31_MARKER"
@@ -7416,6 +7672,9 @@
    ],
    "status": "live",
    "summary": "G4_31 \u2014 preserve operator kv_cache_dtype intent against quant-config overrides.",
+   "markers_doc": [
+    "Genesis G4_31 preserve operator kv_cache_dtype against AWQ kv_cache_scheme override (Attention.__init__ wrap; TQ arm + sub-SM90 fp8-auto arm per vllm#45038)"
+   ],
    "registry": {
     "title": "Preserve turboquant_* kv_cache_dtype against AWQ quant-config override",
     "env_flag": "GENESIS_ENABLE_G4_31_TQ_DTYPE_PRESERVE",
@@ -7437,9 +7696,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/g4_32_tq_validation_bypass.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_32 TurboQuant validate_configuration bypass v1 (returns empty invalid_reasons \u2014 accept backend unconditionally)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_32_TQ_VALIDATION_BYPASS",
     "GENESIS_G4_32_MARKER"
@@ -7447,6 +7704,9 @@
    "upstream": [],
    "status": "live",
    "summary": "G4_32 \u2014 bypass TurboQuantAttentionBackend.validate_configuration.",
+   "markers_doc": [
+    "Genesis G4_32 TurboQuant validate_configuration bypass v1 (returns empty invalid_reasons \u2014 accept backend unconditionally)"
+   ],
    "registry": {
     "title": "Bypass TurboQuantAttentionBackend.validate_configuration for Gemma 4",
     "env_flag": "GENESIS_ENABLE_G4_32_TQ_VALIDATION_BYPASS",
@@ -7468,17 +7728,17 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/_archive/g4_upstream_tq_wip/g4_43_unblock_forced_triton.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_43 unblock vllm's forced TRITON_ATTN on Gemma 4 heterogeneous head dims (allows per-layer auto-pick for TQ on full)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_43_UNBLOCK_TRITON_FORCE",
     "GENESIS_G4_43_MARKER"
    ],
    "upstream": [],
-   "status": "orphan-no-registry-row",
+   "status": "retired",
    "summary": "G4_43 \u2014 bypass vllm's forced TRITON_ATTN on Gemma 4 heterogeneous head dims.",
-   "unreachable_by_dispatcher": true,
+   "markers_doc": [
+    "Genesis G4_43 unblock vllm's forced TRITON_ATTN on Gemma 4 heterogeneous head dims (allows per-layer auto-pick for TQ on full)"
+   ],
    "key": "G4_43",
    "model_family": "gemma4"
   },
@@ -7489,17 +7749,17 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/_archive/g4_upstream_tq_wip/g4_44_tq_head_dim_512_prefill.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_44 TurboQuant prefill torch-SDPA fallback for head_dim > 256 (enables real KV compression on Gemma 4 full-attention layers)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_44_TQ_HEAD_DIM_512",
     "GENESIS_G4_44_MARKER"
    ],
    "upstream": [],
-   "status": "orphan-no-registry-row",
+   "status": "retired",
    "summary": "G4_44 \u2014 TurboQuant prefill fallback to torch SDPA for head_dim > 256.",
-   "unreachable_by_dispatcher": true,
+   "markers_doc": [
+    "Genesis G4_44 TurboQuant prefill torch-SDPA fallback for head_dim > 256 (enables real KV compression on Gemma 4 full-attention layers)"
+   ],
    "key": "G4_44",
    "model_family": "gemma4"
   },
@@ -7510,18 +7770,18 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/_archive/g4_upstream_tq_wip/g4_45_unify_page_diag.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_45 KVCache page-size unification diagnostic + auto-fix"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_45_UNIFY_DIAG",
     "GENESIS_ENABLE_G4_45_UNIFY_FIX",
     "GENESIS_G4_45_MARKER"
    ],
    "upstream": [],
-   "status": "orphan-no-registry-row",
+   "status": "retired",
    "summary": "G4_45 \u2014 diagnostic + auto-fix for KVCache page-size unification.",
-   "unreachable_by_dispatcher": true,
+   "markers_doc": [
+    "Genesis G4_45 KVCache page-size unification diagnostic + auto-fix"
+   ],
    "key": "G4_45",
    "model_family": "gemma4"
   },
@@ -7532,18 +7792,18 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/_archive/g4_upstream_tq_wip/g4_50_genesis_native_backend.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_50 native TurboQuant attention backend \u2014 installs per-tier compressed KV cache for Gemma 4's 3-tier architecture"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_50_NATIVE_TQ",
     "GENESIS_G4_50_MARKER",
     "GENESIS_G4_TQ"
    ],
    "upstream": [],
-   "status": "orphan-no-registry-row",
+   "status": "retired",
    "summary": "G4_50 \u2014 install Genesis-native TurboQuant attention backend.",
-   "unreachable_by_dispatcher": true,
+   "markers_doc": [
+    "Genesis G4_50 native TurboQuant attention backend \u2014 installs per-tier compressed KV cache for Gemma 4's 3-tier architecture"
+   ],
    "key": "G4_50",
    "model_family": "gemma4"
   },
@@ -7554,9 +7814,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/g4_60a_tq_sliding_window_spec.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_60a inject TQSlidingWindowSpec into vllm.v1.kv_cache_interface (PR #42637 cherry-pick)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_60A_TQ_SLIDING_SPEC",
     "GENESIS_G4_60A_MARKER"
@@ -7564,6 +7822,9 @@
    "upstream": [],
    "status": "live",
    "summary": "G4_60a \u2014 inject ``TQSlidingWindowSpec`` into ``vllm.v1.kv_cache_interface``.",
+   "markers_doc": [
+    "Genesis G4_60a inject TQSlidingWindowSpec into vllm.v1.kv_cache_interface (PR #42637 cherry-pick)"
+   ],
    "registry": {
     "title": "Inject TQSlidingWindowSpec into vllm.v1.kv_cache_interface (PR #42637 cherry-pick)",
     "env_flag": "GENESIS_ENABLE_G4_60A_TQ_SLIDING_SPEC",
@@ -7586,9 +7847,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/g4_60b_turboquant_attn_overlay_loader.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_60b verify turboquant_attn.py PR #42637 overlay is active"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_60B_TQ_ATTN_OVERLAY",
     "GENESIS_ENABLE_G4_60C_TQ_DECODE_OVERLAY",
@@ -7599,6 +7858,9 @@
    "upstream": [],
    "status": "live",
    "summary": "G4_60b \u2014 verify ``turboquant_attn.py`` overlay is active (PR #42637 overlay loader).",
+   "markers_doc": [
+    "Genesis G4_60b verify turboquant_attn.py PR #42637 overlay is active"
+   ],
    "registry": {
     "title": "Verify turboquant_attn.py PR #42637 overlay is bind-mounted",
     "env_flag": "GENESIS_ENABLE_G4_60B_TQ_ATTN_OVERLAY",
@@ -7621,9 +7883,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/g4_60c_triton_decode_overlay_loader.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_60c verify triton_turboquant_decode.py PR #42637 overlay is active"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_60C_TQ_DECODE_OVERLAY",
     "GENESIS_G4_60C_MARKER"
@@ -7631,6 +7891,9 @@
    "upstream": [],
    "status": "live",
    "summary": "G4_60c \u2014 verify ``triton_turboquant_decode.py`` overlay is active.",
+   "markers_doc": [
+    "Genesis G4_60c verify triton_turboquant_decode.py PR #42637 overlay is active"
+   ],
    "registry": {
     "title": "Verify triton_turboquant_decode.py PR #42637 overlay is bind-mounted",
     "env_flag": "GENESIS_ENABLE_G4_60C_TQ_DECODE_OVERLAY",
@@ -7653,9 +7916,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/g4_60d_triton_store_overlay_loader.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_60d verify triton_turboquant_store.py PR #42637 overlay is active"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_60D_TQ_STORE_OVERLAY",
     "GENESIS_G4_60D_MARKER"
@@ -7663,6 +7924,9 @@
    "upstream": [],
    "status": "live",
    "summary": "G4_60d \u2014 verify ``triton_turboquant_store.py`` overlay is active.",
+   "markers_doc": [
+    "Genesis G4_60d verify triton_turboquant_store.py PR #42637 overlay is active"
+   ],
    "registry": {
     "title": "Verify triton_turboquant_store.py PR #42637 overlay is bind-mounted",
     "env_flag": "GENESIS_ENABLE_G4_60D_TQ_STORE_OVERLAY",
@@ -7685,9 +7949,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/g4_60e_kv_cache_utils.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_60e kv_cache_utils.py patches: is_kv_cache_spec_uniform + unify_kv_cache_spec_page_size + _is_tq_native_mixed_kv_cache_spec + get_kv_cache_groups dispatch (PR #42637 cherry-pick) + Mamba page padding (vllm#45207 fold) + generic AttentionSpec padding fallback and _reshape_attention_kv_cache stride hardening (vllm#45181 fold)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_60A_TQ_SLIDING_SPEC",
     "GENESIS_ENABLE_G4_60E_KV_CACHE_UTILS",
@@ -7699,6 +7961,9 @@
    ],
    "status": "live",
    "summary": "G4_60e \u2014 patch ``vllm.v1.core.kv_cache_utils`` for TQ/native mixed layouts.",
+   "markers_doc": [
+    "Genesis G4_60e kv_cache_utils.py patches: is_kv_cache_spec_uniform + unify_kv_cache_spec_page_size + _is_tq_native_mixed_kv_cache_spec + get_kv_cache_groups dispatch (PR #42637 cherry-pick) + Mamba page padding (vllm#45207 fold) + generic AttentionSpec padding fallback and _reshape_attention_kv_cache stride hardening (vllm#45181 fold)"
+   ],
    "registry": {
     "title": "kv_cache_utils.py TQ/native mixed-layout dispatch (PR #42637 cherry-pick)",
     "env_flag": "GENESIS_ENABLE_G4_60E_KV_CACHE_UTILS",
@@ -7724,9 +7989,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/g4_60g_attention_dispatch.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_60g Attention.get_kv_cache_spec TQ-first dispatch with TQSlidingWindowSpec path (PR #42637 cherry-pick)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_60A_TQ_SLIDING_SPEC",
     "GENESIS_ENABLE_G4_60G_TQ_DISPATCH",
@@ -7735,6 +7998,9 @@
    "upstream": [],
    "status": "live",
    "summary": "G4_60g \u2014 patch ``Attention.get_kv_cache_spec`` for per-layer TQ dispatch.",
+   "markers_doc": [
+    "Genesis G4_60g Attention.get_kv_cache_spec TQ-first dispatch with TQSlidingWindowSpec path (PR #42637 cherry-pick)"
+   ],
    "registry": {
     "title": "Attention.get_kv_cache_spec per-layer TQ-first dispatch (PR #42637 cherry-pick)",
     "env_flag": "GENESIS_ENABLE_G4_60G_TQ_DISPATCH",
@@ -7760,9 +8026,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/g4_60h_turboquant_config_augment.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_60h TurboQuantConfig augment: align_kv_sharing_skip_layers + get_kv_sharing_target_skip_layers + sort/fanout helpers (PR #42637 cherry-pick)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_60H_TQ_CONFIG_AUGMENT",
     "GENESIS_G4_60H_MARKER"
@@ -7770,6 +8034,9 @@
    "upstream": [],
    "status": "live",
    "summary": "G4_60h \u2014 augment ``TurboQuantConfig`` with KV-sharing-aware skip helpers.",
+   "markers_doc": [
+    "Genesis G4_60h TurboQuantConfig augment: align_kv_sharing_skip_layers + get_kv_sharing_target_skip_layers + sort/fanout helpers (PR #42637 cherry-pick)"
+   ],
    "registry": {
     "title": "TurboQuantConfig KV-sharing skip-layer helpers (PR #42637 cherry-pick)",
     "env_flag": "GENESIS_ENABLE_G4_60H_TQ_CONFIG_AUGMENT",
@@ -7792,9 +8059,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/g4_60k_arg_utils.py",
    "kind": "text_patch",
    "targets": [],
-   "markers": [
-    "Genesis G4_60k EngineArgs.create_engine_config wrap: TQ skip-layer union + FA2 force (PR #42637 cherry-pick)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_60K_TQ_ENGINE_CONFIG",
     "GENESIS_G4_60K_MARKER",
@@ -7803,6 +8068,9 @@
    "upstream": [],
    "status": "live",
    "summary": "G4_60k \u2014 patch ``EngineArgs.create_engine_config`` for TQ skip-layers + FA2.",
+   "markers_doc": [
+    "Genesis G4_60k EngineArgs.create_engine_config wrap: TQ skip-layer union + FA2 force (PR #42637 cherry-pick)"
+   ],
    "registry": {
     "title": "EngineArgs.create_engine_config TQ skip-layer union + FA2 force (PR #42637 cherry-pick)",
     "env_flag": "GENESIS_ENABLE_G4_60K_TQ_ENGINE_CONFIG",
@@ -7825,9 +8093,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/g4_60l_tq_backend_mm_prefix.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_60L \u2014 supports_mm_prefix=True override on stock TurboQuantAttentionBackend (PR42637 partial backport, monkey-patch only)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_60L_TQ_BACKEND_MM_PREFIX",
     "GENESIS_G4_60L_MARKER"
@@ -7835,6 +8101,9 @@
    "upstream": [],
    "status": "retired?",
    "summary": "G4_60L \u2014 install ``supports_mm_prefix=True`` on stock TurboQuantAttentionBackend.",
+   "markers_doc": [
+    "Genesis G4_60L \u2014 supports_mm_prefix=True override on stock TurboQuantAttentionBackend (PR42637 partial backport, monkey-patch only)"
+   ],
    "registry": {
     "title": "TurboQuantBackend supports_mm_prefix=True monkey-patch (Gemma 4 MM-prefix LM unblock)",
     "env_flag": "GENESIS_ENABLE_G4_60L_TQ_BACKEND_MM_PREFIX",
@@ -7858,9 +8127,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/g4_61_tq_shared_workspace.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_61 share TQ decode workspace across layers via WorkspaceManager (PR #40798 cherry-pick)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_61_TQ_SHARED_WORKSPACE",
     "GENESIS_G4_61_MARKER"
@@ -7870,6 +8137,9 @@
    ],
    "status": "live",
    "summary": "G4_61 \u2014 share decode workspace across TQ layers (PR #40798 cherry-pick).",
+   "markers_doc": [
+    "Genesis G4_61 share TQ decode workspace across layers via WorkspaceManager (PR #40798 cherry-pick)"
+   ],
    "registry": {
     "title": "Share TQ decode workspace across layers (PR #40798 cherry-pick)",
     "env_flag": "GENESIS_ENABLE_G4_61_TQ_SHARED_WORKSPACE",
@@ -7892,9 +8162,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/g4_62_tq_kernel_warmup.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_62 warm up TQ decode kernels before lock_workspace (PR #42215 cherry-pick)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_62_TQ_KERNEL_WARMUP",
     "GENESIS_G4_62_MARKER"
@@ -7902,6 +8170,9 @@
    "upstream": [],
    "status": "live",
    "summary": "G4_62 \u2014 warm up TQ decode kernels before lock_workspace (PR #42215 cherry-pick).",
+   "markers_doc": [
+    "Genesis G4_62 warm up TQ decode kernels before lock_workspace (PR #42215 cherry-pick)"
+   ],
    "registry": {
     "title": "Warm up TQ decode kernels before lock_workspace (PR #42215 cherry-pick)",
     "env_flag": "GENESIS_ENABLE_G4_62_TQ_KERNEL_WARMUP",
@@ -7924,9 +8195,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/g4_67_tq_spec_verify_routing.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_67 TurboQuantAttentionImpl spec-verify K+1 routing through triton_turboquant_decode_attention (PR #40914 backport)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_67_TQ_SPEC_VERIFY_ROUTE",
     "GENESIS_G4_67_MARKER"
@@ -7934,6 +8203,9 @@
    "upstream": [],
    "status": "live",
    "summary": "G4_67 \u2014 backport of upstream PR #40914 (TQ K+1 spec-verify routing).",
+   "markers_doc": [
+    "Genesis G4_67 TurboQuantAttentionImpl spec-verify K+1 routing through triton_turboquant_decode_attention (PR #40914 backport)"
+   ],
    "registry": {
     "title": "TQ K+1 spec-verify routing through decode kernel (PR #40914 backport)",
     "env_flag": "GENESIS_ENABLE_G4_67_TQ_SPEC_VERIFY_ROUTE",
@@ -7960,9 +8232,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/g4_68_tq_spec_cg_downgrade_overlay.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_68 verify P65 v2 inlined in PR #42637 turboquant_attn overlay"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_68_TQ_SPEC_CG_DOWNGRADE_OVERLAY",
     "GENESIS_ENABLE_P65_TURBOQUANT_SPEC_CG_DOWNGRADE",
@@ -7972,6 +8242,9 @@
    "upstream": [],
    "status": "live",
    "summary": "G4_68 \u2014 TurboQuant spec-decode cudagraph downgrade for PR #42637 overlay.",
+   "markers_doc": [
+    "Genesis G4_68 verify P65 v2 inlined in PR #42637 turboquant_attn overlay"
+   ],
    "registry": {
     "title": "TQ spec-decode cudagraph downgrade for PR #42637 overlay (P65 v2 inline verifier)",
     "env_flag": "GENESIS_ENABLE_G4_68_TQ_SPEC_CG_DOWNGRADE_OVERLAY",
@@ -7996,9 +8269,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/g4_69_skip_layers_native_backend.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_69 per-layer native attention backend for skip-listed TurboQuant layers (substitutes selected_backend=None when kv_cache_dtype='auto' under --attention-backend TURBOQUANT)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_69_SKIP_LAYERS_NATIVE_BACKEND",
     "GENESIS_G4_69_MARKER",
@@ -8007,6 +8278,9 @@
    "upstream": [],
    "status": "live",
    "summary": "G4_69 \u2014 Per-layer native attention backend for skip-listed TurboQuant layers.",
+   "markers_doc": [
+    "Genesis G4_69 per-layer native attention backend for skip-listed TurboQuant layers (substitutes selected_backend=None when kv_cache_dtype='auto' under --attention-backend TURBOQUANT)"
+   ],
    "registry": {
     "title": "Per-layer native attention backend dispatch for skip-listed TurboQuant layers",
     "env_flag": "GENESIS_ENABLE_G4_69_SKIP_LAYERS_NATIVE_BACKEND",
@@ -8125,9 +8399,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/g4_71_drafter_native_attn_backend.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_71 Force FlashAttn attention backend for Gemma 4 MTP drafter layers (prefix 'draft_model.' by default)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_71_DRAFTER_NATIVE_BACKEND",
     "GENESIS_G4_71_DRAFTER_PREFIX",
@@ -8136,6 +8408,9 @@
    "upstream": [],
    "status": "live",
    "summary": "G4_71 \u2014 Force native (FlashAttn) attention backend for Gemma 4 MTP drafter.",
+   "markers_doc": [
+    "Genesis G4_71 Force FlashAttn attention backend for Gemma 4 MTP drafter layers (prefix 'draft_model.' by default)"
+   ],
    "registry": {
     "title": "Force FlashAttn backend for Gemma 4 MTP drafter Attention layers",
     "env_flag": "GENESIS_ENABLE_G4_71_DRAFTER_NATIVE_BACKEND",
@@ -8157,9 +8432,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/g4_71b_drafter_sliding_triton.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_71b Route drafter sliding (head_size=256) layers to TRITON_ATTN + reset kv_cache_dtype='auto' (\u03b2\u2032-A enabler for clean kv_sharing contract)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ALLOW_SPEC_DECODE_KV_ADAPTER",
     "GENESIS_ENABLE_G4_71B_DRAFTER_SLIDING_TRITON",
@@ -8174,6 +8447,9 @@
    "upstream": [],
    "status": "live",
    "summary": "G4_71b \u2014 Per-layer drafter backend force: route head_size=256 to TRITON_ATTN.",
+   "markers_doc": [
+    "Genesis G4_71b Route drafter sliding (head_size=256) layers to TRITON_ATTN + reset kv_cache_dtype='auto' (\u03b2\u2032-A enabler for clean kv_sharing contract)"
+   ],
    "registry": {
     "title": "Per-layer drafter backend force: route head_size=256 sliding to TRITON_ATTN (\u03b2'-A K=4 enabler)",
     "env_flag": "GENESIS_ENABLE_G4_71B_DRAFTER_SLIDING_TRITON",
@@ -8195,9 +8471,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/g4_72_drafter_native_kv_cache_spec.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_72 Force native FullAttentionSpec/SlidingWindowSpec for Gemma 4 MTP drafter layers (companion to G4_71 impl reroute)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_72_DRAFTER_NATIVE_SPEC",
     "GENESIS_G4_72_MARKER"
@@ -8205,6 +8479,9 @@
    "upstream": [],
    "status": "live",
    "summary": "G4_72 \u2014 Force native FullAttentionSpec/SlidingWindowSpec for Gemma 4 MTP drafter.",
+   "markers_doc": [
+    "Genesis G4_72 Force native FullAttentionSpec/SlidingWindowSpec for Gemma 4 MTP drafter layers (companion to G4_71 impl reroute)"
+   ],
    "registry": {
     "title": "Force native FullAttentionSpec/SlidingWindowSpec for Gemma 4 MTP drafter layers",
     "env_flag": "GENESIS_ENABLE_G4_72_DRAFTER_NATIVE_SPEC",
@@ -8229,9 +8506,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/g4_73_drafter_profile_skip.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_73 Skip drafter.dummy_run during profile_run (PN262-D pragmatic \u2014 unblock profile path with TQ-grouped drafter)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_73_DRAFTER_PROFILE_SKIP",
     "GENESIS_G4_73_MARKER",
@@ -8240,6 +8515,9 @@
    "upstream": [],
    "status": "live",
    "summary": "G4_73 \u2014 Skip drafter.dummy_run during profile_run (PN262-D pragmatic).",
+   "markers_doc": [
+    "Genesis G4_73 Skip drafter.dummy_run during profile_run (PN262-D pragmatic \u2014 unblock profile path with TQ-grouped drafter)"
+   ],
    "registry": {
     "title": "Skip drafter.dummy_run during profile_run (PN262-D pragmatic boot unblock)",
     "env_flag": "GENESIS_ENABLE_G4_73_DRAFTER_PROFILE_SKIP",
@@ -8264,9 +8542,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/g4_74_drafter_hnd_layout.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_74 Drafter HND layout enforcement post-reshape (PN263 fix for NHD-shaped FlashAttn kv_cache on Gemma 4 MTP)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_74_DRAFTER_HND_LAYOUT",
     "GENESIS_G4_74_DRAFTER_MAX_BLOCKS",
@@ -8277,6 +8553,9 @@
    "upstream": [],
    "status": "live",
    "summary": "G4_74 \u2014 Drafter HND layout enforcement post-reshape (PN263 fix).",
+   "markers_doc": [
+    "Genesis G4_74 Drafter HND layout enforcement post-reshape (PN263 fix for NHD-shaped FlashAttn kv_cache on Gemma 4 MTP)"
+   ],
    "registry": {
     "title": "Drafter HND layout enforcement post-reshape (PN263 fix for FlashAttn unbind(0))",
     "env_flag": "GENESIS_ENABLE_G4_74_DRAFTER_HND_LAYOUT",
@@ -8301,9 +8580,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/g4_75_drafter_head512_triton.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_75 Route head_size=512 drafter layers to TRITON_ATTN (PN264 follow-up to G4_71/G4_74 layout fix)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_75_DRAFTER_HEAD512_TRITON",
     "GENESIS_G4_75_DRAFTER_HEAD_THRESHOLD",
@@ -8314,6 +8591,9 @@
    "upstream": [],
    "status": "live",
    "summary": "G4_75 \u2014 Per-layer drafter backend split: route head_size=512 to TRITON_ATTN.",
+   "markers_doc": [
+    "Genesis G4_75 Route head_size=512 drafter layers to TRITON_ATTN (PN264 follow-up to G4_71/G4_74 layout fix)"
+   ],
    "registry": {
     "title": "Per-layer drafter backend split: route head_size=512 to TRITON_ATTN (PN264 fix)",
     "env_flag": "GENESIS_ENABLE_G4_75_DRAFTER_HEAD512_TRITON",
@@ -8335,9 +8615,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/g4_76_disable_drafter_kv_sharing.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_76 Disable Gemma4Proposer._setup_gemma4_kv_sharing \u2014 drafter becomes fully-independent attention layer (PN265 fix)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_76_DISABLE_DRAFTER_KV_SHARING",
     "GENESIS_G4_74_DRAFTER_MAX_BLOCKS",
@@ -8346,6 +8624,9 @@
    "upstream": [],
    "status": "live",
    "summary": "G4_76 \u2014 Disable Gemma4 drafter kv_sharing for independent drafter cache.",
+   "markers_doc": [
+    "Genesis G4_76 Disable Gemma4Proposer._setup_gemma4_kv_sharing \u2014 drafter becomes fully-independent attention layer (PN265 fix)"
+   ],
    "registry": {
     "title": "Disable Gemma4Proposer._setup_gemma4_kv_sharing (PN265 \u2014 make drafter fully independent)",
     "env_flag": "GENESIS_ENABLE_G4_76_DISABLE_DRAFTER_KV_SHARING",
@@ -8371,9 +8652,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/_archive/g4_78_drafter_target_kv_bridge.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_78-A v2 drafter[0..3] <- target[58]/[59] K/V bridge (prefill + decode; GQA repeat=4 for layer 3)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_78_DRAFTER_TARGET_KV_BRIDGE",
     "GENESIS_G4_78_MARKER"
@@ -8381,6 +8660,9 @@
    "upstream": [],
    "status": "retired",
    "summary": "G4_78-A v2 \u2014 drafter[0..3] <- target[58]/[59] K/V bridge (prefill + decode).",
+   "markers_doc": [
+    "Genesis G4_78-A v2 drafter[0..3] <- target[58]/[59] K/V bridge (prefill + decode; GQA repeat=4 for layer 3)"
+   ],
    "registry": {
     "title": "Drafter K/V bridge from target[58]/[59] (RETIRED \u2014 superseded by P1.8 A2 declarative physical kv_sharing)",
     "env_flag": "GENESIS_ENABLE_G4_78_DRAFTER_TARGET_KV_BRIDGE",
@@ -8440,9 +8722,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/g4_80_fp8e5m2_kv_weight_only.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_80 allow fp8_e5m2 KV cache for weight-only quantized checkpoints (vllm#45040 adaptation; arm 1 _init_kv_cache_quant rebind + arm 2 fp8_e5m2 query-quant neutralizer)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_80_FP8E5M2_KV",
     "GENESIS_G4_80_FORCE_ALLOW_WITH_KV_SCHEME",
@@ -8454,6 +8734,9 @@
    ],
    "status": "retired?",
    "summary": "G4_80 \u2014 allow fp8_e5m2 KV cache for weight-only checkpoints (vllm#45040).",
+   "markers_doc": [
+    "Genesis G4_80 allow fp8_e5m2 KV cache for weight-only quantized checkpoints (vllm#45040 adaptation; arm 1 _init_kv_cache_quant rebind + arm 2 fp8_e5m2 query-quant neutralizer)"
+   ],
    "registry": {
     "title": "Allow fp8_e5m2 KV cache for weight-only quantized checkpoints (vllm#45040)",
     "env_flag": "GENESIS_ENABLE_G4_80_FP8E5M2_KV",
@@ -8481,9 +8764,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/g4_81_tq_multi_query_direct_route.py",
    "kind": "monkey_patch",
    "targets": [],
-   "markers": [
-    "Genesis G4_81 TurboQuantAttentionImpl multi-query DIRECT decode routing (vllm#45144 blueprint, synthetic per-token expansion)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_81_TQ_MQ_DIRECT_ROUTE",
     "GENESIS_G4_81_MARKER"
@@ -8493,6 +8774,9 @@
    ],
    "status": "live",
    "summary": "G4_81 \u2014 TQ multi-query DIRECT decode routing (vllm#45144 blueprint).",
+   "markers_doc": [
+    "Genesis G4_81 TurboQuantAttentionImpl multi-query DIRECT decode routing (vllm#45144 blueprint, synthetic per-token expansion)"
+   ],
    "registry": {
     "title": "TQ multi-query DIRECT decode routing for Gemma-4-31B MTP (vllm#45144 blueprint)",
     "env_flag": "GENESIS_ENABLE_G4_81_TQ_MQ_DIRECT_ROUTE",
@@ -8519,9 +8803,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/g4_82_tq_prefill_sdpa_headdim.py",
    "kind": "monkey_patch",
    "targets": [],
-   "markers": [
-    "Genesis G4_82 TurboQuantAttentionImpl._flash_attn_varlen head_dim>256 per-sequence SDPA fallback (Ampere FA2 256-cap, vllm#38887)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_82_TQ_PREFILL_SDPA_HEADDIM",
     "GENESIS_G4_82_MARKER"
@@ -8531,6 +8813,9 @@
    ],
    "status": "live",
    "summary": "G4_82 \u2014 TQ prefill SDPA fallback for head_dim > 256 (Ampere FA2 cap).",
+   "markers_doc": [
+    "Genesis G4_82 TurboQuantAttentionImpl._flash_attn_varlen head_dim>256 per-sequence SDPA fallback (Ampere FA2 256-cap, vllm#38887)"
+   ],
    "registry": {
     "title": "TQ prefill SDPA fallback for head_dim>256 (Ampere FA2 256-cap, vllm#38887)",
     "env_flag": "GENESIS_ENABLE_G4_82_TQ_PREFILL_SDPA_HEADDIM",
@@ -8557,9 +8842,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/model_compat/gemma4/g4_83_per_layer_flashattn.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_83 gemma4 per-layer attention backend v1 (#38891 backport; undo Ampere TRITON_ATTN force -> sliding-256 layers use FlashAttention)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_83_GEMMA4_PER_LAYER_BACKEND",
     "GENESIS_G4_83_MARKER"
@@ -8570,6 +8853,9 @@
    ],
    "status": "live",
    "summary": "G4_83 \u2014 per-layer attention backend for Gemma 4 on Ampere (#38891 backport).",
+   "markers_doc": [
+    "Genesis G4_83 gemma4 per-layer attention backend v1 (#38891 backport; undo Ampere TRITON_ATTN force -> sliding-256 layers use FlashAttention)"
+   ],
    "registry": {
     "title": "Gemma 4 per-layer attention backend on Ampere (#38891 backport)",
     "env_flag": "GENESIS_ENABLE_G4_83_GEMMA4_PER_LAYER_BACKEND",
@@ -8592,9 +8878,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/moe/g4_84_moe_geometry_advisor.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4_84 MoE-geometry advisor + wna16 tuned-config provider v1 (detect int4-Marlin-ineligible geometry; supply tuned moe_wna16 config)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_84_MOE_GEOMETRY_ADVISOR",
     "GENESIS_G4_84_MARKER"
@@ -8604,6 +8888,9 @@
    ],
    "status": "live",
    "summary": "G4_84 \u2014 generic MoE-geometry advisor + wna16 tuned-config provider.",
+   "markers_doc": [
+    "Genesis G4_84 MoE-geometry advisor + wna16 tuned-config provider v1 (detect int4-Marlin-ineligible geometry; supply tuned moe_wna16 config)"
+   ],
    "registry": {
     "title": "MoE-geometry advisor + wna16 tuned-config provider (generic)",
     "env_flag": "GENESIS_ENABLE_G4_84_MOE_GEOMETRY_ADVISOR",
@@ -8625,9 +8912,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/moe/g4_85_tm_int4_moe_kernel.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "G4_85_TM_INT4_MOE"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_G4_85",
     "GENESIS_G4_85_MARKER",
@@ -8637,6 +8922,9 @@
    "upstream": [],
    "status": "superseded?",
    "summary": "G4_85 \u2014 TurboMind int4 grouped-MoE kernel replacing the slow CUDA-core moe_wna16.",
+   "markers_doc": [
+    "G4_85_TM_INT4_MOE"
+   ],
    "registry": {
     "title": "TurboMind int4 grouped-MoE kernel (tensor-core moe_wna16 replacement)",
     "env_flag": "GENESIS_ENABLE_G4_85",
@@ -8658,15 +8946,16 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/model_compat/gemma4/kernels/g4_fused_rmsnorm_triton.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis Gemma 4 fused RMSNorm Triton kernels v1 (ported from SGLang, SM 8.6 budget-tuned)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_G4_FUSED_RMSNORM_MARKER"
    ],
    "upstream": [],
    "status": "live",
    "summary": "Fused RMSNorm Triton kernels for Gemma 4 \u2014 ported / improved from SGLang.",
+   "markers_doc": [
+    "Genesis Gemma 4 fused RMSNorm Triton kernels v1 (ported from SGLang, SM 8.6 budget-tuned)"
+   ],
    "key": "G4_FUSED_RMSNORM_TRITON",
    "model_family": "gemma4"
   },
@@ -8677,15 +8966,16 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/model_compat/gemma4/kernels/g4_softcap_triton.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis Gemma 4 fused softcap Triton kernel v1 (fuses div + tanh + mul; ~3-5% TPS on low-batch decode)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_G4_SOFTCAP_MARKER"
    ],
    "upstream": [],
    "status": "live",
    "summary": "Fused softcap Triton kernel for Gemma 4 attention + final logits.",
+   "markers_doc": [
+    "Genesis Gemma 4 fused softcap Triton kernel v1 (fuses div + tanh + mul; ~3-5% TPS on low-batch decode)"
+   ],
    "key": "G4_SOFTCAP_TRITON",
    "model_family": "gemma4"
   },
@@ -8768,9 +9058,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/kernels/g4_tq_cache.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4-TurboQuant KVCache wrapper v1 (drop-in vLLM v1 layer cache)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_G4_TQ_CACHE_MARKER",
     "GENESIS_G4_TQ_WHT_MODE"
@@ -8778,6 +9066,9 @@
    "upstream": [],
    "status": "live",
    "summary": "KVCache wrapper class for G4-TurboQuant + vLLM v1 integration.",
+   "markers_doc": [
+    "Genesis G4-TurboQuant KVCache wrapper v1 (drop-in vLLM v1 layer cache)"
+   ],
    "key": "G4_TQ_CACHE",
    "model_family": "gemma4"
   },
@@ -8788,15 +9079,16 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/kernels/g4_tq_codebook.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4-TurboQuant Lloyd-Max codebooks v1"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_G4_TQ_CODEBOOK_MARKER"
    ],
    "upstream": [],
    "status": "live",
    "summary": "Lloyd-Max optimal scalar quantizer codebooks for G4-TurboQuant.",
+   "markers_doc": [
+    "Genesis G4-TurboQuant Lloyd-Max codebooks v1"
+   ],
    "key": "G4_TQ_CODEBOOK",
    "model_family": "gemma4"
   },
@@ -8807,15 +9099,16 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/kernels/g4_tq_packed_triton.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4-TurboQuant PACKED write/read kernel v1 (3/4-bit uint32 pack)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_G4_TQ_PACKED_MARKER"
    ],
    "upstream": [],
    "status": "live",
    "summary": "Triton fused write/read kernels with 3-bit / 4-bit packing.",
+   "markers_doc": [
+    "Genesis G4-TurboQuant PACKED write/read kernel v1 (3/4-bit uint32 pack)"
+   ],
    "key": "G4_TQ_PACKED_TRITON",
    "model_family": "gemma4"
   },
@@ -8826,15 +9119,16 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/kernels/g4_tq_packed_wht_triton.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4-TurboQuant PACKED + FULL-WHT (butterfly FWHT) write/read v2 (real Walsh-Hadamard rotation, 3-bit uint32 pack, ~57x faster than GEMV v1)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_G4_TQ_PACKED_WHT_MARKER"
    ],
    "upstream": [],
    "status": "live",
    "summary": "Triton fused write/read kernels with REAL Walsh-Hadamard rotation",
+   "markers_doc": [
+    "Genesis G4-TurboQuant PACKED + FULL-WHT (butterfly FWHT) write/read v2 (real Walsh-Hadamard rotation, 3-bit uint32 pack, ~57x faster than GEMV v1)"
+   ],
    "key": "G4_TQ_PACKED_WHT_TRITON",
    "model_family": "gemma4"
   },
@@ -8845,15 +9139,16 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/kernels/g4_tq_packing.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4-TurboQuant bit-packing v1"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_G4_TQ_PACKING_MARKER"
    ],
    "upstream": [],
    "status": "live",
    "summary": "3-bit and 4-bit bit-packing for G4-TurboQuant KV cache indices.",
+   "markers_doc": [
+    "Genesis G4-TurboQuant bit-packing v1"
+   ],
    "key": "G4_TQ_PACKING",
    "model_family": "gemma4"
   },
@@ -8864,15 +9159,16 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/kernels/g4_tq_read_triton.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4-TurboQuant read kernel (Lloyd-Max dequant + inverse RHT) v1"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_G4_TQ_READ_MARKER"
    ],
    "upstream": [],
    "status": "live",
    "summary": "Triton fused read kernel for G4-TurboQuant.",
+   "markers_doc": [
+    "Genesis G4-TurboQuant read kernel (Lloyd-Max dequant + inverse RHT) v1"
+   ],
    "key": "G4_TQ_READ_TRITON",
    "model_family": "gemma4"
   },
@@ -8883,15 +9179,16 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/kernels/g4_tq_reference.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4-TurboQuant reference impl v1"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_G4_TQ_REFERENCE_MARKER"
    ],
    "upstream": [],
    "status": "live",
    "summary": "Torch reference implementations of G4-TurboQuant.",
+   "markers_doc": [
+    "Genesis G4-TurboQuant reference impl v1"
+   ],
    "key": "G4_TQ_REFERENCE",
    "model_family": "gemma4"
   },
@@ -8902,9 +9199,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/kernels/g4_tq_rotor.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4-TurboQuant rotor (RHT + Clifford) v1"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_G4_TQ_ROTOR_MARKER"
    ],
@@ -8913,6 +9208,9 @@
    ],
    "status": "live",
    "summary": "Rotation operators for G4-TurboQuant.",
+   "markers_doc": [
+    "Genesis G4-TurboQuant rotor (RHT + Clifford) v1"
+   ],
    "key": "G4_TQ_ROTOR",
    "model_family": "gemma4"
   },
@@ -8923,15 +9221,16 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/kernels/g4_tq_tight_triton.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4-TurboQuant TIGHT 3-bit packing kernel v1 (true 5.12\u00d7 compression \u2014 3 bytes per 8 indices)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_G4_TQ_TIGHT_MARKER"
    ],
    "upstream": [],
    "status": "live",
    "summary": "Triton fused write/read kernels for TIGHT 3-bit packing (5.33\u00d7 compression).",
+   "markers_doc": [
+    "Genesis G4-TurboQuant TIGHT 3-bit packing kernel v1 (true 5.12\u00d7 compression \u2014 3 bytes per 8 indices)"
+   ],
    "key": "G4_TQ_TIGHT_TRITON",
    "model_family": "gemma4"
   },
@@ -8942,15 +9241,16 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/kernels/g4_tq_write_triton.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis G4-TurboQuant write kernel (RHT + Lloyd-Max 4-bit) v1"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_G4_TQ_WRITE_MARKER"
    ],
    "upstream": [],
    "status": "live",
    "summary": "Triton fused write kernel for G4-TurboQuant.",
+   "markers_doc": [
+    "Genesis G4-TurboQuant write kernel (RHT + Lloyd-Max 4-bit) v1"
+   ],
    "key": "G4_TQ_WRITE_TRITON",
    "model_family": "gemma4"
   },
@@ -9367,8 +9667,7 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fla/ops/chunk.py"
    ],
    "markers": [
-    "Genesis P103 self-install hook (v7.69, club-3090#19 finding 2)",
-    "_genesis_p103_chunked_wrap"
+    "Genesis P103 self-install hook (v7.69, club-3090#19 finding 2)"
    ],
    "flags": [
     "GENESIS_ENABLE_P103",
@@ -9377,6 +9676,9 @@
    "upstream": [],
    "status": "live",
    "summary": "Wiring for Patch 103 \u2014 FLA Cliff 2 chunked fwd_h+fwd_o orchestrator.",
+   "markers_doc": [
+    "_genesis_p103_chunked_wrap"
+   ],
    "registry": {
     "title": "FLA Cliff 2 chunked fwd_h+fwd_o orchestrator (qwen36-27b-single-3090#1)",
     "env_flag": "GENESIS_ENABLE_P103",
@@ -9554,16 +9856,17 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/kv_cache/p14_block_table.py",
    "kind": "monkey_patch",
    "targets": [],
-   "markers": [
-    "_genesis_p14_append_wrapped",
-    "_genesis_p14_move_wrapped"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_LEGACY_P14"
    ],
    "upstream": [],
    "status": "live",
    "summary": "Wiring for Patch 14 \u2014 BlockTable tail zero-fill runtime hook.",
+   "markers_doc": [
+    "_genesis_p14_append_wrapped",
+    "_genesis_p14_move_wrapped"
+   ],
    "registry": {
     "title": "block_table tail zero-fill",
     "env_flag": "GENESIS_LEGACY_P14",
@@ -9709,8 +10012,7 @@
     ]
    },
    "registry_id": "P18B_TEXT",
-   "key": "P18B@lane2-sndr:p18b_kernel_literals_textpatch",
-   "lane2_suppressed_by_lane1": true
+   "key": "P18B@lane2-sndr:p18b_kernel_literals_textpatch"
   },
   {
    "id": "P18B",
@@ -9756,7 +10058,8 @@
     "implementation_status": "marker_only"
    },
    "registry_id": "P18b",
-   "key": "P18b"
+   "key": "P18b",
+   "lane2_suppressed_by_lane1": true
   },
   {
    "id": "P1",
@@ -9823,9 +10126,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/p22_tq_prealloc.py",
    "kind": "monkey_patch",
    "targets": [],
-   "markers": [
-    "_genesis_p22_wrapped"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_LEGACY_P22",
     "VLLM_WORKER_MULTIPROC_METHOD"
@@ -9833,6 +10134,9 @@
    "upstream": [],
    "status": "live",
    "summary": "Wiring for Patch 22 \u2014 TurboQuant K/V dequant buffer prealloc hook.",
+   "markers_doc": [
+    "_genesis_p22_wrapped"
+   ],
    "registry": {
     "title": "TurboQuant shared dequant prealloc",
     "env_flag": "GENESIS_LEGACY_P22",
@@ -9903,7 +10207,9 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/utils/marlin_utils.py"
    ],
    "markers": [
-    "Genesis P23 Marlin FP32_REDUCE wire (env-driven) v1"
+    "Genesis P23 Marlin FP32_REDUCE wire (env-driven) v1",
+    "Genesis P23 Marlin FP32_REDUCE wire (env-driven) v1 \u2014 moe",
+    "Genesis P23 Marlin FP32_REDUCE wire (env-driven) v1 \u2014 utils"
    ],
    "flags": [
     "GENESIS_ENABLE_P23_MARLIN_FP32_REDUCE_WIRE",
@@ -9927,8 +10233,7 @@
     ]
    },
    "registry_id": "P23_WIRE",
-   "key": "P23@lane2-sndr:p23_marlin_fp32_reduce_wire",
-   "lane2_suppressed_by_lane1": true
+   "key": "P23@lane2-sndr:p23_marlin_fp32_reduce_wire"
   },
   {
    "id": "P24",
@@ -10130,8 +10435,7 @@
     "vllm_version_range": "<0.22.1rc1.dev491"
    },
    "registry_id": "P29_HEAL",
-   "key": "P29@lane2-sndr:p29_qwen3coder_index_heal",
-   "lane2_suppressed_by_lane1": true
+   "key": "P29@lane2-sndr:p29_qwen3coder_index_heal"
   },
   {
    "id": "P31",
@@ -10140,15 +10444,16 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/moe/p31_router_softmax.py",
    "kind": "monkey_patch",
    "targets": [],
-   "markers": [
-    "_genesis_p31_wrapped"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_LEGACY_P31"
    ],
    "upstream": [],
    "status": "live",
    "summary": "Wiring for Patch 31 \u2014 fp32 upcast on MoE router softmax.",
+   "markers_doc": [
+    "_genesis_p31_wrapped"
+   ],
    "registry": {
     "title": "MoE router fp32 softmax",
     "env_flag": "GENESIS_LEGACY_P31",
@@ -10319,9 +10624,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/p38_tq_continuation_memory.py",
    "kind": "monkey_patch",
    "targets": [],
-   "markers": [
-    "_genesis_p38_wrapped"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_BUFFER_MODE",
     "GENESIS_LEGACY_P38",
@@ -10332,6 +10635,9 @@
    ],
    "status": "live",
    "summary": "Wiring for Patch 38 \u2014 TurboQuant `_continuation_prefill` memory fix.",
+   "markers_doc": [
+    "_genesis_p38_wrapped"
+   ],
    "registry": {
     "title": "TQ _continuation_prefill persistent workspace",
     "env_flag": "GENESIS_LEGACY_P38",
@@ -10404,8 +10710,7 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/third_party/flash_linear_attention/ops/chunk_scaled_dot_kkt.py"
    ],
    "markers": [
-    "Genesis P39a self-install hook (exec-survival, club-3090#19 class)",
-    "_genesis_p39a_wrapped"
+    "Genesis P39a self-install hook (exec-survival, club-3090#19 class)"
    ],
    "flags": [
     "GENESIS_ENABLE_P39A_SELFINSTALL",
@@ -10419,6 +10724,9 @@
    ],
    "status": "live",
    "summary": "Wiring for Patch 39a \u2014 FLA `chunk_scaled_dot_kkt_fwd` persistent A pool.",
+   "markers_doc": [
+    "_genesis_p39a_wrapped"
+   ],
    "registry": {
     "title": "FLA chunk_scaled_dot_kkt persistent A pool",
     "env_flag": "GENESIS_LEGACY_P39A",
@@ -10488,9 +10796,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/p40_tq_grouped_decode.py",
    "kind": "monkey_patch",
    "targets": [],
-   "markers": [
-    "_genesis_p40_wrapped"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_BUFFER_MODE",
     "GENESIS_ENABLE_P40"
@@ -10498,6 +10804,9 @@
    "upstream": [],
    "status": "retired?",
    "summary": "Wiring for Patch 40 \u2014 TurboQuant GQA-grouped decode stage1 dispatch.",
+   "markers_doc": [
+    "_genesis_p40_wrapped"
+   ],
    "registry": {
     "title": "TurboQuant GQA-grouped decode stage1 (opt-in)",
     "env_flag": "GENESIS_ENABLE_P40",
@@ -10700,7 +11009,10 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/v1/request.py"
    ],
    "markers": [
-    "Genesis P58 async-scheduler -1 placeholder fix v7.59_p62_compat"
+    "Genesis P58 async-scheduler -1 placeholder fix v7.59_p62_compat",
+    "Genesis P58 async-scheduler -1 placeholder fix v7.59_p62_compat :: async_scheduler.py",
+    "Genesis P58 async-scheduler -1 placeholder fix v7.59_p62_compat :: request.py",
+    "Genesis P58 async-scheduler -1 placeholder fix v7.59_p62_compat :: scheduler.py"
    ],
    "flags": [
     "GENESIS_ENABLE_P58_ASYNC_PLACEHOLDER_FIX",
@@ -10803,7 +11115,10 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu_model_runner.py"
    ],
    "markers": [
-    "Genesis P60 GDN+ngram state recovery v7.13"
+    "Genesis P60 GDN+ngram state recovery v7.13",
+    "Genesis P60 GDN+ngram state recovery v7.13 :: gdn_attn.py",
+    "Genesis P60 GDN+ngram state recovery v7.13 :: gdn_linear_attn.py",
+    "Genesis P60 GDN+ngram state recovery v7.13 :: gpu_model_runner.py"
    ],
    "flags": [
     "GENESIS_ENABLE_P60_GDN_NGRAM_FIX",
@@ -10841,7 +11156,9 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/mamba/ops/causal_conv1d.py"
    ],
    "markers": [
-    "Genesis P60b GDN+ngram Triton kernel offset v7.13"
+    "Genesis P60b GDN+ngram Triton kernel offset v7.13",
+    "Genesis P60b GDN+ngram Triton kernel offset v7.13 :: causal_conv1d.py",
+    "Genesis P60b GDN+ngram Triton kernel offset v7.13 :: gdn_linear_attn.py"
    ],
    "flags": [
     "GENESIS_ENABLE_P60B_TRITON_KERNEL",
@@ -10972,7 +11289,9 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/v1/structured_output/__init__.py"
    ],
    "markers": [
-    "Genesis P62 structured-output spec-decode timing v7.70 (post-PR41199 update \u2014 uses _get_reasoner)"
+    "Genesis P62 structured-output spec-decode timing v7.70 (post-PR41199 update \u2014 uses _get_reasoner)",
+    "Genesis P62 structured-output spec-decode timing v7.70 (post-PR41199 update \u2014 uses _get_reasoner) :: scheduler.py",
+    "Genesis P62 structured-output spec-decode timing v7.70 (post-PR41199 update \u2014 uses _get_reasoner) :: structured_output"
    ],
    "flags": [
     "GENESIS_ENABLE_P62_STRUCT_OUT_SPEC_TIMING",
@@ -11047,6 +11366,8 @@
    "markers": [
     "Genesis P61c qwen3coder deferred-commit (club-3090#72)",
     "Genesis P64 qwen3coder MTP streaming early-return fix v7.13",
+    "Genesis P64 qwen3coder MTP streaming early-return fix v7.13 :: qwen3coder_tool_parser.py",
+    "Genesis P64 qwen3coder MTP streaming early-return fix v7.13 :: serving.py",
     "Genesis PN56 qwen3coder XML parse fallback (vllm#41466)"
    ],
    "flags": [
@@ -11491,8 +11812,8 @@
   {
    "id": "P71",
    "lane": "lane2-sndr",
-   "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/p71_block_verify.py",
-   "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/p71_block_verify.py",
+   "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/_retired/p71_block_verify.py",
+   "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/_retired/p71_block_verify.py",
    "kind": "text_patch",
    "targets": [
     "/usr/local/lib/python3.12/dist-packages/vllm/v1/sample/rejection_sampler.py"
@@ -11509,9 +11830,8 @@
    "upstream": [
     "vllm#40819"
    ],
-   "status": "orphan-no-registry-row",
+   "status": "retired",
    "summary": "Wiring for Patch 71 \u2014 block-verify rejection sampling (Sun 2024).",
-   "unreachable_by_dispatcher": true,
    "key": "P71@lane2-sndr:p71_block_verify",
    "lane2_suppressed_by_lane1": true
   },
@@ -11525,8 +11845,7 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/v1/sample/rejection_sampler.py"
    ],
    "markers": [
-    "Genesis P71 block-verify rejection sampling vllm#40819 v7.43_pn369_relaxed_tail",
-    "Genesis PN369 relaxed acceptance (TRT-style top-K + delta window) v12.0"
+    "Genesis P71 block-verify rejection sampling vllm#40819 v7.43_pn369_relaxed_tail"
    ],
    "flags": [
     "GENESIS_DISABLE_P71_BLOCK_VERIFY",
@@ -11546,6 +11865,9 @@
    ],
    "status": "live",
    "summary": "Consolidated wiring for P71 + PN369 \u2014 both text-patch the SAME engine file",
+   "markers_doc": [
+    "Genesis PN369 relaxed acceptance (TRT-style top-K + delta window) v12.0"
+   ],
    "registry": {
     "title": "Block-verify rejection sampler (Sun 2024 ICLR) + PN369 relaxed acceptance",
     "env_flag": "GENESIS_ENABLE_P71_BLOCK_VERIFY",
@@ -11908,7 +12230,9 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/v1/core/sched/scheduler.py"
    ],
    "markers": [
-    "Genesis P79d preempt async-discard credit grant vllm#38624 v2 2026-06-11"
+    "Genesis P79d preempt async-discard credit grant vllm#38624 v2 2026-06-11",
+    "Genesis P79d preempt async-discard credit grant vllm#38624 v2 2026-06-11 :: async_scheduler.py",
+    "Genesis P79d preempt async-discard credit grant vllm#38624 v2 2026-06-11 :: scheduler.py"
    ],
    "flags": [
     "GENESIS_ENABLE_P79D_PREEMPT_ASYNC_DISCARD",
@@ -12133,6 +12457,9 @@
    ],
    "status": "retired",
    "summary": "Wiring for Patch 83 \u2014 MTP keep-last-cached-block (vllm#38182 mitigation).",
+   "markers_conditional": {
+    "Genesis P83 DEBUG instrumentation v7.53.6": "GENESIS_P83_DEBUG"
+   },
    "registry": {
     "title": "MTP keep-last-cached-block (vllm#38182 downstream symptom \u2014 P84 was real fix) \u2014 RETIRED 2026-06-11",
     "env_flag": "GENESIS_ENABLE_P83",
@@ -12160,7 +12487,8 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/v1/engine/core.py"
    ],
    "markers": [
-    "Genesis P84 hash_block_size override (vllm#38182 actual root cause) v7.53.3_dual_site"
+    "Genesis P84 hash_block_size override (vllm#38182 actual root cause) v7.53.3_dual_site",
+    "Genesis P84 hash_block_size override (vllm#38182 actual root cause) v7.53.3_dual_site_engine_core"
    ],
    "flags": [
     "GENESIS_ENABLE_P84",
@@ -12337,7 +12665,10 @@
     ]
    },
    "registry_id": "P88",
-   "key": "P88"
+   "key": "P88",
+   "note": "Prefix-cache stats retry de-duplication. Boot line: 'upstream marker \"def record_prefix_cache_stats\" detected - patch obsolete, skip' -> 'RESULT skipped: P88 ... upstream_merged - marker'. Honest self-retire, not a loss.",
+   "state_hint": "N/A",
+   "superseded_by": "vllm#48860 (MERGED upstream; note vllm#45202, which P88 rewrote, closed UNMERGED - #48860 is the one that landed). Absorbing code in the pristine boot pin: v1/core/kv_cache_manager.py:214 'def record_prefix_cache_stats(self, request, num_hits)' which early-returns unless the request actually did a lookup, plus its sole call site at v1/core/sched/scheduler.py:1035, moved to ADMISSION and guarded by 'if did_prefix_cache_lookup'. That relocation IS the double-count fix P88 provided."
   },
   {
    "id": "P89",
@@ -12431,7 +12762,8 @@
    ],
    "markers": [
     "Genesis P91 AutoRound row-group cdiv (vllm#39460)",
-    "v7.62.2"
+    "Genesis P91 AutoRound row-group cdiv (vllm#39460) v7.62.2",
+    "Genesis P91 AutoRound row-group cdiv (vllm#39460) v7.62.2_parameter"
    ],
    "flags": [
     "GENESIS_ENABLE_P91",
@@ -12472,7 +12804,11 @@
    ],
    "markers": [
     "Genesis P91B AutoRound row-group cdiv multi-scheme (vllm#39460-derived)",
-    "v0.1.0"
+    "Genesis P91B AutoRound row-group cdiv multi-scheme (vllm#39460-derived) v0.1.0",
+    "Genesis P91B AutoRound row-group cdiv multi-scheme (vllm#39460-derived) v0.1.0_ct_w4a8_fp8",
+    "Genesis P91B AutoRound row-group cdiv multi-scheme (vllm#39460-derived) v0.1.0_ct_wNa16",
+    "Genesis P91B AutoRound row-group cdiv multi-scheme (vllm#39460-derived) v0.1.0_inc_dev338",
+    "Genesis P91B AutoRound row-group cdiv multi-scheme (vllm#39460-derived) v0.1.0_inc_dev371"
    ],
    "flags": [
     "GENESIS_ENABLE_P91B",
@@ -12706,8 +13042,7 @@
     "implementation_status": "full"
    },
    "registry_id": "PN102",
-   "key": "PN102@lane2-sndr:pn102_pinned_alloc_pool",
-   "lane2_suppressed_by_lane1": true
+   "key": "PN102@lane2-sndr:pn102_pinned_alloc_pool"
   },
   {
    "id": "PN104",
@@ -12895,7 +13230,9 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/mamba_utils.py"
    ],
    "markers": [
-    "Genesis PN111 skip-mamba-postprocess sync (vllm#42574) v11.0.0"
+    "Genesis PN111 skip-mamba-postprocess sync (vllm#42574) v11.0.0",
+    "Genesis PN111 skip-mamba-postprocess sync (vllm#42574) v11.0.0 [runner]",
+    "Genesis PN111 skip-mamba-postprocess sync (vllm#42574) v11.0.0 [utils]"
    ],
    "flags": [
     "GENESIS_ENABLE_PN111",
@@ -12967,6 +13304,7 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/workspace.py"
    ],
    "markers": [
+    "# Genesis PN118 TQ workspace graceful-fallback (backport: vllm#42551)\n",
     "Genesis PN118 TQ workspace graceful-fallback (backport: vllm#42551)"
    ],
    "flags": [
@@ -13139,7 +13477,8 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu_model_runner.py"
    ],
    "markers": [
-    "Genesis Sprint 2.6 v2 \u2014 cudagraph dispatch trace wire-in"
+    "Genesis Sprint 2.6 v2 \u2014 cudagraph dispatch trace wire-in",
+    "Genesis Sprint 2.6 v2 \u2014 cudagraph dispatch trace wire-in \u2014 site1"
    ],
    "flags": [
     "GENESIS_CUDAGRAPH_DISPATCH_TRACE",
@@ -13171,9 +13510,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/compile_safety/pn125_hybrid_full_and_piecewise.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis PN125 hybrid_gdn FULL_AND_PIECEWISE v1 (closes vLLM upstream gap: Qwen3.5/3.6 skipped from MambaModelConfig.verify_and_update_config)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_DISABLE_PN125_HYBRID_FULL_AND_PIECEWISE",
     "GENESIS_ENABLE_PN125_HYBRID_FULL_AND_PIECEWISE",
@@ -13184,6 +13521,9 @@
    "upstream": [],
    "status": "live",
    "summary": "PN125 \u2014 close upstream gap: Qwen3.5/3.6 hybrid skipped FULL_AND_PIECEWISE.",
+   "markers_doc": [
+    "Genesis PN125 hybrid_gdn FULL_AND_PIECEWISE v1 (closes vLLM upstream gap: Qwen3.5/3.6 skipped from MambaModelConfig.verify_and_update_config)"
+   ],
    "registry": {
     "title": "Hybrid Qwen3.5/3.6 FULL_AND_PIECEWISE cudagraph_mode (redundant on dev338+)",
     "env_flag": "GENESIS_ENABLE_PN125_HYBRID_FULL_AND_PIECEWISE",
@@ -13204,9 +13544,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/compile_safety/pn126_v1_decode_kernel_warmup.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis PN126 V1 decode + spec-decode kernel warmup v1"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_DISABLE_PN126_V1_DECODE_WARMUP",
     "GENESIS_ENABLE_PN126_V1_DECODE_WARMUP",
@@ -13215,6 +13553,9 @@
    "upstream": [],
    "status": "live",
    "summary": "PN126 \u2014 V1 decode + spec-decode kernel warmup orchestrator.",
+   "markers_doc": [
+    "Genesis PN126 V1 decode + spec-decode kernel warmup v1"
+   ],
    "registry": {
     "title": "V1 decode + spec-decode kernel warmup orchestrator (fixes JIT spikes on first request)",
     "env_flag": "GENESIS_ENABLE_PN126_V1_DECODE_WARMUP",
@@ -13226,7 +13567,8 @@
     "implementation_status": "full"
    },
    "registry_id": "PN126",
-   "key": "PN126"
+   "key": "PN126",
+   "note": "JIT-warmup family, same shape as PN364: wraps Worker.compile_or_warm_up_model by assignment, announces 'RESULT applied' every boot, and cannot reach the served process because `exec vllm serve` replaces the apply_all process. Contains zero TextPatcher occurrences. Reported LIVE off module presence until the 2026-07-26 verifier fix; see PN364 for the restore cost, which is shared across all five."
   },
   {
    "id": "PN127",
@@ -13235,9 +13577,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/serving/pn127_chat_template_qwen36.py",
    "kind": "text_patch",
    "targets": [],
-   "markers": [
-    "Genesis PN127 Qwen3.5/3.6 chat-template auto-install v1"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_AUTO_CHAT_TEMPLATE_PATH",
     "GENESIS_CHAT_TEMPLATE_DIR",
@@ -13248,6 +13588,9 @@
    "upstream": [],
    "status": "live",
    "summary": "PN127 \u2014 Qwen 3.5/3.6 enhanced chat-template auto-install.",
+   "markers_doc": [
+    "Genesis PN127 Qwen3.5/3.6 chat-template auto-install v1"
+   ],
    "registry": {
     "title": "Qwen 3.5/3.6 enhanced chat-template auto-install (closes club-3090#53/#72)",
     "env_flag": "GENESIS_ENABLE_PN127_AUTO_CHAT_TEMPLATE",
@@ -13259,7 +13602,9 @@
     "implementation_status": "full"
    },
    "registry_id": "PN127",
-   "key": "PN127"
+   "key": "PN127",
+   "note": "NOT a loss, and not one problem but two. (1) The row was scored on GENESIS_PN127_MARKER, a constant defined once and read by NOTHING - there is no TextPatcher in the module at all; apply() does write_text() of a jinja asset. Fixed at source in the extractor's marker classification, so the row is now UNVERIFIABLE rather than MISSING, which is the honest state. (2) Separately, the capability is applied but UNUSED by config: the boot says 'installed: enhanced chat-template copied to /tmp/genesis/chat_templates/qwen3.6_enhanced.jinja', but the compose serves '--chat-template /chat_template.jinja' from patches/qwopus-chat-template/ and GENESIS_AUTO_CHAT_TEMPLATE_PATH is unset. That is a deliberate 2026-07-14 USER decision (the Froggeric template corrupted chat + thinking on Qwopus3.6), not drift.",
+   "state_hint": "N/A"
   },
   {
    "id": "PN128",
@@ -13268,9 +13613,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/compile_safety/pn128_spec_decode_helper_warmup.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis PN128 spec-decode helper warmup v1 (vllm#41481)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_DISABLE_PN128_SPEC_DECODE_WARMUP",
     "GENESIS_ENABLE_PN128_SPEC_DECODE_WARMUP",
@@ -13281,6 +13624,9 @@
    ],
    "status": "live",
    "summary": "PN128 \u2014 Spec-decode helper kernel warmup (backport vllm-project/vllm#41481).",
+   "markers_doc": [
+    "Genesis PN128 spec-decode helper warmup v1 (vllm#41481)"
+   ],
    "registry": {
     "title": "Spec-decode helper kernel warmup (backport vllm#41481, 4 eagle kernels)",
     "env_flag": "GENESIS_ENABLE_PN128_SPEC_DECODE_WARMUP",
@@ -13293,7 +13639,8 @@
     "upstream_pr": 41481
    },
    "registry_id": "PN128",
-   "key": "PN128"
+   "key": "PN128",
+   "note": "JIT-warmup family, same shape as PN364: wraps Worker.compile_or_warm_up_model by assignment, announces 'RESULT applied' every boot, and cannot reach the served process because `exec vllm serve` replaces the apply_all process. Contains zero TextPatcher occurrences. Reported LIVE off module presence until the 2026-07-26 verifier fix; see PN364 for the restore cost, which is shared across all five."
   },
   {
    "id": "PN129",
@@ -13302,9 +13649,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/compile_safety/pn129_slot_mapping_warmup.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis PN129 V1 slot mapping warmup v1 (vllm#42165)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_DISABLE_PN129_SLOT_MAPPING_WARMUP",
     "GENESIS_ENABLE_PN129_SLOT_MAPPING_WARMUP",
@@ -13315,6 +13660,9 @@
    ],
    "status": "live",
    "summary": "PN129 \u2014 V1 slot mapping kernel warmup (backport vllm-project/vllm#42165).",
+   "markers_doc": [
+    "Genesis PN129 V1 slot mapping warmup v1 (vllm#42165)"
+   ],
    "registry": {
     "title": "V1 slot mapping kernel warmup (backport vllm#42165, 1 kernel + do_not_specialize)",
     "env_flag": "GENESIS_ENABLE_PN129_SLOT_MAPPING_WARMUP",
@@ -13327,7 +13675,8 @@
     "upstream_pr": 42165
    },
    "registry_id": "PN129",
-   "key": "PN129"
+   "key": "PN129",
+   "note": "JIT-warmup family, same shape as PN364: wraps Worker.compile_or_warm_up_model by assignment, announces 'RESULT applied' every boot, and cannot reach the served process because `exec vllm serve` replaces the apply_all process. Contains zero TextPatcher occurrences. Reported LIVE off module presence until the 2026-07-26 verifier fix; see PN364 for the restore cost, which is shared across all five."
   },
   {
    "id": "PN12",
@@ -13390,9 +13739,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/compile_safety/pn130_turboquant_decode_warmup.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis PN130 TQ decode warmup v1 (vllm#42215)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_DISABLE_PN130_TQ_DECODE_WARMUP",
     "GENESIS_ENABLE_PN130_TQ_DECODE_WARMUP",
@@ -13403,6 +13750,9 @@
    ],
    "status": "live",
    "summary": "PN130 \u2014 TurboQuant decode kernel warmup (backport vllm-project/vllm#42215).",
+   "markers_doc": [
+    "Genesis PN130 TQ decode warmup v1 (vllm#42215)"
+   ],
    "registry": {
     "title": "TurboQuant decode kernel warmup (backport vllm#42215, 1 kernel + workspace prealloc)",
     "env_flag": "GENESIS_ENABLE_PN130_TQ_DECODE_WARMUP",
@@ -13415,7 +13765,8 @@
     "upstream_pr": 42215
    },
    "registry_id": "PN130",
-   "key": "PN130"
+   "key": "PN130",
+   "note": "JIT-warmup family, same shape as PN364: wraps Worker.compile_or_warm_up_model by assignment, announces 'RESULT applied' every boot, and cannot reach the served process because `exec vllm serve` replaces the apply_all process. Contains zero TextPatcher occurrences. Reported LIVE off module presence until the 2026-07-26 verifier fix; see PN364 for the restore cost, which is shared across all five."
   },
   {
    "id": "PN132",
@@ -13424,9 +13775,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/compile_safety/pn132_triton_topk_topp_contiguous.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis PN132 Triton top-k/top-p contiguous fix v1 (vllm#42739)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_DISABLE_PN132_TOPK_TOPP_CONTIGUOUS",
     "GENESIS_ENABLE_PN132_TOPK_TOPP_CONTIGUOUS",
@@ -13437,6 +13786,9 @@
    ],
    "status": "retired?",
    "summary": "PN132 \u2014 Triton top-k/top-p contiguous logits fix (backport vllm#42739).",
+   "markers_doc": [
+    "Genesis PN132 Triton top-k/top-p contiguous fix v1 (vllm#42739)"
+   ],
    "registry": {
     "title": "Triton top-k/top-p contiguous logits fix (backport vllm#42739)",
     "env_flag": "GENESIS_ENABLE_PN132_TOPK_TOPP_CONTIGUOUS",
@@ -13462,7 +13814,6 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/v1/core/sched/scheduler.py"
    ],
    "markers": [
-    "Genesis PN133 MTP scheduler empty-output fix v2 (vllm#42722 + vllm#45060 observability arm)",
     "[Genesis PN133 vllm#42722]"
    ],
    "flags": [
@@ -13476,6 +13827,9 @@
    ],
    "status": "retired?",
    "summary": "PN133 \u2014 MTP scheduler empty-output accounting fix (backport vllm#42722).",
+   "markers_doc": [
+    "Genesis PN133 MTP scheduler empty-output fix v2 (vllm#42722 + vllm#45060 observability arm)"
+   ],
    "registry": {
     "title": "MTP scheduler empty-output accounting fix (backport vllm#42722)",
     "env_flag": "GENESIS_ENABLE_PN133_MTP_EMPTY_OUTPUT_FIX",
@@ -13499,9 +13853,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/compile_safety/pn134_torch_compile_fullgraph_211.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis PN134 torch.compile fullgraph 2.11 patch v1 (vllm#42686)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_DISABLE_PN134_TORCH_COMPILE_FULLGRAPH_211",
     "GENESIS_ENABLE_PN134_TORCH_COMPILE_FULLGRAPH_211",
@@ -13513,6 +13865,9 @@
    ],
    "status": "retired?",
    "summary": "PN134 \u2014 torch.compile fullgraph patch for PyTorch 2.11 (backport vllm#42686).",
+   "markers_doc": [
+    "Genesis PN134 torch.compile fullgraph 2.11 patch v1 (vllm#42686)"
+   ],
    "registry": {
     "title": "torch.compile fullgraph patch for PyTorch 2.11 (backport vllm#42686) \u2014 BENCH-VALIDATED REGRESSOR, DO NOT ENABLE",
     "env_flag": "GENESIS_ENABLE_PN134_TORCH_COMPILE_FULLGRAPH_211",
@@ -13685,8 +14040,7 @@
     "implementation_status": "full"
    },
    "registry_id": "PN16_V6",
-   "key": "PN16@lane2-sndr:pn16_v6_streaming_truncator",
-   "lane2_suppressed_by_lane1": true
+   "key": "PN16@lane2-sndr:pn16_v6_streaming_truncator"
   },
   {
    "id": "PN16",
@@ -13857,7 +14211,8 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu_model_runner.py"
    ],
    "markers": [
-    "Genesis PN202 per-layer KV tensor split"
+    "Genesis PN202 per-layer KV tensor split",
+    "Genesis PN202 per-layer KV tensor split (arena)"
    ],
    "flags": [
     "GENESIS_ENABLE_PN202_PER_LAYER_KV_SPLIT",
@@ -13964,7 +14319,9 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/v1/spec_decode/dflash.py"
    ],
    "markers": [
-    "Genesis PN21 DFlash SWA support v7.65"
+    "Genesis PN21 DFlash SWA support v7.65",
+    "Genesis PN21 DFlash SWA support v7.65 (algos)",
+    "Genesis PN21 DFlash SWA support v7.65 (dflash)"
    ],
    "flags": [
     "GENESIS_ENABLE_PN21_DFLASH_SWA",
@@ -14003,7 +14360,9 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/qwen3_dflash.py"
    ],
    "markers": [
-    "Genesis PN22 local argmax TP for spec-decode draft v7.65"
+    "Genesis PN22 local argmax TP for spec-decode draft v7.65",
+    "Genesis PN22 local argmax TP for spec-decode draft v7.65 (dflash)",
+    "Genesis PN22 local argmax TP for spec-decode draft v7.65 (qwen3_5_mtp)"
    ],
    "flags": [
     "GENESIS_ENABLE_PN22_LOCAL_ARGMAX_TP",
@@ -14076,22 +14435,36 @@
    "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/probes/pn241_mtp_trace.py",
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/probes/pn241_mtp_trace.py",
    "kind": "module",
-   "targets": [],
-   "markers": [],
+   "targets": [
+    "/usr/local/lib/python3.12/dist-packages/vllm/v1/spec_decode/llm_base_proposer.py"
+   ],
+   "markers": [
+    "Genesis PN241 self-install hook (exec-survival, P39a class) v1"
+   ],
    "flags": [
     "GENESIS_ENABLE_PN241_MTP_TRACE"
    ],
    "upstream": [],
-   "status": "orphan-no-registry-row",
+   "status": "live",
    "summary": "PN241 MTP trace.",
-   "unreachable_by_dispatcher": true,
+   "registry": {
+    "title": "MTP proposer-boundary input trace (finite/norm on propose() tensors)",
+    "env_flag": "GENESIS_ENABLE_PN241_MTP_TRACE",
+    "default_on": false,
+    "category": "observability",
+    "family": "spec_decode",
+    "tier": "community",
+    "lifecycle": "experimental",
+    "implementation_status": "full"
+   },
+   "registry_id": "PN241",
    "key": "PN241"
   },
   {
    "id": "PN248",
    "lane": "lane2-sndr",
-   "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/probes/pn248_acceptance_trace.py",
-   "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/probes/pn248_acceptance_trace.py",
+   "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/_retired/pn248_acceptance_trace.py",
+   "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/_retired/pn248_acceptance_trace.py",
    "kind": "module",
    "targets": [],
    "markers": [],
@@ -14101,9 +14474,8 @@
    "upstream": [
     "vllm#43150"
    ],
-   "status": "orphan-no-registry-row",
+   "status": "retired",
    "summary": "PN248 acceptance trace.",
-   "unreachable_by_dispatcher": true,
    "key": "PN248"
   },
   {
@@ -14219,8 +14591,12 @@
    "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/probes/pn258_oracle_acceptance.py",
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/probes/pn258_oracle_acceptance.py",
    "kind": "module",
-   "targets": [],
-   "markers": [],
+   "targets": [
+    "/usr/local/lib/python3.12/dist-packages/vllm/v1/sample/rejection_sampler.py"
+   ],
+   "markers": [
+    "Genesis PN258 self-install hook (exec-survival, P39a class) v1"
+   ],
    "flags": [
     "GENESIS_ENABLE_PN258_ORACLE_ACCEPTANCE",
     "GENESIS_ENABLE_PN258_SELF_ORACLE"
@@ -14228,9 +14604,19 @@
    "upstream": [
     "vllm#43150"
    ],
-   "status": "orphan-no-registry-row",
+   "status": "live",
    "summary": "PN258 oracle acceptance.",
-   "unreachable_by_dispatcher": true,
+   "registry": {
+    "title": "Oracle / self-oracle acceptance comparison (rejection_sample record-replay)",
+    "env_flag": "GENESIS_ENABLE_PN258_ORACLE_ACCEPTANCE",
+    "default_on": false,
+    "category": "observability",
+    "family": "spec_decode",
+    "tier": "community",
+    "lifecycle": "experimental",
+    "implementation_status": "full"
+   },
+   "registry_id": "PN258",
    "key": "PN258"
   },
   {
@@ -14360,9 +14746,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/probes/pn262_flash_attn_drafter_trace.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis PN262 FlashAttn drafter KV cache shape/stride trace + fail-fast (one-shot D-3 localization patch)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_PN262_FAIL_FAST",
     "GENESIS_ENABLE_PN262_FLASH_ATTN_DRAFTER_TRACE",
@@ -14373,6 +14757,9 @@
    "upstream": [],
    "status": "live",
    "summary": "PN262 flash-attn drafter trace.",
+   "markers_doc": [
+    "Genesis PN262 FlashAttn drafter KV cache shape/stride trace + fail-fast (one-shot D-3 localization patch)"
+   ],
    "registry": {
     "title": "FlashAttn drafter KV cache shape/stride trace + fail-fast (PN261-D D-3 localization)",
     "env_flag": "GENESIS_ENABLE_PN262_FLASH_ATTN_DRAFTER_TRACE",
@@ -14396,9 +14783,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/probes/pn262b_kv_alloc_trace.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis PN262-B KV cache allocator/reshape/proposer-init diagnostic trace (D-3 deep-dive locator)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_PN262B_KV_ALLOC_TRACE",
     "GENESIS_PN262B_MARKER",
@@ -14407,6 +14792,9 @@
    "upstream": [],
    "status": "live",
    "summary": "PN262-B KV cache allocator trace.",
+   "markers_doc": [
+    "Genesis PN262-B KV cache allocator/reshape/proposer-init diagnostic trace (D-3 deep-dive locator)"
+   ],
    "registry": {
     "title": "KV cache allocator/reshape/proposer-init diagnostic trace (PN262-A D-3 deep-dive)",
     "env_flag": "GENESIS_ENABLE_PN262B_KV_ALLOC_TRACE",
@@ -14423,82 +14811,82 @@
   {
    "id": "PN266",
    "lane": "lane2-sndr",
-   "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/probes/pn266_propose_trace.py",
-   "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/probes/pn266_propose_trace.py",
+   "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/_retired/pn266_propose_trace.py",
+   "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/_retired/pn266_propose_trace.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis PN266 propose() input trace (G4_77 design probe)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_PN266_PROPOSE_TRACE",
     "GENESIS_PN266_MARKER"
    ],
    "upstream": [],
-   "status": "orphan-no-registry-row",
+   "status": "retired",
    "summary": "PN266 propose() input trace \u2014 G4_77 design probe.",
-   "unreachable_by_dispatcher": true,
+   "markers_doc": [
+    "Genesis PN266 propose() input trace (G4_77 design probe)"
+   ],
    "key": "PN266"
   },
   {
    "id": "PN267",
    "lane": "lane2-sndr",
-   "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/probes/pn267_kv_bridge_trace.py",
-   "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/probes/pn267_kv_bridge_trace.py",
+   "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/_retired/pn267_kv_bridge_trace.py",
+   "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/_retired/pn267_kv_bridge_trace.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis PN267 K/V bridge feasibility trace (G4_78-0 probe \u2014 target[58]/[59] + drafter[0] forward shapes)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_PN267_KV_BRIDGE_TRACE",
     "GENESIS_PN267_MARKER"
    ],
    "upstream": [],
-   "status": "orphan-no-registry-row",
+   "status": "retired",
    "summary": "PN267 KV bridge trace.",
-   "unreachable_by_dispatcher": true,
+   "markers_doc": [
+    "Genesis PN267 K/V bridge feasibility trace (G4_78-0 probe \u2014 target[58]/[59] + drafter[0] forward shapes)"
+   ],
    "key": "PN267"
   },
   {
    "id": "PN268",
    "lane": "lane2-sndr",
-   "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/probes/pn268_drafter_blocks_origin.py",
-   "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/probes/pn268_drafter_blocks_origin.py",
+   "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/_retired/pn268_drafter_blocks_origin.py",
+   "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/_retired/pn268_drafter_blocks_origin.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis PN268 drafter num_blocks origin trace"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_PN268_DRAFTER_BLOCKS_TRACE",
     "GENESIS_PN268_MARKER"
    ],
    "upstream": [],
-   "status": "orphan-no-registry-row",
+   "status": "retired",
    "summary": "PN268 drafter blocks origin.",
-   "unreachable_by_dispatcher": true,
+   "markers_doc": [
+    "Genesis PN268 drafter num_blocks origin trace"
+   ],
    "key": "PN268"
   },
   {
    "id": "PN269",
    "lane": "lane2-sndr",
-   "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/probes/pn269_a0_block_table_trace.py",
-   "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/probes/pn269_a0_block_table_trace.py",
+   "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/_retired/pn269_a0_block_table_trace.py",
+   "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/_retired/pn269_a0_block_table_trace.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis PN269 G4_78-A0 trace: target/drafter block_table accessibility"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_PN269_A0_BLOCK_TABLE_TRACE",
     "GENESIS_PN269_MARKER",
     "GENESIS_PN269_MAX_LOG_CALLS"
    ],
    "upstream": [],
-   "status": "orphan-no-registry-row",
+   "status": "retired",
    "summary": "PN269 A0 block table trace.",
-   "unreachable_by_dispatcher": true,
+   "markers_doc": [
+    "Genesis PN269 G4_78-A0 trace: target/drafter block_table accessibility"
+   ],
    "key": "PN269"
   },
   {
@@ -14508,9 +14896,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/turboquant/pn26_sparse_v_kernel.py",
    "kind": "monkey_patch",
    "targets": [],
-   "markers": [
-    "_genesis_pn26_sparse_v_wrapped"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_PN26_SPARSE_V",
     "GENESIS_PN26_SPARSE_V_LOG_EVERY",
@@ -14522,6 +14908,9 @@
    ],
    "status": "live",
    "summary": "Wiring for Patch N26 sub-component \u2014 SPARSE_V kernel dispatcher.",
+   "markers_doc": [
+    "_genesis_pn26_sparse_v_wrapped"
+   ],
    "registry": {
     "title": "Sparse-V tile-skip Genesis kernel (BLASST \u03bb=a/L for SM86)",
     "env_flag": "GENESIS_ENABLE_PN26_SPARSE_V",
@@ -14547,7 +14936,8 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/turboquant/centroids.py"
    ],
    "markers": [
-    "Genesis PN26 TQ centroids prebake v7.65"
+    "Genesis PN26 TQ centroids prebake v7.65",
+    "Genesis PN26 TQ centroids prebake v7.65 (centroids)"
    ],
    "flags": [
     "GENESIS_ENABLE_PN26_SPARSE_V",
@@ -14611,21 +15001,21 @@
   {
    "id": "PN270",
    "lane": "lane2-sndr",
-   "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/probes/pn270_drafter_kv_proj_audit.py",
-   "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/probes/pn270_drafter_kv_proj_audit.py",
+   "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/_retired/pn270_drafter_kv_proj_audit.py",
+   "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/_retired/pn270_drafter_kv_proj_audit.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis PN270 drafter K/V projection audit"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_PN270_DRAFTER_KV_PROJ_AUDIT",
     "GENESIS_PN270_MARKER"
    ],
    "upstream": [],
-   "status": "orphan-no-registry-row",
+   "status": "retired",
    "summary": "PN270 drafter KV-proj audit.",
-   "unreachable_by_dispatcher": true,
+   "markers_doc": [
+    "Genesis PN270 drafter K/V projection audit"
+   ],
    "key": "PN270"
   },
   {
@@ -14635,9 +15025,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/pn271_kv_contract_audit.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis PN271 SpecDecode KV contract audit"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_PN271_KV_CONTRACT_AUDIT",
     "GENESIS_PN271_MARKER"
@@ -14645,6 +15033,9 @@
    "upstream": [],
    "status": "live",
    "summary": "PN271 KV contract audit.",
+   "markers_doc": [
+    "Genesis PN271 SpecDecode KV contract audit"
+   ],
    "registry": {
     "title": "SpecDecode KV-contract audit (model-agnostic, read-only)",
     "env_flag": "GENESIS_ENABLE_PN271_KV_CONTRACT_AUDIT",
@@ -14661,22 +15052,22 @@
   {
    "id": "PN272",
    "lane": "lane2-sndr",
-   "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/probes/pn272_gemma4_drafter_input_probe.py",
-   "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/probes/pn272_gemma4_drafter_input_probe.py",
+   "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/_retired/pn272_gemma4_drafter_input_probe.py",
+   "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/_retired/pn272_gemma4_drafter_input_probe.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis PN272 Gemma4 drafter input semantics probe"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_PN272_GEMMA4_DRAFTER_INPUT_PROBE",
     "GENESIS_PN272_ENABLE_RUNTIME_WRAPS",
     "GENESIS_PN272_MARKER"
    ],
    "upstream": [],
-   "status": "orphan-no-registry-row",
+   "status": "retired",
    "summary": "PN272 \u2014 Gemma 4 MTP drafter input semantics probe (read-only).",
-   "unreachable_by_dispatcher": true,
+   "markers_doc": [
+    "Genesis PN272 Gemma4 drafter input semantics probe"
+   ],
    "key": "PN272",
    "model_family": "gemma4"
   },
@@ -14710,13 +15101,11 @@
   {
    "id": "PN274",
    "lane": "lane2-sndr",
-   "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/pn274_install.py",
-   "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/pn274_install.py",
+   "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/_retired/pn274_install.py",
+   "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/_retired/pn274_install.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis PN274 SpecDecode safety guard install"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ALLOW_SPEC_DECODE_FUNCTIONAL_UNKNOWN",
     "GENESIS_ALLOW_SPEC_DECODE_KV_ADAPTER",
@@ -14726,9 +15115,11 @@
     "SNDR_ALLOW_SPEC_DECODE_KV_ADAPTER"
    ],
    "upstream": [],
-   "status": "orphan-no-registry-row",
+   "status": "retired",
    "summary": "PN274 \u2014 install SpecDecode safety guard at config boot.",
-   "unreachable_by_dispatcher": true,
+   "markers_doc": [
+    "Genesis PN274 SpecDecode safety guard install"
+   ],
    "key": "PN274@lane2-sndr:pn274_install"
   },
   {
@@ -14742,7 +15133,6 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/config/vllm.py"
    ],
    "markers": [
-    "Genesis PN275 DFlash max_cgs align dev371 compat v1",
     "Genesis PN275 self-install hook (DFlash dev371 compat)",
     "Genesis PN275 validator waiver (env-gated raise\u2192warning)"
    ],
@@ -14755,6 +15145,9 @@
    "upstream": [],
    "status": "live",
    "summary": "PN275 \u2014 DFlash drafter VllmConfig max_cgs alignment (dev371 compat).",
+   "markers_doc": [
+    "Genesis PN275 DFlash max_cgs align dev371 compat v1"
+   ],
    "registry": {
     "title": "DFlash drafter VllmConfig max_cgs alignment (dev371 compat)",
     "env_flag": "GENESIS_ENABLE_PN275_DFLASH_MAX_CGS_ALIGN",
@@ -14811,39 +15204,14 @@
   {
    "id": "PN282",
    "lane": "lane2-sndr",
-   "source_host": "",
-   "source_container": "",
-   "kind": "registry_only",
-   "targets": [],
-   "markers": [],
-   "flags": [
-    "SNDR_ENABLE_SPEC_DECODE_ACCEPTANCE_METRIC"
-   ],
-   "upstream": [],
-   "status": "coordinator",
-   "summary": "Spec-decode acceptance proxy metric (Prometheus, non-dispatcher boot patch)",
-   "registry": {
-    "title": "Spec-decode acceptance proxy metric (Prometheus, non-dispatcher boot patch)",
-    "env_flag": "SNDR_ENABLE_SPEC_DECODE_ACCEPTANCE_METRIC",
-    "default_on": false,
-    "category": "observability",
-    "family": "observability",
-    "tier": "community",
-    "lifecycle": "coordinator",
-    "implementation_status": "marker_only"
-   },
-   "registry_id": "PN282",
-   "key": "PN282@lane2-sndr:"
-  },
-  {
-   "id": "PN282",
-   "lane": "lane2-sndr",
    "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/observability/pn282_spec_decode_acceptance_metric.py",
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/observability/pn282_spec_decode_acceptance_metric.py",
    "kind": "module",
-   "targets": [],
+   "targets": [
+    "/usr/local/lib/python3.12/dist-packages/vllm/v1/sample/rejection_sampler.py"
+   ],
    "markers": [
-    "Genesis PN282 \u2014 spec-decode acceptance proxy metric"
+    "Genesis PN282 self-install hook (exec-survival, P39a class) v1"
    ],
    "flags": [
     "GENESIS_ENABLE_SPEC_DECODE_ACCEPTANCE_METRIC",
@@ -14853,10 +15221,23 @@
    "upstream": [
     "vllm#43150"
    ],
-   "status": "orphan-no-registry-row",
+   "status": "live",
    "summary": "PN282 \u2014 Spec-decode acceptance proxy metric (rejection_sample wrap).",
-   "unreachable_by_dispatcher": true,
-   "key": "PN282@lane2-sndr:pn282_spec_decode_acceptance_metric"
+   "markers_doc": [
+    "Genesis PN282 \u2014 spec-decode acceptance proxy metric"
+   ],
+   "registry": {
+    "title": "Spec-decode acceptance proxy metric (Prometheus, non-dispatcher boot patch)",
+    "env_flag": "SNDR_ENABLE_SPEC_DECODE_ACCEPTANCE_METRIC",
+    "default_on": false,
+    "category": "observability",
+    "family": "observability",
+    "tier": "community",
+    "lifecycle": "experimental",
+    "implementation_status": "full"
+   },
+   "registry_id": "PN282",
+   "key": "PN282"
   },
   {
    "id": "PN283",
@@ -15455,9 +15836,7 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fla/ops/chunk_o.py"
    ],
    "markers": [
-    "Genesis PN29 GDN chunk_o scale-fold (vllm#41446 pattern c) v7.65",
-    "Genesis PN29+PN298 chunk_o consolidated (scale-fold + arch-aware NUM_WARPS) v1",
-    "Genesis PN298 FLA chunk_o NUM_WARPS arch-aware (SM 8.6 prune) v1"
+    "Genesis PN29+PN298 chunk_o consolidated (scale-fold + arch-aware NUM_WARPS) v1"
    ],
    "flags": [
     "GENESIS_DISABLE_PN29_GDN_SCALE_FOLD",
@@ -15474,6 +15853,10 @@
    ],
    "status": "live",
    "summary": "Consolidated wiring for PN29 + PN298 \u2014 both target the SAME engine file",
+   "markers_doc": [
+    "Genesis PN29 GDN chunk_o scale-fold (vllm#41446 pattern c) v7.65",
+    "Genesis PN298 FLA chunk_o NUM_WARPS arch-aware (SM 8.6 prune) v1"
+   ],
    "registry": {
     "title": "chunk_o consolidated: GDN scale-fold (vllm#41446 pattern c) + FLA NUM_WARPS arch-aware prune (SM 8.6 spilling fix)",
     "env_flag": "GENESIS_ENABLE_PN298_FLA_CHUNK_O_ARCH_WARPS",
@@ -15489,8 +15872,7 @@
     "upstream_pr": 41446
    },
    "registry_id": "PN298",
-   "key": "PN29@lane2-sndr:pn29_pn298_chunk_o_consolidated",
-   "lane2_suppressed_by_lane1": true
+   "key": "PN29@lane2-sndr:pn29_pn298_chunk_o_consolidated"
   },
   {
    "id": "PN300",
@@ -15575,7 +15957,10 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/mamba_utils.py"
    ],
    "markers": [
-    "Genesis PN30 DS conv state + spec-decode AL>1 (issue #17) v7.68"
+    "Genesis PN30 DS conv state + spec-decode AL>1 (issue #17) v7.68",
+    "Genesis PN30 DS conv state + spec-decode AL>1 (issue #17) v7.68 part1",
+    "Genesis PN30 DS conv state + spec-decode AL>1 (issue #17) v7.68 part2",
+    "Genesis PN30 DS conv state + spec-decode AL>1 (issue #17) v7.68 part3 dst-shaped-temp"
    ],
    "flags": [
     "GENESIS_ENABLE_PN30_DS_LAYOUT_SPEC_DECODE",
@@ -16055,9 +16440,8 @@
    "upstream": [
     "vllm#40706"
    ],
-   "status": "orphan-no-registry-row",
+   "status": "retired?",
    "summary": "Wiring for Patch N34 \u2014 WorkspaceManager runtime lock relaxation.",
-   "unreachable_by_dispatcher": true,
    "key": "PN34@lane2-sndr:pn34_workspace_lock_runtime_relax",
    "lane2_suppressed_by_lane1": true
   },
@@ -16204,9 +16588,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/moe/pn352b_marlin_moe_sum.py",
    "kind": "monkey_patch",
    "targets": [],
-   "markers": [
-    "_genesis_pn352b_marlin"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_DISABLE_PN352B",
     "GENESIS_ENABLE_PN352B_MARLIN_MOE_SUM"
@@ -16214,6 +16596,9 @@
    "upstream": [],
    "status": "live",
    "summary": "PN352B \u2014 route the Marlin MoE topk=8 reduce through the Genesis Triton kernel.",
+   "markers_doc": [
+    "_genesis_pn352b_marlin"
+   ],
    "registry": {
     "title": "Marlin MoE topk=8 reduce via Genesis Triton kernel (right call-site for the FP8 Marlin path)",
     "env_flag": "GENESIS_ENABLE_PN352B_MARLIN_MOE_SUM",
@@ -16380,7 +16765,8 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/v1/spec_decode/llm_base_proposer.py"
    ],
    "markers": [
-    "Genesis PN357 remapped greedy draft speedup v1"
+    "Genesis PN357 remapped greedy draft speedup v1",
+    "Genesis PN357 remapped greedy draft speedup v1 (proposer)"
    ],
    "flags": [
     "GENESIS_DISABLE_PN357",
@@ -16455,7 +16841,9 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu_model_runner.py"
    ],
    "markers": [
-    "Genesis PN35 inputs_embeds optional for text-only (vllm#35975) v7.69"
+    "Genesis PN35 inputs_embeds optional for text-only (vllm#35975) v7.69",
+    "Genesis PN35 inputs_embeds optional for text-only (vllm#35975) v7.69 part1",
+    "Genesis PN35 inputs_embeds optional for text-only (vllm#35975) v7.69 part2"
    ],
    "flags": [
     "GENESIS_DISABLE_PN35_INPUTS_EMBEDS_OPTIONAL",
@@ -16598,9 +16986,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/compile_safety/pn364_hybrid_gdn_mamba_warmup.py",
    "kind": "monkey_patch",
    "targets": [],
-   "markers": [
-    "_genesis_pn364_hybrid_gdn_warmup_installed"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_DISABLE_PN364",
     "GENESIS_ENABLE_PN364_HYBRID_GDN_WARMUP",
@@ -16612,6 +16998,9 @@
    ],
    "status": "live",
    "summary": "PN364 \u2014 vendor of OPEN PR vllm#43642 (hybrid GDN/Mamba/MRoPE startup warmup).",
+   "markers_doc": [
+    "_genesis_pn364_hybrid_gdn_warmup_installed"
+   ],
    "registry": {
     "title": "Hybrid GDN/Mamba/MRoPE startup warmup (vendor of OPEN vllm#43642)",
     "env_flag": "GENESIS_ENABLE_PN364_HYBRID_GDN_WARMUP",
@@ -16624,7 +17013,8 @@
     "upstream_pr": 43642
    },
    "registry_id": "PN364",
-   "key": "PN364"
+   "key": "PN364",
+   "note": "Two findings, and the second is bigger than the row. (1) The row was scored on GENESIS_PN364_MARKER = '_genesis_pn364_hybrid_gdn_warmup_installed', which is the ATTRIBUTE NAME in 'setattr(wrapped, GENESIS_PN364_MARKER, True)'. It is a name on a function object and can never appear in a file, so the row read 'marker absent anywhere in installed vllm' forever. Fixed at source in the extractor. (2) The capability is GENUINELY INERT: it wraps Worker.compile_or_warm_up_model by assignment in the apply_all process, and `exec vllm serve` replaces that process. So does the whole JIT-warmup family - PN126, PN128, PN129 and PN130 are the same shape, all announce 'RESULT applied' every boot, and all reach nothing. PN364 was the only one the ledger flagged, and it flagged it for the wrong reason. COST TO RESTORE: convert all five to text patches writing a self-install hook into v1/worker/gpu_worker.py (the P103/P39a pattern, now packaged as sndr/engines/vllm/patches/spec_decode/probes/self_install.py), re-anchor compile_or_warm_up_model on the cherrymax pin, and accept a boot with the '[PN364] Pass N done' lines visible in the SERVER log as the acceptance test. Payoff is TTFT-only (first request after a restart), no steady-state TPS. PN364 chains after the other four, so a partial restore gets the smallest share."
   },
   {
    "id": "PN365",
@@ -16751,9 +17141,8 @@
     "GENESIS_PN369_RELAXED_TOPK"
    ],
    "upstream": [],
-   "status": "orphan-no-registry-row",
+   "status": "live",
    "summary": "PN369 \u2014 relaxed acceptance for MTP spec-decode (CONSOLIDATED 2026-06-19).",
-   "unreachable_by_dispatcher": true,
    "key": "PN369"
   },
   {
@@ -16946,9 +17335,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/tool_parsing/pn375_gemma4_multiboundary_streaming.py",
    "kind": "monkey_patch",
    "targets": [],
-   "markers": [
-    "Genesis PN375 gemma4 multi-boundary streaming delta segments v1 (vendors vllm#44741 segment replay + G4_14 pad-set strip before the consistency check)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_PN375_GEMMA4_MULTIBOUNDARY_STREAMING",
     "GENESIS_PN375_MARKER"
@@ -16958,6 +17345,9 @@
    ],
    "status": "live",
    "summary": "PN375 \u2014 Gemma4 multi-boundary streaming tool-call deltas (vllm#44741).",
+   "markers_doc": [
+    "Genesis PN375 gemma4 multi-boundary streaming delta segments v1 (vendors vllm#44741 segment replay + G4_14 pad-set strip before the consistency check)"
+   ],
    "registry": {
     "title": "Gemma4 multi-boundary streaming tool-call deltas under MTP (vllm#44741)",
     "env_flag": "GENESIS_ENABLE_PN375_GEMMA4_MULTIBOUNDARY_STREAMING",
@@ -17097,7 +17487,9 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/model_loader/default_loader.py"
    ],
    "markers": [
-    "Genesis PN379 LoadConfig/DefaultModelLoader fail-fast vllm#45196 2026-06-11"
+    "Genesis PN379 LoadConfig/DefaultModelLoader fail-fast vllm#45196 2026-06-11",
+    "Genesis PN379 LoadConfig/DefaultModelLoader fail-fast vllm#45196 2026-06-11 :: config/load.py",
+    "Genesis PN379 LoadConfig/DefaultModelLoader fail-fast vllm#45196 2026-06-11 :: default_loader.py"
    ],
    "flags": [
     "GENESIS_ENABLE_PN379_LOAD_CONFIG_FAIL_FAST",
@@ -17410,9 +17802,8 @@
    "upstream": [
     "vllm#45346"
    ],
-   "status": "orphan-no-registry-row",
+   "status": "live",
    "summary": "Wiring for PN387 Layer 2 \u2014 gateway-edge degenerate structured_outputs guard.",
-   "unreachable_by_dispatcher": true,
    "key": "PN387@lane2-sndr:edge_guard_reject_degenerate_structured_outputs"
   },
   {
@@ -17609,7 +18000,10 @@
     ]
    },
    "registry_id": "PN390",
-   "key": "PN390"
+   "key": "PN390",
+   "note": "Streaming-LSE rejection sampler. Boot: 'upstream marker \"    BLOCK_SIZE: tl.constexpr = 8192\\n\" detected - patch obsolete, skip'. Worth logging: that drift marker is a generic Triton tile constant and a WEAK proxy - a future pin could carry the constant without the capability. The durable marker is 'compute_target_normalization'; re-point it on the next touch.",
+   "state_hint": "N/A",
+   "superseded_by": "vllm#45369, on the build line as 01d50ae77 'Cherry #45369: avoid materializing target probs in spec rejection sampling'. Absorbing code in the pristine boot pin: v1/sample/rejection_sampler.py:867 'def compute_target_normalization(...)' and its use at :560 'target_max, target_inv_sum = compute_target_normalization(target_logits, vocab_size, TARGET_NORMALIZATION_BLOCK_SIZE)' - the online-softmax state is computed without materializing the [num_tokens, vocab_size] tensor, which is exactly what PN390 vendored."
   },
   {
    "id": "PN391",
@@ -17777,7 +18171,8 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu_model_runner.py"
    ],
    "markers": [
-    "Genesis PN398 vllm#45100 async accepted-counts race"
+    "Genesis PN398 vllm#45100 async accepted-counts race",
+    "Genesis PN398 vllm#45100 async accepted-counts race :: gdn_attn.py"
    ],
    "flags": [
     "GENESIS_ENABLE_PN398_ASYNC_ACCEPTED_RACE",
@@ -17916,7 +18311,10 @@
     "upstream_pr": 46461
    },
    "registry_id": "PN401",
-   "key": "PN401"
+   "key": "PN401",
+   "note": "TurboQuant prefill continuation guard. Boot: 'upstream marker \"_has_continuation\" detected - patch obsolete, skip'. SAME CAPABILITY IN TWO LANES: /fixes patch_pn86_46461_tq_prefill_continuation_guard.py is the house twin of the same PR and self-retired on the same boot ('upstream drift: continuation guard already present'). Retire them together or neither.",
+   "state_hint": "N/A",
+   "superseded_by": "vllm#46461, on the build line as 60085ab6b 'Cherry #46461: TurboQuant prefill continuation guard'. Absorbing code in the pristine boot pin: v1/attention/backends/turboquant_attn.py:717-734 computes '_has_continuation' from query_start_loc_cpu vs seq_lens_cpu and gates the flash_attn first-chunk fast path on 'and not _has_continuation'."
   },
   {
    "id": "PN402",
@@ -17964,7 +18362,6 @@
    "markers": [
     "Genesis PN40 DFlash omnibus v1 (sub-kernel A: fused K-norm)",
     "Genesis PN40 sub-C scheduler k_trim hook v1.1 (per-subpatch marker)",
-    "Genesis PN40 sub-C+D scheduler observe hook v1 (universal MTP/DFlash)",
     "Genesis PN40 sub-C+D scheduler observe hook v1.1 (per-subpatch marker)"
    ],
    "flags": [
@@ -17976,6 +18373,9 @@
    "upstream": [],
    "status": "live",
    "summary": "Wiring for PN40 \u2014 DFlash omnibus optimization.",
+   "markers_doc": [
+    "Genesis PN40 sub-C+D scheduler observe hook v1 (universal MTP/DFlash)"
+   ],
    "registry": {
     "title": "Spec-decode omnibus (A DFlash K-norm + B pool + C adaptive K + D sentinel)",
     "env_flag": "GENESIS_ENABLE_PN40_DFLASH_OMNIBUS",
@@ -18592,7 +18992,6 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu_model_runner.py"
    ],
    "markers": [
-    "Genesis PN55 wake_up hybrid KV (vllm#41602)",
     "Genesis PN55v2 wake_up nested KV (vllm#41602+#41896)"
    ],
    "flags": [
@@ -18610,6 +19009,9 @@
    ],
    "status": "live",
    "summary": "Wiring for PN55 \u2014 wake_up crash fix on hybrid KV cache.",
+   "markers_doc": [
+    "Genesis PN55 wake_up hybrid KV (vllm#41602)"
+   ],
    "registry": {
     "title": "wake_up nested KV cache crash fix \u2014 vllm#41602+#41896 unified backport",
     "env_flag": "GENESIS_ENABLE_PN55_WAKE_UP_HYBRID_KV",
@@ -18677,7 +19079,12 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/v1/structured_output/__init__.py"
    ],
    "markers": [
-    "Genesis PN58 spec-decode reasoning boundary (vllm#40962)"
+    "Genesis PN58 spec-decode reasoning boundary (vllm#40962)",
+    "Genesis PN58 spec-decode reasoning boundary (vllm#40962) (abs)",
+    "Genesis PN58 spec-decode reasoning boundary (vllm#40962) (basic)",
+    "Genesis PN58 spec-decode reasoning boundary (vllm#40962) (envs)",
+    "Genesis PN58 spec-decode reasoning boundary (vllm#40962) (sched)",
+    "Genesis PN58 spec-decode reasoning boundary (vllm#40962) (struct_out)"
    ],
    "flags": [
     "GENESIS_ENABLE_P62",
@@ -19089,9 +19496,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/pn72_frequency_ngram_drafter.py",
    "kind": "monkey_patch",
    "targets": [],
-   "markers": [
-    "_genesis_pn72_wrapped"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_PN72_FREQUENCY_NGRAM_DRAFTER",
     "GENESIS_PN72_FREQUENCY_WINDOW",
@@ -19100,6 +19505,9 @@
    "upstream": [],
    "status": "live",
    "summary": "Wiring for PN72 \u2014 frequency-based ngram draft post-filter.",
+   "markers_doc": [
+    "_genesis_pn72_wrapped"
+   ],
    "registry": {
     "title": "Frequency-based ngram draft post-filter (llama.cpp-style)",
     "env_flag": "GENESIS_ENABLE_PN72_FREQUENCY_NGRAM_DRAFTER",
@@ -19152,9 +19560,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/kernels_legacy/lm_head_fp8_method.py",
    "kind": "monkey_patch",
    "targets": [],
-   "markers": [
-    "_already_called_process_weights_after_loading"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_ENABLE_PN77_FP8_LM_HEAD",
     "GENESIS_PN77_MAX_ROW_RELERR",
@@ -19163,9 +19569,11 @@
    "upstream": [
     "vllm#44912"
    ],
-   "status": "orphan-no-registry-row",
+   "status": "live",
    "summary": "PN77 \u2014 FP8 lm_head EmbeddingMethod subclass (Phase E.5 architectural redesign).",
-   "unreachable_by_dispatcher": true,
+   "markers_doc": [
+    "_already_called_process_weights_after_loading"
+   ],
    "key": "PN77@lane2-sndr:lm_head_fp8_method"
   },
   {
@@ -19573,7 +19981,19 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu_model_runner.py"
    ],
    "markers": [
-    "Genesis PN95 tier-aware KV cache + vision sub-tier (Path C v7.73.x_v11.3.0_hotpath)"
+    "Genesis PN95 tier-aware KV cache + vision sub-tier (Path C v7.73.x_v11.3.0_hotpath)",
+    "Genesis PN95 tier-aware KV cache + vision sub-tier (Path C v7.73.x_v11.3.0_hotpath) \u2014 admit anchor",
+    "Genesis PN95 tier-aware KV cache + vision sub-tier (Path C v7.73.x_v11.3.0_hotpath) \u2014 anchor #13 worker proactive demote",
+    "Genesis PN95 tier-aware KV cache + vision sub-tier (Path C v7.73.x_v11.3.0_hotpath) \u2014 blockpool register anchor",
+    "Genesis PN95 tier-aware KV cache + vision sub-tier (Path C v7.73.x_v11.3.0_hotpath) \u2014 demote_on_evict anchor",
+    "Genesis PN95 tier-aware KV cache + vision sub-tier (Path C v7.73.x_v11.3.0_hotpath) \u2014 mamba+init anchor",
+    "Genesis PN95 tier-aware KV cache + vision sub-tier (Path C v7.73.x_v11.3.0_hotpath) \u2014 phase5 block pool init anchor",
+    "Genesis PN95 tier-aware KV cache + vision sub-tier (Path C v7.73.x_v11.3.0_hotpath) \u2014 phase5 boot check anchor",
+    "Genesis PN95 tier-aware KV cache + vision sub-tier (Path C v7.73.x_v11.3.0_hotpath) \u2014 phase5 get_new_blocks anchor",
+    "Genesis PN95 tier-aware KV cache + vision sub-tier (Path C v7.73.x_v11.3.0_hotpath) \u2014 promote_on_miss anchor",
+    "Genesis PN95 tier-aware KV cache + vision sub-tier (Path C v7.73.x_v11.3.0_hotpath) \u2014 register_kv_caches anchor",
+    "Genesis PN95 tier-aware KV cache + vision sub-tier (Path C v7.73.x_v11.3.0_hotpath) \u2014 scheduler_tick anchor",
+    "Genesis PN95 tier-aware KV cache + vision sub-tier (Path C v7.73.x_v11.3.0_hotpath) \u2014 touch anchor"
    ],
    "flags": [
     "GENESIS_ENABLE_PN95_TIER_AWARE_CACHE",
@@ -19639,9 +20059,7 @@
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/moe/pn96b_marlin_persistent_workspace.py",
    "kind": "module",
    "targets": [],
-   "markers": [
-    "Genesis PN96 Marlin persistent workspace v1 (Wave 9 dev209 perf-restore)"
-   ],
+   "markers": [],
    "flags": [
     "GENESIS_DISABLE_PN96",
     "GENESIS_DISABLE_PN96B",
@@ -19653,6 +20071,9 @@
    "upstream": [],
    "status": "live",
    "summary": "PN96 \u2014 Persistent Marlin MoE workspace (Path C of Wave 9 35B optimization).",
+   "markers_doc": [
+    "Genesis PN96 Marlin persistent workspace v1 (Wave 9 dev209 perf-restore)"
+   ],
    "registry": {
     "title": "Persistent Marlin MoE workspace (Wave 9 dev209 perf-restore)",
     "env_flag": "GENESIS_ENABLE_PN96B",
@@ -19846,10 +20267,10 @@
    "markers": [],
    "flags": [],
    "upstream": [],
-   "status": "orphan-no-registry-row",
+   "status": "live",
    "summary": "Attribute rebind framework \u2014 the live monkey-patch layer.",
-   "unreachable_by_dispatcher": true,
-   "key": "REBIND"
+   "key": "REBIND",
+   "note": "NOT a patch. sndr/engines/vllm/wiring/rebind.py is the AttributeRebinder framework class used across the lane and exported by wiring/__init__.py:15. It was in the orphan list because the extractor's substring test matched `AttributeRebinder.apply(self)` \u2014 a METHOD, not a module-level apply()."
   },
   {
    "id": "REGISTRY",
@@ -19972,6 +20393,23 @@
    "status": "live",
    "summary": "safety_guard \u2014 production policy for SpecDecode KV sharing.",
    "key": "SAFETY_GUARD"
+  },
+  {
+   "id": "SELF_INSTALL",
+   "lane": "lane2-sndr",
+   "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/probes/self_install.py",
+   "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/spec_decode/probes/self_install.py",
+   "kind": "text_patch",
+   "targets": [],
+   "markers": [],
+   "flags": [
+    "SNDR_ENABLE_SPEC_DECODE_ACCEPTANCE_METRIC"
+   ],
+   "upstream": [],
+   "status": "live",
+   "summary": "Shared exec-survival hook for lane-2 setattr patches.",
+   "key": "SELF_INSTALL",
+   "note": "NOT a patch. sndr/engines/vllm/patches/spec_decode/probes/self_install.py is the shared exec-survival helper PN241/PN258/PN282 call to text-patch a P103/P39a import-time hook into their targets. It contains 'TextPatcher(' so the extractor classifies it text_patch and it has no marker of its own, hence a permanent UNVERIFIABLE row. Correct and harmless: the effect it produces is verified on the three rows that USE it, which is where the markers live."
   },
   {
    "id": "SINGLE_TYPE_KV_CACHE_MANAGER",
@@ -20129,10 +20567,10 @@
    "markers": [],
    "flags": [],
    "upstream": [],
-   "status": "orphan-no-registry-row",
+   "status": "live",
    "summary": "Static upstream-binding resolver for class-rebind / wiring patches.",
-   "unreachable_by_dispatcher": true,
-   "key": "UPSTREAM_BINDINGS"
+   "key": "UPSTREAM_BINDINGS",
+   "note": "NOT a patch, despite the LIVE-by-presence row. sndr/engines/vllm/upstream_bindings.py is a stdlib AST static-binding resolver for the anchor-drift checker (extract_vllm_imports, resolve_binding, check_module_bindings, iter_declared_bindings). It was in the orphan list only because the extractor's `\"def apply(\" in src` substring test matched a `def apply():` inside the module DOCSTRING's code example. Its declared-accessor convention is honoured by pn520_qwen3_5_gdn_load_weights_47058_revert.py:221 _upstream_bindings(); the tool that consumes its API is not vendored into this tree."
   },
   {
    "id": "VLLM_INSTALL",

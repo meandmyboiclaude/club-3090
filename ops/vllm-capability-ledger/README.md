@@ -19,16 +19,58 @@ commit-verdict-overrides.json  hand verdicts on commits; survive regeneration
 baseline-*.json                dated --json snapshots; feed `--baseline`
 ```
 
-**Current baseline: `baseline-20260725b-tcbench-dev1474cherrymax-v2.json`**
-(LIVE 280 · DARK 142 · N/A 145 · UNVERIFIABLE 38 · MISSING 53 · INERT 11 ·
-DEGRADED 5, over 674 capabilities; 250 commits fingerprinted, 0 MISSING).
-The `-v2` suffix is load-bearing: the verifier's semantics changed in the same
-commit that produced it (traps 8–11 below), so it is **not** row-comparable with
-`baseline-20260725-tcbench-dev1474cherrymax.json`. That earlier file is kept
-only as the historical first data point. Against the same container and the same
-image, re-running the OLD verifier reproduced the old baseline **exactly — 0 of
-674 rows changed**, which is the evidence that the 54-row delta between the two
-baselines is the tool being corrected, not the rig drifting.
+**Current baseline: `baseline-20260726-tcbench-dev1474cherrymax-v3.json`**
+(LIVE 272 · N/A 175 · DARK 144 · UNVERIFIABLE 45 · INERT 31 · MISSING 15 ·
+DEGRADED 0, over 682 capabilities; 250 commits fingerprinted, 1 MISSING).
+As with `-v2`, the suffix is load-bearing: the verifier's semantics changed in
+the same pass, so it is **not** row-comparable with the `-v2` file. The
+**act-on list is 15, down from 58**, and the reduction is almost entirely the
+tool being corrected rather than work being done — see "What the 07-26 pass
+changed" below. `-v2` and the original `-20260725` file are kept as the
+historical data points.
+
+### What the 07-26 pass changed
+
+Seven tool defects, each of which had been manufacturing losses:
+
+1. **Shared-id suppression keyed on the wrong id.** `sndr_lane.apply_policy()`
+   intersects REGISTRY KEYS; the extractor intersected its own
+   filename-derived ids. Six rows were flagged "suppressed by lane-1" that the
+   boot plainly applies — worst case the chunk_o consolidated module, registry
+   id `PN298` with no lane-1 twin, whose filename `pn29_pn298_*` derives to
+   `PN29`. A wrong suppression is the flag that makes the verifier stop
+   looking, so a real loss inside those six would have read "DARK, nothing
+   lost".
+2. **The suppression carve only ran on the zero-marker path**, so a suppressed
+   lane-2 copy whose lane-1 twin writes a differently-versioned marker came out
+   DEGRADED. Four of the five PARTIAL rows were that and nothing else.
+3. **Documentation constants scored as effect handles.** Legacy re-exports,
+   `MARKER_V2` idempotency probes, `setattr` attribute NAMES, and a bare
+   `"v7.62.2"` version tag. Now split into `markers` / `markers_doc`, plus
+   `markers_conditional` for markers a patch writes only under a second env
+   gate (P83's debug half).
+4. **`exec`-discards-setattr was gated on lane 1.** `run_lane2()` is called
+   from inside `apply_all`'s `main()`, i.e. the process the entrypoint
+   replaces. 18 rows move to INERT, including the entire JIT-warmup family
+   (PN126/128/129/130/364), which announces `RESULT applied` every boot and
+   reaches nothing.
+5. **Module presence used as an effect handle for text patches.** "Its own
+   source file is where the read-only bind mount put it" is true whether the
+   patch ran, skipped or crashed. Now UNVERIFIABLE, and `_retired/` /
+   `_archive/` modules are N/A instead of LIVE (that alone was 9 rows).
+6. **Four false-orphan filters** — the `"/patches/" in path` test was always
+   true, `_archive/`/`_retired/` were swept in, `"def apply(" in src` matched a
+   class METHOD and a DOCSTRING example, and helper modules imported by a
+   sibling were called unreachable. 25 orphans -> 11.
+7. **The alias table did not carry the GDN rename**
+   (`mamba/gdn_linear_attn.py` -> `mamba/gdn/qwen_gdn_linear_attn.py`). It hid
+   a real re-anchor item (P7/P7b) AND mis-reported a working patch (P60b) as
+   retired.
+
+Both blind spots named in the previous README are closed: lane-2 monkey
+patches now get the INERT rule, and absorption claims can carry named evidence
+in `inventory-overlay.json` (`superseded_by` at row level, which the verifier
+reads).
 
 Everything is **stdlib-only python3**. This box's venv ships neither sklearn
 nor scipy and PyYAML is absent, and the verifier has to run inside a bare
