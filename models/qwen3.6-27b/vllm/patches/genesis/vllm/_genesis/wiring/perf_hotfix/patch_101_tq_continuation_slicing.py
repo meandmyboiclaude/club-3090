@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 
 from vllm._genesis.guards import resolve_vllm_file, vllm_install_root
 from vllm._genesis.wiring.text_patch import (
@@ -201,12 +202,17 @@ def _make_patcher() -> TextPatcher | None:
         return None
     loop_old, loop_new = P101_LOOP_OLD, P101_LOOP_NEW
     try:
-        if _KVQ_SNIFF in target.read_text(encoding="utf-8"):
+        # resolve_vllm_file may hand back a str or a Path — normalize before IO.
+        src = Path(target).read_text(encoding="utf-8")
+        if _KVQ_SNIFF in src:
             # OLD call is indented 24; the NEW sliced-loop call is indented 28.
             loop_old = _splice_kvq_kwargs(P101_LOOP_OLD, 24)
             loop_new = _splice_kvq_kwargs(P101_LOOP_NEW, 28)
-    except OSError:
-        pass  # unreadable target -> fall through; TextPatcher reports the miss
+    except Exception:
+        # Sniffing is best-effort: never let it take the boot down. Falling
+        # through leaves the original literals, which TextPatcher reports as a
+        # normal anchor miss rather than an EXCEPTION.
+        pass
     return TextPatcher(
         patch_name="P101 turboquant_attn.py — TQ continuation 64-token slicing (vllm#41123)",
         target_file=str(target),
