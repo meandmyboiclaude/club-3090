@@ -219,6 +219,15 @@ services:
       # unit drop-in already sets 1600; this makes the value safe if that
       # drop-in is ever removed, instead of silently reverting to the bad one.
       - H119_LEAN_BUDGET=${H119_LEAN_BUDGET:-1600}
+      # [2026-07-26] Route-as-MODULATION knobs. A systemd Environment= only
+      # reaches the container if the compose passes it through (BUG-126), and
+      # these were undeclared, so a drop-in setting them did nothing.
+      # 1.0 = exact passthrough: the route picks the BANNER and PN100 keeps
+      # ownership of sizing, which is the config that produced 76 @ 25.9s
+      # (REPORT-prodmatrix-goal80-20260724.md §7, "0 unders").
+      # 0.75 / 2.0 re-engages the budget ladder.
+      - H119_LEAN_MULT=${H119_LEAN_MULT:-1.0}
+      - H119_DEEP_MULT=${H119_DEEP_MULT:-1.0}
       # [H119 route-API 2026-07-25] the OTHER half — hand the route to the
       # CALLER so the client can apply the FULL deep/lean treatment (banner AND
       # budget) out of band, which is how the original result was produced.
