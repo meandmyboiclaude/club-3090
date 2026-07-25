@@ -16,9 +16,11 @@ set -uo pipefail
 
 RECORD=/home/user/shared/tools/vllm-patch-record.py
 CAPTURE=/home/user/shared/tools/capture-vllm-boot.sh
+ABORTREC=/home/user/shared/tools/vllm-abort-record.py
 ALERT=/home/user/shared/PATCH-REGRESSION-ALERT.md
 MATCH="${VLLM_WATCH_MATCH:-vllm}"
 SETTLE="${VLLM_WATCH_SETTLE:-150}"   # let the boot finish before reading the log
+ABORT_SCAN_SEC="${VLLM_ABORT_SCAN_SEC:-600}"  # hourly abort-rate rows converge per scan
 
 log() { echo "[patch-watcher] $*"; }
 
@@ -60,6 +62,23 @@ handle() {
     rm -f "$ALERT"
   fi
 }
+
+# BUG-127 visibility: the abort class is HTTP-200-invisible (finish_reason=abort,
+# 0 completion tokens, runner counts 0 errors), so nothing event-driven ever sees
+# it. A periodic journald scan banks per-container per-hour abort/oom/request
+# counts into vllmops.abort_hourly; anubis's vllm-aborts module alerts on the rate.
+if [ -x "$ABORTREC" ]; then
+  (
+    while :; do
+      out=$(python3 "$ABORTREC" scan --match "$MATCH" 2>&1) \
+        && log "abort-scan: $out" \
+        || log "abort-scan FAILED: $out"
+      sleep "$ABORT_SCAN_SEC"
+    done
+  ) &
+else
+  log "abort-scan disabled: $ABORTREC missing or not executable"
+fi
 
 log "watching podman events for containers matching '$MATCH'"
 podman events --filter event=start --format '{{.Name}}' 2>/dev/null | while read -r name; do
