@@ -137,12 +137,31 @@ def extract(log: str) -> dict:
     lane2_not_applied = {
         name for status, name in lane2_results if status != "applied"
     }
-    phantom_names = sorted(set(disp_names) & lane2_not_applied)
+    # 2026-07-25 (regression fix): the RESULT set is LANE-2-ONLY, but disp_names
+    # is CROSS-LANE — both lanes log through "[Genesis Dispatcher] APPLY <id>".
+    # sndr_lane.apply_policy() suppresses the ~118 SHARED ids precisely because
+    # lane-1 owns and applies them, and now emits "RESULT skipped: <id>" for
+    # each — so a naive intersection flagged the patches lane-1 SUCCEEDED on
+    # (measured: 64 of them on the 18:02 boot). Split the log at lane-2's
+    # policy banner and only consider ids lane-2 itself announced, never ones
+    # lane-1 announced or lane-2 later reported applied.
+    _lines = log.splitlines()
+    _cut = next((k for k, l in enumerate(_lines)
+                 if "lane-2/sndr] policy" in l), 0)
+    lane1_announced = set(re.findall(
+        r"APPLY ([A-Z]+\d+[a-zA-Z]*)", "\n".join(_lines[:_cut])))
+    lane2_announced = set(re.findall(
+        r"APPLY ([A-Z]+\d+[a-zA-Z]*)", "\n".join(_lines[_cut:])))
+    lane2_applied = {name for status, name in lane2_results if status == "applied"}
+    phantom_names = sorted(
+        (set(disp_names) & lane2_not_applied & lane2_announced)
+        - lane2_applied - lane1_announced
+    )
     disp_names = sorted(set(disp_names) - set(phantom_names))
-    # The dispatcher's own "N applied" tally counts the same announcements, so
-    # correct it by the announced-but-not-applied set rather than leaving the
-    # headline number contradicting the per-patch rows.
-    disp -= len(phantom_names)
+    # Do NOT adjust `disp`. It comes from "Genesis Results: N applied" ==
+    # PatchStats.applied_count (sndr/apply/_state.py), which counts OUTCOMES:
+    # a phantom already lands there as _skipped(...) and was never included.
+    # Subtracting here double-counted and could drive the headline negative.
     return {
         "lanes": len(re.findall(r"Genesis Results:", log)),
         "dispatcher_applied": disp,
