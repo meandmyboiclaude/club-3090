@@ -25,9 +25,17 @@
 #   podman-compose -f single/tools-text-qwopus.yml up -d
 # ===========================================================================
 # [2026-07-14 END STATE] PROMOTED TO PROD :8020. [2026-07-25] regenerated 1:1 from tcbench8021.yml — see pin comment.
-# Rollback: systemctl disable vllm-endgame-8020 && systemctl enable --now vllm-qwen36
-# (old prod tools-text-aibox.yml + boot-guard, dev799 image). Callers untouched:
-# served aliases identical to old prod.
+# Rollback: revert the `image:` line below to the previous validated tag —
+#   localhost/vllm-qwen36-endgame:dev1060cherry-2204-20260713
+#   (boot-guard tag validated-qwopus-3da1671f-w1; image resident in rootful
+#    podman) — then `systemctl restart vllm-endgame-8020`. The unit stays the
+#   serving unit; only the image moves. Callers untouched: served aliases are
+#   identical across both images.
+# [2026-07-25 CORRECTED] The former rollback line here read
+#   `systemctl disable vllm-endgame-8020 && systemctl enable --now vllm-qwen36`.
+# That does NOT work: vllm-qwen36.service is MASKED (verified `systemctl
+# is-enabled vllm-qwen36` => masked), so `enable --now` fails and the rollback
+# leaves :8020 with nothing serving. The image revert above is the real path.
 services:
   vllm-qwen36-27b:
     # [2026-07-25 prod 1:1 sync — USER-ordered] This file is generated 1:1 from
