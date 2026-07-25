@@ -728,6 +728,12 @@ KNOWN_GOOD_VLLM_PINS: tuple[str, ...] = (
     "0.23.1rc1.dev424+g3f5a1e173",   # dev424 promote + BUG-028 fix
     "0.23.1rc1.dev799+g69715823d",   # dev799 bump (validated-qwopus tag)
     "0.23.1rc1.dev1060+g9e57de719",  # dev1060 re-anchor wave (PN8/PN12/P34/P83)
+    # dev1060 + 7 cherry-picks custom wheel (club-dev1060-cherry @ 3da1671f;
+    # setuptools-scm degenerate version from a shallow CI clone — same code base
+    # as dev1060). This is the image the :8020 rollback path boots
+    # (localhost/vllm-qwen36-endgame:dev1060cherry-2204-20260713), so it must be
+    # on BOTH lanes' allowlists — it was on lane-1 only until 2026-07-25.
+    "0.1.dev1+g3da1671fc.d20260713",
     # [2026-07-25] nightly-0ba2aa35 bump — gates on :8021 (VLLM-UPDATE-20260725.md);
     # fla third_party alias + v0ba anchor generations landed this session.
     "0.23.1rc1.dev1474+g0ba2aa35a",
