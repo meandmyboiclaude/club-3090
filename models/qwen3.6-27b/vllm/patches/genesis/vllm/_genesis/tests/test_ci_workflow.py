@@ -5,13 +5,15 @@ The point of these tests is not to validate YAML syntax — it's to lock
 in the *gates* the project has committed to running on every push/PR,
 so a casual workflow edit can't silently drop one.
 
-Today the workflow runs four gates:
+Today the workflow runs five gates:
 
   1. The pytest session suite (compat/* + dispatcher_validator + PN14 +
      PN16 + B2 wiring helper + D3 ablation bench + version sanity)
   2. `lifecycle_audit_cli --quiet` (exit 1 on unknown lifecycle state)
   3. `schema_validator` (exit 1 on malformed PATCH_REGISTRY entry)
   4. `cli self-test --quiet` (exit 1 on any structural check failure)
+  5. `utils.patch_id_lint` (exit 1 on a duplicate env_flag, an unguarded
+     cross-lane patch-id collision, or a recorder-illegal id shape)
 
 If you intentionally remove one of these gates, update the test to
 match — the test is the contract.
@@ -59,6 +61,17 @@ class TestWorkflowGates:
             "vllm._genesis.compat.cli self-test" in workflow_text
             or "vllm._genesis.compat.self_test" in workflow_text
         ), "CI must run `genesis self-test` on every push/PR"
+
+    def test_runs_patch_id_lint_gate(self, workflow_text: str):
+        # 2026-07-25 patch-id collision audit: the invariant that one id
+        # names exactly one patch and one env_flag arms exactly one patch is
+        # only real if CI enforces it.
+        assert "vllm._genesis.utils.patch_id_lint" in workflow_text, (
+            "CI must run the patch-id lint on every push/PR"
+        )
+        assert "tests/test_patch_id_lint.py" in workflow_text, (
+            "CI's pytest gate must include the patch-id lint tests"
+        )
 
     def test_python_matrix_covers_310_and_312(self, workflow_text: str):
         # Drift would mean we're no longer testing the lower bound or

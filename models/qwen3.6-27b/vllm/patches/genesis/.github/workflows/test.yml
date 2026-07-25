@@ -67,7 +67,16 @@ jobs:
               vllm/_genesis/tests/test_bench_ablation.py \
               vllm/_genesis/tests/test_version.py \
               vllm/_genesis/tests/test_ci_workflow.py \
-              vllm/_genesis/tests/test_patches_md_sync.py
+              vllm/_genesis/tests/test_patches_md_sync.py \
+              vllm/_genesis/tests/test_patch_id_lint.py
+
+      - name: Patch-id lint
+        # Fourth gate (2026-07-25 patch-id collision audit). Fails on a
+        # duplicate `env_flag`, an unguarded cross-lane id collision, or an
+        # id the boot recorder cannot parse. Pure stdlib — same script an
+        # operator can run by hand before adding a patch.
+        run: |
+          python3 -m vllm._genesis.utils.patch_id_lint
 
       - name: Lifecycle audit
         # An additional gate — ensures no patch was added with an unknown
