@@ -1071,20 +1071,34 @@ def resolve_vllm_file(relative_path: str) -> Optional[str]:
     full = os.path.join(root, relative_path)
     if os.path.exists(full):
         return full
+    # Upstream relocations, aliased BOTH directions so this one shared tree
+    # serves pins on either side of a move. Mirror of _genesis/guards.py.
+    #
     # [2026-07-25] vllm#48500 moved fla ops out of model_executor into
-    # third_party/ (same files, new home). Alias BOTH directions so this one
-    # shared genesis tree serves pins on either side of the move (prod
-    # dev1060cherry = old path; nightly-0ba2aa35+ = new path).
-    _OLD_FLA = "model_executor/layers/fla/ops/"
-    _NEW_FLA = "third_party/flash_linear_attention/ops/"
-    alt = None
-    if relative_path.startswith(_OLD_FLA):
-        alt = os.path.join(root, _NEW_FLA + relative_path[len(_OLD_FLA):])
-    elif relative_path.startswith(_NEW_FLA):
-        alt = os.path.join(root, _OLD_FLA + relative_path[len(_NEW_FLA):])
-    if alt is not None and os.path.exists(alt):
-        return alt
+    #   third_party/ (same files, new home).
+    # [2026-07-26] the GDN attention module was split per-family:
+    #   model_executor/layers/mamba/gdn_linear_attn.py became
+    #   model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py. A rename, so
+    #   it is an exact-path pair rather than a prefix.
+    for old, new in _PATH_ALIASES:
+        alt = None
+        if old.endswith("/") and relative_path.startswith(old):
+            alt = os.path.join(root, new + relative_path[len(old):])
+        elif not old.endswith("/") and relative_path == old:
+            alt = os.path.join(root, new)
+        if alt is not None and os.path.exists(alt):
+            return alt
     return None
+
+
+_PATH_ALIASES = (
+    ("model_executor/layers/fla/ops/", "third_party/flash_linear_attention/ops/"),
+    ("third_party/flash_linear_attention/ops/", "model_executor/layers/fla/ops/"),
+    ("model_executor/layers/mamba/gdn_linear_attn.py",
+     "model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py"),
+    ("model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py",
+     "model_executor/layers/mamba/gdn_linear_attn.py"),
+)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -149,12 +149,138 @@ _NEW_INPROJ = (
 )
 
 
+# ── V2 shapes (2026-07-26 re-anchor) ───────────────────────────────────────
+# Same two drifts as P7, plus a third of its own. P7b is not in the ledger's
+# "target path gone" list only because it is keyed differently; it was sitting
+# in exactly the same hole.
+#
+#  1. The file was renamed to mamba/gdn/qwen_gdn_linear_attn.py. Handled by
+#     the _PATH_ALIASES entry in guards.py (both lanes).
+#  2. The `if hasattr(self, "in_proj_qkv"): ... else:` branch is gone, so the
+#     12-space call-site anchor is count==0. The 8-space pair is count==2
+#     (forward_cuda AND forward_cpu), so the num_tokens + banner prefix is
+#     load-bearing for uniqueness — patching the bare pair would put the
+#     custom op on the CPU forward path.
+#  3. The import anchor drifted independently: the single-line
+#     `from vllm.distributed import get_tensor_model_parallel_world_size`
+#     is now a parenthesised block importing `divide`. count==0 for the old
+#     literal. Sub-patch 1 is `required=True` and BOTH sub-patches must land
+#     (a half-apply NameErrors on the global at the call site), so this alone
+#     was enough to make P7b unappliable.
+_P7B_IMPORT_ANCHOR_V2 = (
+    "from vllm.distributed import (\n"
+    "    divide,\n"
+    ")\n"
+)
+
+_P7B_IMPORT_REPLACEMENT_V2 = (
+    "from vllm.distributed import (\n"
+    "    divide,\n"
+    ")\n"
+    "\n"
+    "# [Genesis P7b v7.68] Register/cache the dual-stream custom op at\n"
+    "# module import time, BEFORE any cudagraph/torch.compile context.\n"
+    "# The patched in_proj call site below reads only this cached global.\n"
+    "try:\n"
+    "    from vllm._genesis.kernels.gdn_dual_stream_customop import (\n"
+    "        dual_linear_parallel as _genesis_p7b_dual_linear_op,\n"
+    "    )\n"
+    "    _GENESIS_P7B_DUAL_LINEAR_OP = _genesis_p7b_dual_linear_op\n"
+    "except Exception:\n"
+    "    _GENESIS_P7B_DUAL_LINEAR_OP = None\n"
+)
+
+_OLD_INPROJ_V2 = (
+    "        num_tokens = hidden_states.size(0)\n"
+    "        # ============================================================\n"
+    "        # Part 1: Input Projection\n"
+    "        # ============================================================\n"
+    "        mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)\n"
+    "        ba, _ = self.in_proj_ba(hidden_states)\n"
+)
+
+_NEW_INPROJ_V2 = (
+    "        num_tokens = hidden_states.size(0)\n"
+    "        # ============================================================\n"
+    "        # Part 1: Input Projection\n"
+    "        # ============================================================\n"
+    "        # [Genesis P7b v7.68] Dual GEMM through opaque op cached at\n"
+    "        # module import time (no registration inside forward — fixes\n"
+    "        # spawn-worker dynamo trace bug class). Falls back to serial\n"
+    "        # in_proj if op cache is None (CPU build / op disabled).\n"
+    "        if _GENESIS_P7B_DUAL_LINEAR_OP is not None:\n"
+    "            mixed_qkvz, ba = _GENESIS_P7B_DUAL_LINEAR_OP(\n"
+    "                hidden_states,\n"
+    "                self.in_proj_qkvz.weight,\n"
+    "                getattr(self.in_proj_qkvz, 'bias', None),\n"
+    "                self.in_proj_ba.weight,\n"
+    "                getattr(self.in_proj_ba, 'bias', None),\n"
+    "            )\n"
+    "        else:\n"
+    "            mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)\n"
+    "            ba, _ = self.in_proj_ba(hidden_states)\n"
+)
+
+# Ordered newest-first, per sub-patch. Shapes are only ever ADDED, so the
+# older pinned images keep resolving.
+_P7B_VARIANTS = {
+    "p7b_import_time_register": (
+        (_P7B_IMPORT_ANCHOR_V2, _P7B_IMPORT_REPLACEMENT_V2),
+        (_P7B_IMPORT_ANCHOR, _P7B_IMPORT_REPLACEMENT),
+    ),
+    "p7b_inproj_via_custom_op": (
+        (_OLD_INPROJ_V2, _NEW_INPROJ_V2),
+        (_OLD_INPROJ, _NEW_INPROJ),
+    ),
+}
+
+
+def pick_anchors(text: str) -> dict[str, tuple[str, str]] | None:
+    """Resolve every sub-patch to the variant that occurs EXACTLY ONCE.
+
+    All-or-nothing on purpose: P7b's two sub-patches are both required (the
+    call site reads a global the import block defines), so resolving one and
+    letting the other soft-skip is the PN346B failure — an announced apply
+    with half the patch missing. Returns None if ANY sub-patch has no
+    uniquely-present variant.
+    """
+    out: dict[str, tuple[str, str]] = {}
+    for name, variants in _P7B_VARIANTS.items():
+        hit = next(((a, r) for a, r in variants if text.count(a) == 1), None)
+        if hit is None:
+            return None
+        out[name] = hit
+    return out
+
+
+def anchor_report(text: str) -> dict[str, list[int]]:
+    """Per-sub-patch counts of every known shape — for offline verifiers."""
+    return {name: [text.count(a) for a, _ in variants]
+            for name, variants in _P7B_VARIANTS.items()}
+
+
 def _make_patcher() -> TextPatcher | None:
     target = resolve_vllm_file(
         "model_executor/layers/mamba/gdn_linear_attn.py"
     )
     if target is None:
         return None
+    from pathlib import Path
+    try:
+        text = Path(str(target)).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    picked = pick_anchors(text)
+    if picked is None:
+        log.warning(
+            "[P7b] not every sub-patch has a uniquely-present anchor in %s — "
+            "counts %s. Both sub-patches are required; refusing to apply half "
+            "of them. Re-derive before the next boot.",
+            target, anchor_report(text),
+        )
+        return None
+    _P7B_IMPORT_A, _P7B_IMPORT_R = picked["p7b_import_time_register"]
+    _INPROJ_A, _INPROJ_R = picked["p7b_inproj_via_custom_op"]
     return TextPatcher(
         patch_name="P7b GDN dual-stream via torch.library.custom_op",
         target_file=target,
@@ -166,14 +292,14 @@ def _make_patcher() -> TextPatcher | None:
             # global at the patched call site.
             TextPatch(
                 name="p7b_import_time_register",
-                anchor=_P7B_IMPORT_ANCHOR,
-                replacement=_P7B_IMPORT_REPLACEMENT,
+                anchor=_P7B_IMPORT_A,
+                replacement=_P7B_IMPORT_R,
                 required=True,
             ),
             TextPatch(
                 name="p7b_inproj_via_custom_op",
-                anchor=_OLD_INPROJ,
-                replacement=_NEW_INPROJ,
+                anchor=_INPROJ_A,
+                replacement=_INPROJ_R,
                 required=True,
             ),
         ],

@@ -118,6 +118,12 @@ def main() -> int:
                     help="literal markers to locate in the patched install")
     ap.add_argument("--dump", default=None,
                     help="vllm-relative path to print after the replay")
+    ap.add_argument("--then", default=None,
+                    help="shell command to run INSIDE the throwaway container "
+                         "after the replay. This is how a checker that has to "
+                         "`import vllm._genesis` runs against post-boot bytes; "
+                         "the lane mounts put the genesis tree at "
+                         f"{CVLLM}/_genesis, so its own tools are already there.")
     ap.add_argument("--log", action="store_true", help="print the replay log")
     ap.add_argument("--timeout", type=int, default=1800)
     a = ap.parse_args()
@@ -156,6 +162,8 @@ def main() -> int:
             "PYEOF")
     if a.dump:
         tail_parts.append(f'echo "=== DUMP"; cat {CVLLM}/{a.dump}')
+    if a.then:
+        tail_parts.append(f'echo "=== THEN"; {a.then}; echo "=== THEN-RC=$?"')
 
     scripts = entrypoint_script_lines(COMPOSE)
     script = build_script(scripts, a.stages, "\n".join(tail_parts))
@@ -174,8 +182,16 @@ def main() -> int:
                 for p, c in where:
                     print(f"           {c}x {p}")
     if a.dump:
-        _, _, body = out.partition("=== DUMP\n")
+        body = out.partition("=== DUMP\n")[2]
+        sys.stdout.write(body.partition("=== THEN")[0] if a.then else body)
+    if a.then:
+        body = out.partition("=== THEN\n")[2]
+        body, _, tail = body.partition("=== THEN-RC=")
         sys.stdout.write(body)
+        try:
+            return int(tail.strip().splitlines()[0])
+        except (ValueError, IndexError):
+            return 1
     return 0
 
 
