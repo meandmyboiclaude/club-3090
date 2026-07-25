@@ -643,7 +643,15 @@ services:
         # 20260725.md). BACK-COMPAT: the sidecar still reads the old flag name,
         # so resolve the canonical name onto it. An operator compose that sets
         # only GENESIS_ENABLE_PN119_ROUTER is left untouched by the ':-' chain.
-        export GENESIS_ENABLE_PN119_ROUTER="${GENESIS_ENABLE_PN119_ROUTER:-${GENESIS_ENABLE_H119_LENS_ROUTER:-}}"
+        # THE DOUBLED DOLLAR IS LOAD-BEARING: compose interpolates entrypoint
+        # strings too, so a single-dollar brace expansion here is consumed by
+        # COMPOSE, never reaching the container shell (this comment must obey
+        # the same rule -- an unescaped brace expansion in it aborts `config`).
+        # podman-compose 1.6.0 only produced "1" because it non-standardly folds
+        # this service's own environment: into the substitution dict —
+        # docker-compose yields "" and a stale host export yields "0", both
+        # falsy to _truthy() in fixes/pn119_router.py. `$$` emits one literal $.
+        export GENESIS_ENABLE_PN119_ROUTER="$${GENESIS_ENABLE_PN119_ROUTER:-$${GENESIS_ENABLE_H119_LENS_ROUTER:-}}"
         python3 /fixes/patch_h119_lens_router.py
         # [PN109 RETIRED 2026-07-20 BUG-107h] the 107e diagnosis was wrong —
         # this pin's chat_completion/protocol.py carries thinking_token_budget
