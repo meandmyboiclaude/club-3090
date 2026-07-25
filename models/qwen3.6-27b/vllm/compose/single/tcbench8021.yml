@@ -652,12 +652,23 @@ services:
       # ("around Step N, check whether your answer is settled"), so continuing is
       # framed as normal rather than as an exception.
       - GENESIS_PN100_TIER_BUDGETS=0,10240,10240,10240
-      - GENESIS_PN102_STATIC_BANNER=1
+      - GENESIS_PN102_STATIC_BANNER=${GENESIS_PN102_STATIC_BANNER:-1}
       # [v5 2026-07-19, BENCH ONLY] floorless stop + progress-conditional
       # continue. v4's checkpoint delay was measured as a hard floor (0 items
       # <500 rtok vs 36 in old auto); the unconditional keep-going fed the deep
       # band (73.4% of spend @ 60% acc). Takes precedence over STATIC_BANNER.
-      - GENESIS_PN102_BANNER_V5=1
+      # [2026-07-26] PARAMETERISED. This was hardcoded, so a systemd unit
+      # drop-in could not override it and silently did nothing -- the inverse
+      # of BUG-126, where the unit beat the compose. It matters because
+      # answer_rescue.py:596-610 picks the banner as a chain
+      #   if force_v5 -> v5 ... elif BANNER_V5 -> v5 ... else -> v3
+      # and there is NO force_v3. With BANNER_V5=1 the per-request
+      # pn102_force_v5 override selects what the global already selects, so
+      # the H119 router CANNOT express "lean" and every request gets v5 --
+      # measured 42/42 while the router reported a 21% deep split.
+      # Set GENESIS_PN102_BANNER_V5=0 to make the split real: v3 for the mass,
+      # router-promoted v5 for the deep subset.
+      - GENESIS_PN102_BANNER_V5=${GENESIS_PN102_BANNER_V5:-1}
       # [PN102 prefix-order 2026-07-25, backlog #4] STATIC_FIRST reorders the
       # number-carrying banners (v3 sized / v8 / v8b) so all static text
       # precedes the per-request figures — leading banner tokens become
