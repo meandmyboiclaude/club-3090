@@ -133,6 +133,27 @@ factory stays while that pin remains in ``KNOWN_GOOD_VLLM_PINS``.
 Preflight sweeps should classify the non-matching factory as
 EXPECTED_ALTERNATE, not drift.
 
+Status correction 2026-07-26 (ledger MISSING-row pass) — RE-ANCHORED
+--------------------------------------------------------------------
+`inc.py not found` on the dev1474cherrymax-1757-20260725 boot was a PATH
+relocation, not anchor drift: upstream split
+``model_executor/layers/quantization/inc.py`` into a package and the
+scale-row allocation moved to ``inc/schemes/inc_wna16_linear.py``, where it
+is spelled with ``self.group_size`` — the **dev338** form, not the dev371
+form the 2026-06-11 correction above recorded. Counted on the boot pin
+(pristine image and live post-boot container agree):
+
+  inc/schemes/inc_wna16_linear.py       dev338 anchor × 1, dev371 × 0
+  compressed_tensors_wNa16.py           anchor × 1
+  compressed_tensors_w4a8_fp8.py        anchor × 1
+
+Because ``apply()`` bails on the inc target BEFORE reaching the other two,
+the relocation silently cost all three files, not one. Resolution now goes
+through ``_resolve_inc_target()``, which requires the candidate to carry
+exactly one anchor rather than merely exist — ``inc/inc.py`` exists and
+holds none. P91B stays default-OFF (``GENESIS_ENABLE_P91B``); this change
+makes the opt-in reach its targets instead of dying at the first one.
+
 Author backport: Sandermage(Sander) Barzov Aleksandr, Ukraine, Odessa.
 Reference PR: vllm#39460 (closed without merge, supersession chain
 #40281/#41588 also closed; fix abandoned upstream).
@@ -165,6 +186,79 @@ GENESIS_P91B_MARKER_VERSION = "v0.1.0"
 GENESIS_P91B_MARKER = (
     f"{GENESIS_P91B_MARKER_BASE} {GENESIS_P91B_MARKER_VERSION}"
 )
+
+
+# ─── inc target: package split re-anchor (2026-07-26) ─────────────────────
+#
+# Boot line on dev1474cherrymax-1757-20260725:
+#     RESULT skipped: P91B ... — inc.py not found
+# and the ledger read that as a re-anchor item without naming the cause.
+# The cause is a PATH RELOCATION, not a code change: upstream turned the
+# single module `model_executor/layers/quantization/inc.py` into a package,
+# and the scale-row allocation P91B guards moved to
+# `.../inc/schemes/inc_wna16_linear.py`. Counted on the boot pin, in BOTH
+# the pristine image and the live post-boot container:
+#
+#     quantization/inc.py                                 absent
+#     quantization/inc/inc.py                             present, 0 anchors
+#     quantization/inc/schemes/inc_wna16_linear.py        1 × dev338 anchor
+#     compressed_tensors/schemes/compressed_tensors_wNa16.py    1 × anchor
+#     compressed_tensors/schemes/compressed_tensors_w4a8_fp8.py 1 × anchor
+#
+# `resolve_vllm_file` returned None for the old path, `_make_inc_*_patcher()`
+# returned None, and apply() bailed at "inc.py not found" BEFORE touching the
+# two compressed-tensors files whose anchors were fine all along. So the
+# relocation cost all three files, not one.
+#
+# This is deliberately a P91B-local candidate list rather than an entry in
+# guards._PATH_ALIASES: the alias table models 1:1 renames, and "inc.py was
+# split into a package" is not one — a different caller asking for "inc.py"
+# most likely wants `inc/inc.py`, which is NOT where this anchor lives.
+_INC_TARGET_CANDIDATES = (
+    # post-split (>= the pin that introduced quantization/inc/)
+    "model_executor/layers/quantization/inc/schemes/inc_wna16_linear.py",
+    # pre-split
+    "model_executor/layers/quantization/inc.py",
+)
+
+
+def _resolve_inc_target() -> str | None:
+    """First candidate that exists AND carries exactly one of the anchors.
+
+    Existence alone is not enough: `inc/inc.py` exists on the boot pin and
+    holds none of them, and silently patching nothing there is precisely the
+    failure mode this ledger pass is about.
+    """
+    first_existing = None
+    for rel in _INC_TARGET_CANDIDATES:
+        path = resolve_vllm_file(rel)
+        if path is None:
+            continue
+        if first_existing is None:
+            first_existing = path
+        try:
+            with open(path, encoding="utf-8") as f:
+                content = f.read()
+        except OSError:
+            continue
+        hits = (content.count(P91B_INC_DEV338_ANCHOR)
+                + content.count(P91B_INC_DEV371_ANCHOR))
+        if hits == 1:
+            log.info("[P91B] inc target resolved to %s (1 anchor)", path)
+            return path
+        if hits > 1:
+            log.error(
+                "[P91B] %s carries %d inc anchors — ambiguous, refusing", path,
+                hits,
+            )
+            return None
+    if first_existing is not None:
+        log.warning(
+            "[P91B] inc module found (%s) but carries no known anchor — "
+            "upstream re-refactored the scale-row allocation; re-derive.",
+            first_existing,
+        )
+    return None
 
 
 # ─── inc.py: 2 cross-pin anchors (dev338 + dev371) ────────────────────────
@@ -202,7 +296,7 @@ P91B_INC_DEV371_REPLACE = (
 
 
 def _make_inc_dev338_patcher() -> TextPatcher | None:
-    target = resolve_vllm_file("model_executor/layers/quantization/inc.py")
+    target = _resolve_inc_target()
     if target is None:
         return None
     return TextPatcher(
@@ -236,7 +330,7 @@ def _make_inc_dev338_patcher() -> TextPatcher | None:
 
 
 def _make_inc_dev371_patcher() -> TextPatcher | None:
-    target = resolve_vllm_file("model_executor/layers/quantization/inc.py")
+    target = _resolve_inc_target()
     if target is None:
         return None
     return TextPatcher(
@@ -388,7 +482,14 @@ def apply() -> tuple[str, str]:
     inc_dev338 = _make_inc_dev338_patcher()
     inc_dev371 = _make_inc_dev371_patcher()
     if inc_dev338 is None and inc_dev371 is None:
-        return "skipped", "inc.py not found"
+        # Say WHICH failure this is. The bare "inc.py not found" that used to
+        # print here read as a dead target for weeks while the file was
+        # simply one directory further down (see the 2026-07-26 correction).
+        return "skipped", (
+            "no INC target carrying a P91B anchor: tried "
+            + ", ".join(_INC_TARGET_CANDIDATES)
+            + " — see the [P91B] log line for which existed and what it held"
+        )
 
     wna16 = _make_wna16_patcher()
     if wna16 is None:
