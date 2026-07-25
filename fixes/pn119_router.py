@@ -13,8 +13,44 @@ Score: xs = (x-mu)/sd; p = xs @ Vt10.T; score = concat(p,[1]) @ w.
 
 Modes (PN119_MODE): shadow (default) = log + sink only, act on nothing;
 enforce = additionally publish the decision to the ROUTES/SCORES registries
-for the PN100/PN102 holder side (the route-action consumer wiring is a
-follow-up — v1 enforce publishes, never mutates requests itself).
+(the route-action consumer wiring is a follow-up — v1 enforce publishes,
+never mutates requests itself).
+
+WHERE THE CONSUMER CANNOT LIVE (proved 2026-07-25, no boot needed —
+fixes/test_h119_route_consumer_timing.py asserts all four points)
+--------------------------------------------------------------------
+NOT in _genesis/middleware/auto_budget.py (PN100), and NOT anywhere else on
+the frontend request path. Three independent blockers, each fatal on its own:
+  1. TEMPORAL. PN100's hook is inserted at the TOP of create_chat_completion
+     (patch_pn100_auto_thinking_budget.py anchors on the Genesis PN16 block,
+     which sits immediately above upstream's "# Streaming response").
+     engine_client.generate() — and therefore prefill, and therefore the
+     observe() call that writes ROUTES — is ~4000 chars further down. The
+     budget is decided at t0; the route exists at t3.
+  2. IDENTITY. `request_id` is minted ~17 lines BELOW the hook site. At
+     budget-decision time there is no key to index ROUTES with.
+  3. ADDRESS SPACE. AsyncLLM calls EngineCoreClient.make_async_mp_client()
+     unconditionally (not gated on VLLM_ENABLE_V1_MULTIPROCESSING), so the
+     API server that runs PN100 is a DIFFERENT PROCESS from the EngineCore /
+     worker that owns this module's ROUTES dict. A correctly-timed,
+     correctly-keyed read would still see {} forever.
+Failure shape if wired there anyway: route_for() returns _FALLBACK_ROUTE for
+100% of requests — i.e. everything routes "deep", the champion cost with none
+of the saving. Strictly worse than leaving the router in shadow.
+
+WHERE IT CAN LIVE. Worker-side, same process, same req_id namespace:
+vllm/v1/sample/thinking_budget_state.py keeps a MUTABLE per-request
+"thinking_token_budget" in _state[batch_index], re-read by update_state() on
+every decode step, and gpu_input_batch.py carries req_id_to_index. A request's
+first prefill and its ROUTES write happen in the same engine step (observe()
+runs in execute_model's postprocess, after the forward); the first sampled
+token comes on the NEXT step, so a route-driven budget rewrite still binds —
+no thinking token has been produced yet.
+LIMIT: that site reaches the budget CAP only. The deep/lean treatments also
+differ by PN102 banner (v5-class vs v3-class), which is rendered into the
+PROMPT before prefill. The route is derived FROM that prefill, so banner
+selection from the route is circular and cannot be done in one pass — it needs
+a separate cheap prefill-only probe request, or nothing.
 
 PARTIAL PREFILLS / PREFIX-CACHE HITS (fixed 2026-07-25)
 -------------------------------------------------------

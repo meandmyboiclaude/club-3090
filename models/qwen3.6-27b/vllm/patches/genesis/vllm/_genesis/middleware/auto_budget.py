@@ -46,6 +46,18 @@ Env knobs:
                                      the temp-0 and forced-tool rules (512)
   GENESIS_PN100_SHAPE_MAX_TEMP       "very low" temperature ceiling for the
                                      temp-0 rule (default 0.0 = exactly zero)
+
+DO NOT wire the H119 lens-router here (settled 2026-07-25).
+--------------------------------------------------------------
+The tempting last mile — read `_genesis_pn119.ROUTES[req_id]` in _decide_mode
+and pick a deep vs lean budget — cannot work, and fails SILENTLY (every request
+reads as a miss, takes PN119_FALLBACK_ROUTE=deep, and you pay champion cost for
+zero saving). This hook runs at the TOP of create_chat_completion: before the
+prompt is rendered, before `request_id` exists, and in the API-SERVER process,
+whereas ROUTES is a module-global in the out-of-process EngineCore/worker that
+only writes it during prefill. Proof (source-level, no boot):
+fixes/test_h119_route_consumer_timing.py. The viable site is worker-side —
+vllm/v1/sample/thinking_budget_state.py — see the H119 router's docstring.
 """
 from __future__ import annotations
 
