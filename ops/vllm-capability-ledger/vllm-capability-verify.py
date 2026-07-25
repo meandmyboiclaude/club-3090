@@ -271,9 +271,21 @@ def verify_capability(cap: dict, insp, env: dict[str, str], mode: str) -> dict:
                            + (" (commented out)" if cap.get("compose_commented") else ""),
                     "flag": fstate}
 
-    # exec-discards-setattr: a lane-1 monkey-patch applied by apply_all in its
-    # own process cannot reach the exec'd server.  P39a burned months on this.
-    if kind == "monkey_patch" and cap["lane"].startswith("lane1"):
+    # exec-discards-setattr: a monkey-patch applied by apply_all in its own
+    # process cannot reach the exec'd server.  P39a burned months on this.
+    #
+    # This used to be gated on lane-1, which quietly exempted 26 lane-2 rows.
+    # The gate was wrong: `run_lane2()` is called from inside apply_all's
+    # `main()` (patches/apply_all.py:5135 -> patches/sndr_lane.py:510), i.e. in
+    # the SAME standalone process the entrypoint later replaces with
+    # `exec vllm serve`.  Verified on the boot pin that no survival hatch
+    # exists: no genesis/sndr entry point in `vllm.general_plugins`, no
+    # dist-info, no .pth, stock sitecustomize, and zero `_install_at_import`
+    # hooks in the post-boot installed vllm.  The rule is exec-specific, not
+    # lane-specific.  What DOES reach the server is only what a TEXT patch
+    # wrote into the installed files (e.g. the injected `from sndr ...`
+    # imports in cuda_graph.py and chunk_o.py).
+    if kind == "monkey_patch" and not cap["lane"].startswith("fixes"):
         return {"state": INERT,
                 "why": "setattr-only in the apply_all process; `exec vllm serve` "
                        "replaces it before a token is served (P39a class). "
