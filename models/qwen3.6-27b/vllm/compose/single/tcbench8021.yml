@@ -133,9 +133,14 @@ services:
       - VLLM_MARLIN_USE_ATOMIC_ADD=1
       # [PN105 2026-07-18] per-request NaN-logits counts (abort wiring)
       - VLLM_COMPUTE_NANS_IN_LOGITS=1
-      # [PN119 2026-07-25] lens-router: SHADOW mode (log+sink only, acts on
+      # [H119 2026-07-25] lens-router: SHADOW mode (log+sink only, acts on
       # nothing). Enforce = USER decision. PN119-BUILD-PACK.md is the spec.
-      - GENESIS_ENABLE_PN119_ROUTER=1
+      # RENAMED from "PN119" 2026-07-25 — that id already belonged to lane-2's
+      # TurboQuant k8v4 GQA kernel (GENESIS_ENABLE_PN119 below, line ~410).
+      # See ~/shared/PATCH-ID-COLLISION-AUDIT-20260725.md.
+      # The old flag GENESIS_ENABLE_PN119_ROUTER=1 still works (alias resolved
+      # in the entrypoint below); prefer the canonical name.
+      - GENESIS_ENABLE_H119_LENS_ROUTER=1
       - PN119_MODE=shadow
       - PN119_TDEEP=0.5
       - GENESIS_PN119_PROBE=/pn119/probe.npz
@@ -633,7 +638,13 @@ services:
         # Design: ~/shared/PN114-DESIGN-probe-stability-20260723.md.
         python3 /fixes/pn114_boot_ids.py
         python3 /fixes/patch_pn114_forced_span.py
-        python3 /fixes/patch_pn119_lens_router.py
+        # [H119 2026-07-25] lens-router (was "PN119" — renamed away from the
+        # lane-2 TurboQuant PN119 kernel; audit: PATCH-ID-COLLISION-AUDIT-
+        # 20260725.md). BACK-COMPAT: the sidecar still reads the old flag name,
+        # so resolve the canonical name onto it. An operator compose that sets
+        # only GENESIS_ENABLE_PN119_ROUTER is left untouched by the ':-' chain.
+        export GENESIS_ENABLE_PN119_ROUTER="${GENESIS_ENABLE_PN119_ROUTER:-${GENESIS_ENABLE_H119_LENS_ROUTER:-}}"
+        python3 /fixes/patch_h119_lens_router.py
         # [PN109 RETIRED 2026-07-20 BUG-107h] the 107e diagnosis was wrong —
         # this pin's chat_completion/protocol.py carries thinking_token_budget
         # natively (:244 -> :774); budgets were engine-enforced all along.
