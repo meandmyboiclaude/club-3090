@@ -58,7 +58,7 @@ def _placeholder_token_id() -> int:
         return -1
 
 
-def apply() -> tuple[str, str]:
+def install_runtime() -> tuple[str, str]:
     """Install the rejection_sample wrap. Idempotent.
 
     Returns:
@@ -174,3 +174,83 @@ def revert() -> bool:
 
 
 __all__ = ["apply", "is_applied", "revert", "GENESIS_PN282_MARKER"]
+
+
+# ── exec-survival (2026-07-26) ────────────────────────────────────────────
+# PN282 rebinds rejection_sample with a plain setattr, and `apply_all` -- which is where
+# lane 2 runs, inside its main() -- is the process the entrypoint replaces
+# with `exec vllm serve`. So the setattr alone reaches nothing: the row would
+# announce APPLY on every boot and the served process would never see the
+# wrapper. This is the P39a class, and wiring a registry row without fixing it
+# would just add another announce-and-do-nothing entry.
+#
+# PN282_SELF_INSTALL_ANCHOR is the END of v1/sample/rejection_sampler.py, checked for count==1
+# against POST-BOOT bytes (siblings rewrite these files, so pristine-image
+# counts answer the wrong question). The bare tail line of
+# llm_base_proposer.py is count==2, which is why the anchor carries the line
+# above it.
+from sndr.engines.vllm.patches.spec_decode.probes.self_install import (
+    make_self_install_patcher,
+)
+
+PN282_SELF_INSTALL_TARGET = "v1/sample/rejection_sampler.py"
+PN282_SELF_INSTALL_MARKER = (
+    "Genesis PN282 self-install hook (exec-survival, P39a class) v1"
+)
+PN282_SELF_INSTALL_ANCHOR = (
+    "    recovered_id = tl.minimum(recovered_id, vocab_size - 1)\n"
+    "    tl.store(output_token_ids_ptr + token_idx, recovered_id)\n"
+)
+
+
+def install_self_install_hook() -> tuple[str, str]:
+    """Text-patch the import-time hook so the wrapper survives `exec`."""
+    patcher = make_self_install_patcher(
+        target_rel=PN282_SELF_INSTALL_TARGET,
+        anchor=PN282_SELF_INSTALL_ANCHOR,
+        patch_id="PN282",
+        env_flag="SNDR_ENABLE_SPEC_DECODE_ACCEPTANCE_METRIC",
+        install_module="sndr.engines.vllm.patches.observability.pn282_spec_decode_acceptance_metric",
+        marker=PN282_SELF_INSTALL_MARKER,
+    )
+    if patcher is None:
+        return "skipped", (
+            "PN282 self-install: v1/sample/rejection_sampler.py unresolvable or the tail anchor is "
+            "not uniquely present — refusing to guess at the insertion point"
+        )
+    from sndr.kernel.text_patch import TextPatchResult
+
+    result, failure = patcher.apply()
+    if result == TextPatchResult.FAILED:
+        return "failed", (failure.reason if failure else "unknown failure")
+    if result == TextPatchResult.SKIPPED:
+        return "skipped", (failure.reason if failure else "anchor drift")
+    if result == TextPatchResult.IDEMPOTENT:
+        return "applied", "PN282 self-install hook already present"
+    return "applied", (
+        "PN282 self-install hook written into v1/sample/rejection_sampler.py — the wrapper is "
+        "re-installed on every fresh import, so it survives `exec vllm serve`"
+    )
+
+
+def apply() -> tuple[str, str]:
+    """Dispatcher entry: install for THIS process, then make it survive `exec`.
+
+    Both halves, always. The setattr half is what a `--dry-run`/in-process
+    caller sees; the text half is the only one the served process will ever
+    see, because the entrypoint replaces this process. Reporting "applied" off
+    the setattr alone is the announce-and-do-nothing shape the ledger exists
+    to catch, so a failure of the text half is surfaced in the reason string
+    rather than swallowed.
+    """
+    status, reason = install_runtime()
+    if status == "skipped":
+        return status, reason
+    hook_status, hook_reason = install_self_install_hook()
+    if hook_status != "applied":
+        return "failed", (
+            f"{reason} IN THIS PROCESS ONLY — the exec-survival hook did not "
+            f"land ({hook_reason}), so the served process will not see "
+            f"PN282"
+        )
+    return "applied", f"{reason}; {hook_reason}"

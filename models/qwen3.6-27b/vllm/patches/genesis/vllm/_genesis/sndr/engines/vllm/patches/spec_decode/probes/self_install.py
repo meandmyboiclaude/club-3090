@@ -1,0 +1,139 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Shared exec-survival hook for lane-2 setattr patches.
+
+Why this exists
+---------------
+`run_lane2()` is called from inside `apply_all`'s `main()`
+(`patches/apply_all.py` -> `patches/sndr_lane.py:run_lane2`), which is the
+standalone process the compose entrypoint then replaces with
+`exec vllm serve`. `exec` REPLACES the process image, so every `setattr` made
+during the patch pass is gone before the first token is served. Lane 2 is not
+exempt from this: it is a function call at the tail of lane 1, not a
+subprocess and not a plugin. Confirmed on the boot pin — no genesis/sndr entry
+point in `vllm.general_plugins`, no dist-info, no `.pth`, stock
+`sitecustomize`.
+
+So a module whose `apply()` only rebinds an attribute announces success every
+boot and reaches nothing. That is the P39a class (months lost) and the BUG-122
+shape. The cure is the P103 / P39a one: TEXT-PATCH a hook into the END of the
+target module, so every fresh import in every process re-runs the install.
+
+Appending at the END is load-bearing. The hook imports a sndr module that in
+turn imports the very module being patched; at end-of-module the class or
+function it needs is already bound in the partially-initialised module object
+in `sys.modules`, so the circular import resolves. A hook at the top would
+not.
+
+Usage
+-----
+    from ..probes.self_install import make_self_install_patcher
+
+    def apply():
+        patcher = make_self_install_patcher(
+            target_rel="v1/sample/rejection_sampler.py",
+            anchor=_TAIL_ANCHOR,
+            patch_id="PN282",
+            env_flag="SNDR_ENABLE_SPEC_DECODE_ACCEPTANCE_METRIC",
+            install_module=__name__,
+            marker="Genesis PN282 self-install hook (exec-survival) v1",
+        )
+"""
+from __future__ import annotations
+
+from typing import Any
+
+_TRUTHY = ("1", "true", "yes", "on")
+
+
+def render_hook(patch_id: str, env_flag: str, install_module: str,
+                marker: str) -> str:
+    """The block appended to the target module. Never raises on import."""
+    low = patch_id.lower()
+    return (
+        "\n\n"
+        "# ============================================================\n"
+        f"# [{marker}]\n"
+        "# ============================================================\n"
+        f"# `apply_all` runs in its own process and the entrypoint then does\n"
+        f"# `exec vllm serve`, which replaces it. A setattr made during the\n"
+        f"# patch pass therefore never reaches the served process ({patch_id}\n"
+        "# is lane-2, and lane 2 runs inside apply_all's own main() -- it is\n"
+        "# not exempt). This module-import-time hook re-installs the wrapper\n"
+        "# in EVERY process that imports this file, which is how the P103 /\n"
+        "# P39a exec-survival pattern works.\n"
+        "#\n"
+        "# Placed at end-of-module on purpose: the import below reaches back\n"
+        "# into this module, and by here its names are already bound in the\n"
+        "# partially-initialised module object in sys.modules.\n"
+        "#\n"
+        "# Opt-in and fail-quiet: with the flag unset this costs one env read,\n"
+        "# and any failure leaves the file importable. A probe must never be\n"
+        "# able to stop the server from booting.\n"
+        "try:\n"
+        f"    import os as _genesis_{low}_os\n"
+        f"    if _genesis_{low}_os.environ.get(\n"
+        f"        \"{env_flag}\", \"\"\n"
+        "    ).strip().lower() in (\"1\", \"true\", \"yes\", \"on\"):\n"
+        f"        from {install_module} import (\n"
+        f"            install_runtime as _genesis_{low}_install,\n"
+        f"        )\n"
+        f"        _genesis_{low}_install()\n"
+        "except Exception:  # noqa: BLE001\n"
+        "    pass\n"
+    )
+
+
+def make_self_install_patcher(
+    target_rel: str,
+    anchor: str,
+    patch_id: str,
+    env_flag: str,
+    install_module: str,
+    marker: str,
+) -> Any:
+    """Build the TextPatcher, or None when the anchor is not UNIQUE.
+
+    Counted, not merely present. `llm_base_proposer.py`'s bare tail line is
+    count==2 and appending after the wrong one would drop the hook in the
+    middle of the module, where the circular import has nothing to resolve
+    against. A non-unique anchor is refused, never guessed at.
+    """
+    from sndr.engines.vllm.detection.guards import resolve_vllm_file
+    from sndr.kernel.text_patch import TextPatch, TextPatcher
+
+    target = resolve_vllm_file(target_rel)
+    if target is None:
+        return None
+    try:
+        content = open(str(target), encoding="utf-8").read()
+    except OSError:
+        return None
+    if content.count(anchor) != 1:
+        return None
+    return TextPatcher(
+        patch_name=f"{patch_id} {target_rel} — self-install hook",
+        target_file=str(target),
+        marker=marker,
+        sub_patches=[
+            TextPatch(
+                name=f"{patch_id.lower()}_self_install",
+                anchor=anchor,
+                replacement=anchor + render_hook(
+                    patch_id, env_flag, install_module, marker),
+                required=True,
+            ),
+        ],
+        upstream_drift_markers=[marker],
+    )
+
+
+def anchor_count(target_rel: str, anchor: str) -> int:
+    """-1 when the target is unresolvable; else the anchor's count."""
+    from sndr.engines.vllm.detection.guards import resolve_vllm_file
+    target = resolve_vllm_file(target_rel)
+    if target is None:
+        return -1
+    try:
+        return open(str(target), encoding="utf-8").read().count(anchor)
+    except OSError:
+        return -1

@@ -2050,6 +2050,68 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
         "lifecycle": "experimental",
         "implementation_status": "full",
     },
+    "PN241": {
+        "title": "MTP proposer-boundary input trace (finite/norm on propose() tensors)",
+        "tier": "community",
+        "family": "spec_decode",
+        "env_flag": "GENESIS_ENABLE_PN241_MTP_TRACE",
+        "default_on": False,
+        "category": "observability",
+        "implementation_status": "full",
+        "source": "genesis_original",
+        "apply_module": "sndr.engines.vllm.patches.spec_decode.probes.pn241_mtp_trace",
+        "lifecycle": "experimental",
+        "credit": (
+            "[2026-07-26 orphan triage] Had apply() and no registry row, so "
+            "the dispatcher could never reach it. Kept rather than retired: "
+            "the hook target is live and rig-relevant — it wraps "
+            "SpecDecodeBaseProposer.propose, the boot pin ships "
+            "v1/spec_decode/llm_base_proposer.py:502 def propose, and this "
+            "rig's MTP n=3 goes through it (the boot log's 'Detected MTP "
+            "model' line comes from that file). Model-agnostic: the embedded "
+            "PN246 mapping block is getattr-guarded throughout. No live "
+            "sibling covers the proposer INPUT boundary — PN258 and PN282 "
+            "both hook rejection_sample, which is downstream of it. Writes "
+            "to /tmp/genesis_pn241_mtp_trace.log; the runtime cost when the "
+            "flag is unset is one env read at import."
+        ),
+        "upstream_pr": None,
+        "requires_patches": [],
+        "conflicts_with": [],
+        "composes_with": [],
+        "applies_to": {"model_arch": ["*"]},
+    },
+    "PN258": {
+        "title": "Oracle / self-oracle acceptance comparison (rejection_sample record-replay)",
+        "tier": "community",
+        "family": "spec_decode",
+        "env_flag": "GENESIS_ENABLE_PN258_ORACLE_ACCEPTANCE",
+        "default_on": False,
+        "category": "observability",
+        "implementation_status": "full",
+        "source": "genesis_original",
+        "apply_module": (
+            "sndr.engines.vllm.patches.spec_decode.probes.pn258_oracle_acceptance"
+        ),
+        "lifecycle": "experimental",
+        "credit": (
+            "[2026-07-26 orphan triage] Had apply() and no registry row. "
+            "Kept rather than retired: it is the only tool here that "
+            "separates DRAFTER QUALITY from VERIFIER WIRING, which is "
+            "exactly the ambiguity this rig's live acceptance lane keeps "
+            "running into (P71+PN369 consolidated relaxed acceptance, PN357, "
+            "PN390). Model-agnostic — imports only "
+            "vllm.v1.sample.rejection_sampler, present at :416 def "
+            "rejection_sample on the boot pin. Two-pass operator workflow; "
+            "SELF-ORACLE mode is a second flag "
+            "(GENESIS_ENABLE_PN258_SELF_ORACLE). Zero cost when off."
+        ),
+        "upstream_pr": None,
+        "requires_patches": [],
+        "conflicts_with": [],
+        "composes_with": ["PN282"],
+        "applies_to": {"model_arch": ["*"]},
+    },
     "PN282": {
         # dev491 drift note (2026-06-16): dev491's rejection_sample() grew
         # use_fp64_gumbel (vllm#43150), passed unconditionally by RejectionSampler
@@ -2066,10 +2128,22 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
         "env_flag": "SNDR_ENABLE_SPEC_DECODE_ACCEPTANCE_METRIC",
         "default_on": False,
         "category": "observability",
-        "implementation_status": "marker_only",
+        # [2026-07-26 orphan triage] apply_module was None and lifecycle
+        # "coordinator", crediting a boot-apply "directly from
+        # sndr_core/__init__.py". There is no sndr_core in the boot-pin image
+        # (`ls .../vllm/sndr_core` -> no such file), nothing in the tree
+        # imports the module, and it has never appeared in a boot log. So the
+        # metric has never engaged: the row was a registry entry standing in
+        # for work the dispatcher could not reach. Pointed at the real module,
+        # which now also text-patches an exec-survival hook (a setattr on
+        # rejection_sample cannot outlive `exec vllm serve`).
+        "implementation_status": "full",
         "source": "genesis_original",
-        "apply_module": None,
-        "lifecycle": "coordinator",
+        "apply_module": (
+            "sndr.engines.vllm.patches.observability."
+            "pn282_spec_decode_acceptance_metric"
+        ),
+        "lifecycle": "experimental",
         "credit": (
             "STAGE_6_HARDENING.2C registration (2026-05-28). PN282 is a "
             "production sibling of PN248's debug-log trace: wraps "
