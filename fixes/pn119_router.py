@@ -2823,6 +2823,19 @@ def _h119_route_budget(route: str, prior: int | None) -> int:
     st = _consumer_state
     if not prior or prior <= 0:
         return st["lean"] if route == ROUTE_LEAN else st["deep"]
+    # PASSTHROUGH. A multiplier of exactly 1.0 means "do not touch the budget",
+    # and it must return the caller's number UNCHANGED — not the nearest rung,
+    # which would still shave e.g. 3100 to 3072. This is the configuration the
+    # original lens-router actually ran (REPORT-prodmatrix-goal80-20260724.md
+    # §7: "top-25 -> pn102_force_v5 + AUTO BUDGETS, rest v3", recorded result
+    # "0 unders"): the route picked the BANNER and PN100 kept ownership of
+    # sizing. Expressing that as an identity here, rather than by disabling the
+    # consumer entirely, keeps the route-publication path alive — turning the
+    # consumer off stops routes reaching the API bridge, which is how a
+    # banner-only run ended up with no routes at all.
+    mult = st["lean_mult"] if route == ROUTE_LEAN else st["deep_mult"]
+    if mult == 1.0:
+        return int(prior)
     if route == ROUTE_LEAN:
         b = max(_snap_to_ladder(prior * st["lean_mult"]), st["lean_floor"])
         # The "never raise" clamp must come LAST, after the floor. Applying the
