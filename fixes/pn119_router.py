@@ -38,19 +38,24 @@ Failure shape if wired there anyway: route_for() returns _FALLBACK_ROUTE for
 100% of requests — i.e. everything routes "deep", the champion cost with none
 of the saving. Strictly worse than leaving the router in shadow.
 
-WHERE IT CAN LIVE. Worker-side, same process, same req_id namespace:
-vllm/v1/sample/thinking_budget_state.py keeps a MUTABLE per-request
+WHERE IT DOES LIVE (BUILT 2026-07-25 — see the H119 ENFORCE ROUTE CONSUMER
+section at the bottom of this file). Worker-side, same process, same req_id
+namespace: vllm/v1/sample/thinking_budget_state.py keeps a MUTABLE per-request
 "thinking_token_budget" in _state[batch_index], re-read by update_state() on
-every decode step, and gpu_input_batch.py carries req_id_to_index. A request's
-first prefill and its ROUTES write happen in the same engine step (observe()
-runs in execute_model's postprocess, after the forward); the first sampled
-token comes on the NEXT step, so a route-driven budget rewrite still binds —
-no thinking token has been produced yet.
+every decode step, and gpu_input_batch.py carries req_ids / req_id_to_index.
+The ordering is TIGHTER than first assumed: within ONE engine step,
+_update_states -> refresh_metadata -> sync_batch runs first, then
+execute_model's forward and the observe() that writes ROUTES, and only THEN
+sample_tokens -> Sampler.forward -> holder.update_state(). So the route is on
+record before the sampler that emits the request's FIRST token, not merely
+before the second one.
 LIMIT: that site reaches the budget CAP only. The deep/lean treatments also
 differ by PN102 banner (v5-class vs v3-class), which is rendered into the
 PROMPT before prefill. The route is derived FROM that prefill, so banner
 selection from the route is circular and cannot be done in one pass — it needs
-a separate cheap prefill-only probe request, or nothing.
+a separate cheap prefill-only probe request, or nothing. The shipped consumer
+is therefore the budget half of deep/lean, NOT the full treatment: do not read
+it as reproducing the 25-to-v5 / 75-to-v3 result.
 
 PARTIAL PREFILLS / PREFIX-CACHE HITS (fixed 2026-07-25)
 -------------------------------------------------------
@@ -178,6 +183,13 @@ def stats_line() -> str:
     return " ".join(f"{k}={v}" for k, v in sorted(STATS.items()))
 
 
+# The live worker-side router instance (set by maybe_create). The enforce
+# consumer needs it for two things it cannot get from the holder alone: the
+# mode (never act while the router is in shadow) and runner.input_batch, which
+# is the ONLY place batch-index -> req_id is available inside the sampler.
+ROUTER: "PN119Router | None" = None
+
+
 def route_for(req_id: str) -> str:
     """Authoritative route for `req_id` — NEVER None.
 
@@ -237,6 +249,8 @@ class PN119Router:
             # the PN119 patcher makes BOTH unpack sites tuple-tolerant while
             # every drafter/eagle3 site keeps stock flag-off behavior.
             inst = cls(runner, npz_path)
+            global ROUTER
+            ROUTER = inst
             logger.info(
                 "[PN119] router active: mode=%s tdeep=%.3f probe=%s aux layers=%s "
                 "sink=%s fallback_route=%s prefix_memo=%s(unit=%d max=%d)",
@@ -870,3 +884,248 @@ class PN119Router:
         if max_tokens and generated >= max_tokens:
             cap_hit = True
         return thinking, rtok, cap_hit
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# H119 ENFORCE ROUTE CONSUMER — the BUDGET-CAP half
+# ═══════════════════════════════════════════════════════════════════════════
+# Added 2026-07-25, default OFF behind GENESIS_ENABLE_H119_ROUTE_BUDGET=1.
+#
+# WHY HERE AND NOWHERE ELSE. The module docstring records (and
+# fixes/test_h119_route_consumer_timing.py asserts from source) that the
+# frontend PN100 site cannot host this: wrong time, no req_id yet, and — the
+# fatal one — the wrong PROCESS, since AsyncLLM always builds an out-of-process
+# EngineCore client, so ROUTES would read {} forever. This consumer runs inside
+# ``ThinkingBudgetStateHolder`` in the ENGINE/worker process, which is the same
+# process that imports this module and mutates ROUTES, and it keys off
+# ``runner.input_batch.req_ids`` — the same req_id namespace observe() writes.
+#
+# THE TIMING, per engine step (verified against gpu_model_runner.py on both
+# pinned images):
+#   1. _update_states -> input_batch.refresh_metadata()
+#        -> holder.sync_batch(batch_update)      <- h119_on_batch_add() here
+#        -> _make_sampling_metadata()            <- reads has_tracked_requests()
+#   2. execute_model: model forward -> aux unpack -> router.observe(...)
+#        -> ROUTES[req_id] is written HERE, at the end of the prefill step
+#   3. sample_tokens -> _sample -> Sampler.forward
+#        -> holder.update_state(...)             <- h119_resolve_routes() here
+#        -> holder.apply_to_logits(...)
+# So a request's route is on record BEFORE the sampler that emits its FIRST
+# token runs. think_count is still 0 at that point: lowering the cap binds in
+# full, no thinking token has escaped it.
+#
+# WHY A PROVISIONAL ENTRY IS CREATED AT STEP 1. `_make_sampling_metadata()`
+# only populates `output_token_ids` when `holder.has_tracked_requests()` is
+# true, and that is evaluated at step 1 — before the route exists. A state
+# entry conjured at step 3 would therefore be handed an EMPTY output-token list
+# for that step and be skipped by update_state()'s own `seq_idx >= len(...)`
+# guard. So a request the caller left unbudgeted gets its entry at step 1 with
+# the DEEP budget (fail-safe: the champion ceiling), and step 3 rewrites the
+# number in place once the route is known. Provisional-until-resolved, never
+# unbudgeted-then-tracked.
+#
+# WHAT THIS DOES *NOT* DO — state it plainly, do not imply parity with the
+# original deep/lean result. The PN102 v5-vs-v3 BANNER is rendered into the
+# PROMPT, pre-prefill. The route is derived FROM that prefill. Selecting the
+# banner from the route is therefore circular in a single pass and is NOT
+# attempted here. This ships the BUDGET half of the deep/lean split only; the
+# 25-to-v5 / 75-to-v3 banner half needs a separate cheap probe request, or
+# nothing. Expect a fraction of the measured saving, not all of it.
+#
+# COMPOSITION WITH PN100. PN100 sets request.thinking_token_budget on the
+# frontend, so those requests arrive with an EXPLICIT budget and this consumer
+# never touches them (counted as h119_caller_explicit). The two do not fight:
+# H119 only fills the gap where nothing else expressed an opinion.
+
+_CONSUMER_FLAG = "GENESIS_ENABLE_H119_ROUTE_BUDGET"
+
+# Marker key inside a holder state entry: True while the entry carries the
+# provisional deep budget and is still waiting for its route.
+H119_PROVISIONAL = "_h119_provisional"
+
+# Deep = the champion path's own ceiling (GENESIS_PN100_BUDGET_CEIL 10240 on
+# the continuous k260 path). It is a CEILING, not a target: champion prod
+# traffic measures ~1575 reasoning tokens/req, so on deep-routed requests this
+# binds only on runaways (the uncapped-native arm measured 2.9-3.4K rtok/req).
+_DEEP_DEFAULT = 10240
+
+# Lean = 800. Provenance and its ONE honest caveat:
+#   ~/shared/REPORT-prodmatrix-goal80-20260724.md §1 measures the v3fam arm at
+#   778 reasoning tokens/req with 24/24 (100%) consolidate parse — the cheapest
+#   arm that stayed reliable. 800 is 778 rounded onto PN100's 100-token grid.
+#   CAVEAT (do not lose this): 778 is a MEAN of a BANNER-shaped arm, not a cap
+#   that arm respected, and this consumer cannot reproduce that banner (see
+#   above). As a hard cap, 800 will force </think> on the upper part of the
+#   spend distribution rather than sit above it. That is the same mechanism
+#   PN100's own tiers already use in prod, but it is a cap, not a nudge — which
+#   is exactly why it is tunable and why the flag ships OFF.
+_LEAN_DEFAULT = 800
+
+_consumer_state: dict = {"checked": False, "on": False, "deep": _DEEP_DEFAULT,
+                         "lean": _LEAN_DEFAULT, "warned": 0}
+
+
+def _consumer_int(name: str, default: int) -> int:
+    try:
+        return int(_env(name, "") or default)
+    except ValueError:
+        logger.warning("[H119] %s is not an integer — using %d", name, default)
+        return default
+
+
+def reset_consumer_cache() -> None:
+    """Re-read the H119 consumer env on the next call (tests only)."""
+    _consumer_state.update({"checked": False, "on": False,
+                            "deep": _DEEP_DEFAULT, "lean": _LEAN_DEFAULT,
+                            "warned": 0})
+
+
+def _consumer_active() -> bool:
+    """True only when the operator asked for it AND the router can back it.
+
+    Three independent conditions, all required:
+      * GENESIS_ENABLE_H119_ROUTE_BUDGET=1 (default OFF -> next boot unchanged);
+      * a live router instance (ROUTER) — without one nothing ever writes
+        ROUTES, so every request would resolve to the fallback and the whole
+        thing would be the exact 100%-miss failure this design exists to avoid;
+      * that router in ENFORCE mode — shadow means "act on nothing", and this
+        is an act.
+    """
+    st = _consumer_state
+    if not st["checked"]:
+        st["checked"] = True
+        st["on"] = _truthy(_env(_CONSUMER_FLAG, "0"))
+        st["deep"] = _consumer_int("H119_DEEP_BUDGET", _DEEP_DEFAULT)
+        st["lean"] = _consumer_int("H119_LEAN_BUDGET", _LEAN_DEFAULT)
+        if st["on"] and st["deep"] <= 0:
+            # A non-positive deep budget would mean "install no entry", and
+            # without an entry at step 1 the LEAN route can never be applied
+            # either (see the has_tracked_requests() note above). Refuse rather
+            # than silently route nothing.
+            logger.warning("[H119] H119_DEEP_BUDGET=%d is not positive — the "
+                           "route consumer needs a provisional cap to attach "
+                           "to; consumer DISABLED", st["deep"])
+            st["on"] = False
+        if st["on"]:
+            logger.info("[H119] route->budget consumer ON: deep=%d lean=%d "
+                        "(BUDGET CAP ONLY — the PN102 banner half of the "
+                        "deep/lean split is not reachable from here)",
+                        st["deep"], st["lean"])
+    if not st["on"]:
+        return False
+    router = ROUTER
+    if router is None:
+        _bump("h119_no_router")
+        return False
+    if getattr(router, "mode", "shadow") != "enforce":
+        _bump("h119_router_not_enforce")
+        return False
+    return True
+
+
+def _consumer_warn(msg: str, exc: Exception) -> None:
+    _consumer_state["warned"] += 1
+    if _consumer_state["warned"] <= 5:
+        logger.warning("[H119] %s (%d/5 shown): %s",
+                       msg, _consumer_state["warned"], exc)
+
+
+def h119_on_batch_add(holder, index, params, prompt_tok_ids,
+                      output_tok_ids) -> bool:
+    """Called from ThinkingBudgetStateHolder.sync_batch for EVERY added row.
+
+    Returns True iff this installed a provisional state entry for `index`, in
+    which case the caller must NOT pop the row. Returns False for every other
+    case — including a caller-supplied budget, which always wins (requirement:
+    an explicit thinking_token_budget outranks the router) — so stock
+    behaviour is reached by simply doing what the unpatched code did.
+    """
+    try:
+        if getattr(params, "thinking_token_budget", None) is not None:
+            # Explicit caller budget: sync_batch's own branch already built the
+            # entry, we only record that the router deferred to it.
+            if _consumer_active():
+                _bump("h119_caller_explicit")
+            return False
+        if not _consumer_active():
+            return False
+        deep = _consumer_state["deep"]
+        entry = holder._init_state_entry(prompt_tok_ids, deep)
+        entry["output_tok_ids"] = output_tok_ids
+        entry["spec_token_ids"] = []
+        entry[H119_PROVISIONAL] = True
+        holder._state[index] = entry
+        _bump("h119_provisional_added")
+        return True
+    except Exception as e:  # noqa: BLE001 — never fail a request over routing
+        _consumer_warn("on_batch_add failed — request left unbudgeted", e)
+        return False
+
+
+def _h119_apply_budget(state: dict, budget: int) -> None:
+    """Rewrite a live state entry's thinking budget, preserving its countdown.
+
+    ``check_count_down`` is initialised to ``budget - think_count`` (think_count
+    is non-zero when the PROMPT already sits inside <think>, which is exactly
+    what the Qwen3.6 thinking-on template produces). Shifting it by the same
+    delta as the budget keeps that invariant without assuming anything about
+    how far the request has already got.
+    """
+    old = state.get("thinking_token_budget", budget)
+    delta = budget - old
+    state["thinking_token_budget"] = budget
+    state["check_count_down"] = state.get("check_count_down", old) + delta
+    # Re-evaluate the "already exhausted inside the prompt" flag the same way
+    # _init_state_entry does; only meaningful when the prompt opened <think>.
+    if state.get("continue_thinking", False):
+        state["in_end"] = (budget - state.get("think_count", 0)) <= 0
+
+
+def h119_resolve_routes(holder) -> None:
+    """Called at the top of ThinkingBudgetStateHolder.update_state.
+
+    Converts every provisional entry whose route is now on record into a real
+    routed budget. Entries whose route has not landed yet AND which have not
+    produced a token are left alone — they are still in (chunked) prefill and
+    the deep budget they carry is the fail-safe. An entry that has started
+    generating with no route on record is a genuine miss: it is committed to
+    route_for()'s defined fallback, counted, and never revisited.
+    """
+    try:
+        if not _consumer_active():
+            return
+        state_map = getattr(holder, "_state", None)
+        if not state_map:
+            return
+        pending = [(i, s) for i, s in state_map.items()
+                   if s.get(H119_PROVISIONAL)]
+        if not pending:
+            return
+        req_ids = ROUTER.runner.input_batch.req_ids
+        n = len(req_ids)
+        for index, state in pending:
+            if index >= n:
+                # Batch index outside the current batch: the row is mid-move.
+                # Leave it provisional; it resolves on a later step.
+                continue
+            req_id = req_ids[index]
+            if not req_id:
+                continue
+            route = ROUTES.get(req_id)
+            if route is None:
+                if not state.get("output_tok_ids"):
+                    # Still prefilling (chunked prefill spans steps). Expected,
+                    # not a miss — do NOT burn route_for()'s fallback here.
+                    continue
+                # Generation started with no decision on record: this request
+                # will never be routed. Commit to the defined fallback once.
+                route = route_for(req_id)
+                _bump("h119_route_missing")
+            budget = (_consumer_state["lean"] if route == ROUTE_LEAN
+                      else _consumer_state["deep"])
+            _h119_apply_budget(state, budget)
+            state[H119_PROVISIONAL] = False
+            _bump("h119_routed_lean" if route == ROUTE_LEAN
+                  else "h119_routed_deep")
+    except Exception as e:  # noqa: BLE001 — never fail a sampling step
+        _consumer_warn("resolve_routes failed — provisional budgets stand", e)

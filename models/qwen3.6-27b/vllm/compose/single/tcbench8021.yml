@@ -163,6 +163,27 @@ services:
       - PN119_RELOAD_S=60
       - PN119_THINK_START_ID=248068
       - PN119_THINK_END_ID=248069
+      # [H119 route-consumer 2026-07-25] the ENFORCE decision's BUDGET half.
+      # DEFAULT OFF. Needs BOTH this flag AND PN119_MODE=enforce; with either
+      # missing the worker-side holder behaves exactly as upstream ships it.
+      # What it does: a request the CALLER left unbudgeted gets a provisional
+      # deep cap at batch-add, rewritten to the routed cap on the first sampler
+      # call after the route lands (same engine step as its prefill, before its
+      # first token). What it does NOT do: the PN102 v5-vs-v3 BANNER is rendered
+      # into the prompt pre-prefill and the route is derived FROM that prefill,
+      # so selecting the banner from the route is circular — this is the budget
+      # half only, NOT the full deep/lean treatment. Expect a fraction of the
+      # measured saving. Counters: h119_routed_deep / h119_routed_lean /
+      # h119_route_missing in the router's stats_line().
+      # LEAN=800: v3fam measured 778 rtok/req at 100% consolidate parse
+      # (~/shared/REPORT-prodmatrix-goal80-20260724.md §1), rounded onto PN100's
+      # 100-token grid. That 778 is a MEAN of a banner-shaped arm, not a cap it
+      # respected — as a hard cap 800 truncates the upper half of the spend
+      # distribution. DEEP=10240 = GENESIS_PN100_BUDGET_CEIL, the champion path's
+      # own ceiling (binds only on runaways at ~1575 rtok/req measured).
+      - GENESIS_ENABLE_H119_ROUTE_BUDGET=${GENESIS_ENABLE_H119_ROUTE_BUDGET:-0}
+      - H119_DEEP_BUDGET=${H119_DEEP_BUDGET:-10240}
+      - H119_LEAN_BUDGET=${H119_LEAN_BUDGET:-800}
       - TRITON_CACHE_DIR=/root/.triton/cache
       # Genesis opt-ins
       # [BUG-071 CORRECTED 2026-07-14] GENESIS_PREALLOC_TOKEN_BUDGET=16384 REMOVED —

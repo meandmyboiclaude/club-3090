@@ -31,10 +31,28 @@ gpu_model_runner.py at three sites:
   C) _update_states finished-request removal -> router.on_finish(...)
      (the v2 self-training sink's generated-token label line).
 
+and text-patches thinking_budget_state.py at three more (the ENFORCE ROUTE
+CONSUMER, added 2026-07-25):
+  E) module head    -> the two lazy, never-raising shims into the sidecar.
+  F) sync_batch add loop -> h119_on_batch_add(): a request the CALLER left
+     unbudgeted gets a PROVISIONAL deep-budget state entry, so the holder is
+     tracking it by the time _make_sampling_metadata() reads
+     has_tracked_requests(). An explicit caller budget always wins and is left
+     entirely alone.
+  G) update_state head   -> h119_resolve_routes(): rewrites the provisional
+     budget to the routed one (deep/lean) once ROUTES has the decision, which
+     is BEFORE the sampler that emits the request's first token.
+
 Inert without GENESIS_ENABLE_H119_LENS_ROUTER=1 (maybe_create returns None and
-sites B/C guard on the attribute). Anchors target nightly-0ba2aa35 /
+sites B/C guard on the attribute). The E/F/G consumer needs its OWN flag on top
+of that — GENESIS_ENABLE_H119_ROUTE_BUDGET=1, default OFF — plus the router in
+PN119_MODE=enforce; with either missing the shims return immediately and the
+holder behaves exactly as upstream. Anchors target nightly-0ba2aa35 /
 club-dev1474-cherry; on older pins the anchors soft-skip (return 0) — H119
 is a NEW capability, not a restore, so absence on old pins is declared-fine.
+The two site groups are INDEPENDENT: the runner group (A-D) and the holder
+group (E-G) each soft-skip on their own, so a drift in one never disables the
+other, and a pin with no thinking_budget_state.py at all skips E-G cleanly.
 """
 import pathlib
 import shutil
@@ -43,11 +61,13 @@ import sys
 LOG = "[h119-lens-router]"
 VLLM = pathlib.Path("/usr/local/lib/python3.12/dist-packages/vllm")
 RUNNER = VLLM / "v1/worker/gpu_model_runner.py"
+TBS = VLLM / "v1/sample/thinking_budget_state.py"
 # NOT renamed (owned by the sidecar, see module docstring): the source file,
 # the installed module name and the PN119Router class keep their PN119 spelling.
 SIDECAR_SRC = pathlib.Path("/fixes/pn119_router.py")
 SIDECAR_DST = VLLM / "_genesis_pn119.py"
 MARKER = "# H119:"
+TBS_MARKER = "# H119-BUDGET:"
 
 A_OLD = (
     "        if not load_dummy_weights:\n"
@@ -130,6 +150,163 @@ D_NEW = (
 )
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Sites E/F/G — vllm/v1/sample/thinking_budget_state.py (the route CONSUMER)
+# ═══════════════════════════════════════════════════════════════════════════
+# Verified byte-identical on both pinned images (extracted with
+# `podman run --rm --entrypoint cat ... thinking_budget_state.py`):
+#   dev1060cherry-20260713          588 lines
+#   dev1474cherry-1711-20260725     582 lines
+# The two files differ ONLY inside update_state's spec-suffix strip (an old
+# draft-suffix trim the newer pin dropped), which none of these anchors span —
+# so E/F/G are literal on both pins and no content sniff is needed for them.
+# The sniff that IS needed is existence + anchor uniqueness, both checked below,
+# because a future pin may drift or drop the file entirely.
+
+E_OLD = (
+    "if TYPE_CHECKING:\n"
+    "    from vllm.config.reasoning import ReasoningConfig\n"
+)
+E_NEW = (
+    "if TYPE_CHECKING:\n"
+    "    from vllm.config.reasoning import ReasoningConfig\n"
+    "\n"
+    "\n"
+    "# H119-BUDGET: enforce-route consumer shims. The lens router publishes a\n"
+    "# per-request deep/lean decision into vllm._genesis_pn119.ROUTES from the\n"
+    "# SAME process and the SAME req_id namespace as this holder; these two\n"
+    "# calls are the only place that decision is allowed to touch a request.\n"
+    "# Resolution is cached once: False = sidecar absent, never retried, so a\n"
+    "# boot without the H119 sidecar pays one ImportError total, not one per\n"
+    "# sampling step. Neither shim can raise into sampling.\n"
+    "_H119_MOD: Any = None\n"
+    "\n"
+    "\n"
+    "def _h119() -> Any:\n"
+    "    global _H119_MOD\n"
+    "    if _H119_MOD is None:\n"
+    "        try:\n"
+    "            from vllm import _genesis_pn119 as _mod\n"
+    "\n"
+    "            _H119_MOD = _mod\n"
+    "        except Exception:\n"
+    "            _H119_MOD = False\n"
+    "    return _H119_MOD or None\n"
+    "\n"
+    "\n"
+    "def _h119_on_add(holder, index, params, prompt_tok_ids,\n"
+    "                 output_tok_ids) -> bool:\n"
+    "    \"\"\"True iff H119 installed a provisional entry (caller must not pop).\"\"\"\n"
+    "    mod = _h119()\n"
+    "    if mod is None:\n"
+    "        return False\n"
+    "    try:\n"
+    "        return bool(mod.h119_on_batch_add(holder, index, params,\n"
+    "                                          prompt_tok_ids, output_tok_ids))\n"
+    "    except Exception:\n"
+    "        return False\n"
+    "\n"
+    "\n"
+    "def _h119_resolve(holder) -> None:\n"
+    "    mod = _h119()\n"
+    "    if mod is None:\n"
+    "        return\n"
+    "    try:\n"
+    "        mod.h119_resolve_routes(holder)\n"
+    "    except Exception:\n"
+    "        pass\n"
+)
+
+# Site F — sync_batch's add loop. The ONLY change to stock semantics is that
+# the unconditional `self._state.pop(index, None)` on the no-caller-budget path
+# now runs only when H119 declined the row. With the flag off _h119_on_add()
+# always returns False, so the pop always runs: behaviour identical to stock.
+F_OLD = (
+    "        for index, params, prompt_tok_ids, output_tok_ids in batch_update.added:\n"
+    "            thinking_token_budget = params.thinking_token_budget\n"
+    "            if thinking_token_budget is not None:\n"
+    "                self._state[index] = self._init_state_entry(\n"
+    "                    prompt_tok_ids, thinking_token_budget\n"
+    "                )\n"
+    "                self._state[index][\"output_tok_ids\"] = output_tok_ids\n"
+    "                self._state[index][\"spec_token_ids\"] = []\n"
+    "            else:\n"
+    "                self._state.pop(index, None)\n"
+)
+F_NEW = (
+    "        for index, params, prompt_tok_ids, output_tok_ids in batch_update.added:\n"
+    "            thinking_token_budget = params.thinking_token_budget\n"
+    "            if thinking_token_budget is not None:\n"
+    "                self._state[index] = self._init_state_entry(\n"
+    "                    prompt_tok_ids, thinking_token_budget\n"
+    "                )\n"
+    "                self._state[index][\"output_tok_ids\"] = output_tok_ids\n"
+    "                self._state[index][\"spec_token_ids\"] = []\n"
+    "                # H119-BUDGET: an EXPLICIT caller budget outranks the\n"
+    "                # router unconditionally — this call only counts it.\n"
+    "                _h119_on_add(self, index, params, prompt_tok_ids,\n"
+    "                             output_tok_ids)\n"
+    "            elif not _h119_on_add(self, index, params, prompt_tok_ids,\n"
+    "                                  output_tok_ids):\n"
+    "                # H119-BUDGET: unchanged stock path. H119 returns False\n"
+    "                # whenever it is off, unavailable, or declined the row.\n"
+    "                self._state.pop(index, None)\n"
+)
+
+# Site G — the head of update_state, which the sampler calls once per step.
+# The resolve MUST sit above the `not self._state` guard's sibling so that it
+# runs before _update_think_state consumes the budget on this very step; it is
+# placed immediately after the guard because a provisional entry is itself a
+# _state entry, so an empty _state has nothing to resolve by construction.
+G_OLD = (
+    "        \"\"\"Refresh output/spec from sampling rows and recompute think state.\"\"\"\n"
+    "        if not self.is_enabled or not self._state:\n"
+    "            return\n"
+)
+G_NEW = (
+    "        \"\"\"Refresh output/spec from sampling rows and recompute think state.\"\"\"\n"
+    "        if not self.is_enabled or not self._state:\n"
+    "            return\n"
+    "        # H119-BUDGET: promote provisional budgets to their routed value.\n"
+    "        # The route was written into ROUTES at the end of the PREFILL step,\n"
+    "        # i.e. earlier in this same engine step, and no token has been\n"
+    "        # sampled for the request yet — so the cap binds from token 0.\n"
+    "        _h119_resolve(self)\n"
+)
+
+
+def _patch_thinking_budget_state() -> str:
+    """Apply sites E/F/G. Returns a one-line status for the caller to print.
+
+    NEVER fails the boot: a missing file, a drifted anchor or an unwritable
+    target all degrade to "consumer not wired", which leaves the holder exactly
+    as upstream ships it. The consumer is a new capability, not a restore.
+    """
+    if not TBS.exists():
+        return ("soft-skip E-G: thinking_budget_state.py absent on this pin — "
+                "route consumer NOT wired (holder behaviour is upstream's)")
+    try:
+        text = TBS.read_text(encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        return f"soft-skip E-G: unreadable ({e}) — route consumer NOT wired"
+    if TBS_MARKER in text:
+        return "E-G already applied (idempotent)"
+    sites = (("E-shims", E_OLD, E_NEW), ("F-add", F_OLD, F_NEW),
+             ("G-resolve", G_OLD, G_NEW))
+    missing = [name for name, old, _ in sites if text.count(old) != 1]
+    if missing:
+        return (f"soft-skip E-G: anchor(s) {missing} not unique on this pin — "
+                f"route consumer NOT wired (holder behaviour is upstream's)")
+    for _name, old, new in sites:
+        text = text.replace(old, new, 1)
+    try:
+        TBS.write_text(text, encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        return f"soft-skip E-G: write failed ({e}) — route consumer NOT wired"
+    return ("applied 3/3 consumer sites (E=shims F=add G=resolve); inert "
+            "unless GENESIS_ENABLE_H119_ROUTE_BUDGET=1 AND PN119_MODE=enforce")
+
+
 def main() -> int:
     if not RUNNER.exists():
         print(f"{LOG} FATAL: {RUNNER} not present", file=sys.stderr)
@@ -139,6 +316,9 @@ def main() -> int:
     except OSError as e:
         print(f"{LOG} FATAL: sidecar install failed: {e}", file=sys.stderr)
         return 1
+    # The holder group is patched independently of the runner group so a drift
+    # in one never silently disables the other.
+    print(f"{LOG} {_patch_thinking_budget_state()}")
     text = RUNNER.read_text(encoding="utf-8")
     if MARKER in text:
         print(f"{LOG} already applied (idempotent)")
