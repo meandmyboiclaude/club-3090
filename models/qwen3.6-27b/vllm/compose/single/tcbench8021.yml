@@ -141,8 +141,14 @@ services:
       # The old flag GENESIS_ENABLE_PN119_ROUTER=1 still works (alias resolved
       # in the entrypoint below); prefer the canonical name.
       - GENESIS_ENABLE_H119_LENS_ROUTER=1
-      - PN119_MODE=shadow
-      - PN119_TDEEP=0.5
+      # [2026-07-25] made unit-overridable so mode/threshold can be flipped by a
+      # drop-in without editing this file. Defaults keep today's shadow behaviour.
+      # TDEEP 0.495 = the calibrated 30/100-deep point on the TAP-TRAINED probe
+      # scale (LOO band 0.4395-0.5504, precision 0.83 / recall 0.71). The old 0.5
+      # belonged to the HF-offline scale and is NOT transferable — the two runtimes
+      # sit ~0.14 apart, which is wider than the whole 25-35% routing band.
+      - PN119_MODE=${PN119_MODE:-shadow}
+      - PN119_TDEEP=${PN119_TDEEP:-0.495}
       - GENESIS_PN119_PROBE=/pn119/probe.npz
       - PN119_SINK=/pn119-sink
       # [PN119-v2 2026-07-25] self-training loop knobs (BUILD-PACK §v2):
