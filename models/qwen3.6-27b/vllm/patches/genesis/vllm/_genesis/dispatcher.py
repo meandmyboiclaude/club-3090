@@ -1878,7 +1878,7 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
         "default_on": True,
         "lifecycle": "legacy",
         "category": "memory_pool",
-        "credit": "Pre-dispatcher legacy patch. Persistent pool for FLA chunk_scaled_dot_kkt's A matrix to avoid per-step allocation in GDN backward.",
+        "credit": "Pre-dispatcher legacy patch. Persistent pool for FLA chunk_scaled_dot_kkt's A matrix to avoid per-step allocation in GDN backward. [2026-07-25] Until now this installed via setattr ONLY, which the compose entrypoint's `exec vllm serve` discards — so it logged applied every boot and did nothing in the serving process (same class as P103, club-3090#19). Fixed with P103's sanctioned mechanism: a text-patched module-import-time self-install hook on chunk_scaled_dot_kkt.py, behind the SEPARATE opt-in sub-flag GENESIS_ENABLE_P39A_SELFINSTALL (default OFF — with it unset the target file is byte-identical and behaviour is exactly as before). The same commit fixes the wrapper dropping upstream's CAST_DOT_TO_K_DTYPE constexpr, which is REQUIRED on the dev1474cherry pins and would TypeError at the first GDN prefill the moment the hook went live. Live behaviour unverified until a boot with the flag on.",
     },
     "P40": {
         "title": "TurboQuant GQA-grouped decode stage1 (opt-in)",

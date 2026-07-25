@@ -215,12 +215,16 @@ def test_wrapper_signature_accepts_pn354_use_exp2():
 
     The lane-1 copy had drifted and lacked the kwarg — it would have
     raised TypeError at the first forward if P39a ever went live.
+
+    [2026-07-25] the `_KKT_HAS_EXP2` single-flag probe was generalised to a
+    declared-arg-name set so it also covers upstream's CAST_DOT_TO_K_DTYPE
+    (required on the dev1474cherry pins). Behavioural coverage of the probe
+    now lives in test_p39a_self_install.py; this stays a cheap source guard.
     """
-    import inspect
     src = _TARGET.read_text(encoding="utf-8")
     assert "use_exp2=False," in src
-    assert 'if _KKT_HAS_EXP2[0] else {}' in src
-    del inspect
+    assert '_kkt_extra["USE_EXP2"] = bool(use_exp2)' in src
+    assert '"USE_EXP2" in _declared' in src
 
 
 def _main() -> int:
