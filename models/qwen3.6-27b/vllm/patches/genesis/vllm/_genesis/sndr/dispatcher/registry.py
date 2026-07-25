@@ -8672,8 +8672,12 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
             "measured +16.5–27.2 % TPS on A100/H100 with GQA-ratio "
             "∈ {4, 8, 24}. Our 27B + 35B both run GQA-ratio 8 so the "
             "expected win is at the high end on Ampere SM 8.6. Applied "
-            "via bundled diff + `patch` subprocess with md5 pre-patch "
-            "guard; self-retires on drift."
+            "via a content-sniffed TextPatcher (2026-07-25; was a bundled "
+            "diff + `patch` subprocess with an md5 pre-patch guard, which "
+            "the wheel-v2 KVQ squash rejected). Dual-pin: the stage-1 "
+            "launch anchor AND the rewritten scalar call are spliced with "
+            "the KVQ kwargs together or not at all. Self-retires when "
+            "_tq_grouped_decode_stage1 appears without our vendor tag."
         ),
         "upstream_pr": 40792,
         "upstream_pr_relationship": "backport",
