@@ -208,6 +208,17 @@ PN346B_ANCHOR_NEW = (
 # topology rather than an IndexError. required=False so a missing
 # FA-truncation anchor (e.g. a future refactor) soft-skips and the
 # load-bearing Part-A clamp still lands.
+#
+# [2026-07-25 re-anchor] The V1 shape below is count==0 on EVERY pinned image
+# (dev1060cherry-20260713, wheel v1 dev1474cherry-1711, wheel v2
+# dev1474cherrymax-1757) — upstream replaced the naked
+# ``hit_length // first_group.spec.block_size`` with a DCP/PCP-aware
+# ``cdiv(hit_length, self.single_type_managers[...].block_size)`` and added a
+# ``hit_length_by_group[group_id] = hit_length`` bookkeeping line. So this belt
+# was never landing, on any pin — it was not a wheel-v2 regression. The V2
+# shape is byte-identical and count==1 on all three images. Both shapes are
+# kept and CONTENT-SNIFFED by ``_pick_anchor`` (P89 6edf8386 / P101 92647851
+# precedent); the tree is DUAL-PIN, so nothing is rewritten in place.
 PN346B_MAMBA_TRIM_ANCHOR = (
     "        # Truncate full attention blocks to final hit_length (if present)\n"
     "        first_group = self.attention_groups[0]\n"
@@ -247,6 +258,86 @@ PN346B_MAMBA_TRIM_REPLACE = (
     "                if (blks := hit_blocks_by_group[group_id]) is not None:\n"
     "                    del blks[num_blocks:]\n"
 )
+
+
+# V2 shape — the DCP/PCP-aware truncation upstream actually ships on all three
+# pinned images (count==1 on dev1060cherry-20260713, wheel v1 and wheel v2).
+PN346B_MAMBA_TRIM_ANCHOR_V2 = (
+    "        # Truncate full attention blocks to final hit_length (if present)\n"
+    "        first_group = self.attention_groups[0]\n"
+    "        if isinstance(first_group.spec, FullAttentionSpec):\n"
+    "            group_block_size = self.single_type_managers[\n"
+    "                first_group.group_ids[0]\n"
+    "            ].block_size\n"
+    "            num_blocks = cdiv(hit_length, group_block_size)\n"
+    "            for group_id in first_group.group_ids:\n"
+    "                if (blks := hit_blocks_by_group[group_id]) is not None:\n"
+    "                    del blks[num_blocks:]\n"
+    "                    hit_length_by_group[group_id] = hit_length\n"
+)
+
+# The mirror follows the V2 full-attention branch LINE FOR LINE: the manager's
+# block size (DCP/PCP shard each block across ranks, so the manager's effective
+# block size can exceed the spec's) and cdiv, not the PR's raw
+# ``hit_length // spec.block_size``. cdiv matters here: MambaManager only ever
+# reports block-aligned hits, so cdiv == floor in the normal case, but on a
+# sub-block hit_length floor would DELETE the whole SSM state block and resume
+# a request with no Mamba state (the boots-clean-but-garbage class) while cdiv
+# keeps it. ``hit_length_by_group`` is mirrored for bookkeeping symmetry only —
+# it is dead after this block (nothing below reads it).
+PN346B_MAMBA_TRIM_REPLACE_V2 = (
+    PN346B_MAMBA_TRIM_ANCHOR_V2
+    + "\n"
+    "        # [Genesis PN346B Part-B belt vendor of vllm#46281] Mirror the\n"
+    "        # full-attention truncation above for the Mamba group on a simple\n"
+    "        # hybrid. FullAttentionManager drops its last hit block on the\n"
+    "        # EAGLE look-ahead path but MambaManager does not, so the two block\n"
+    "        # lists can be left misaligned; trim the Mamba group to the final\n"
+    "        # hit_length too. Defensive belt (APC OFF on our hybrid, and the\n"
+    "        # manager-half walk-back already handles the common case) that\n"
+    "        # survives a manager-half anchor drift-skip. Guarded so it is a\n"
+    "        # strict no-op on any non-simple-hybrid / non-Mamba topology.\n"
+    "        if (\n"
+    "            is_simple_hybrid\n"
+    "            and len(self.attention_groups) > 1\n"
+    "            and isinstance(self.attention_groups[1].spec, MambaSpec)\n"
+    "        ):\n"
+    "            second_group = self.attention_groups[1]\n"
+    "            second_block_size = self.single_type_managers[\n"
+    "                second_group.group_ids[0]\n"
+    "            ].block_size\n"
+    "            num_blocks = cdiv(hit_length, second_block_size)\n"
+    "            for group_id in second_group.group_ids:\n"
+    "                if (blks := hit_blocks_by_group[group_id]) is not None:\n"
+    "                    del blks[num_blocks:]\n"
+    "                    hit_length_by_group[group_id] = hit_length\n"
+)
+
+
+def _pick_anchor(
+    target_path: str,
+    candidates: tuple[tuple[str, str], ...],
+) -> tuple[str, str]:
+    """Content-sniff the target and return the (anchor, replacement) pair
+    whose anchor is actually present.
+
+    DUAL-PIN safety: no anchor is ever rewritten in place — every historical
+    shape stays in ``candidates`` so the older pinned images
+    (dev1060cherry-20260713, wheel v1) keep booting. A read failure degrades
+    to the FIRST candidate, i.e. an ordinary anchor miss / soft skip, never a
+    boot kill. Mirrors P89 (6edf8386) and P101 (92647851 / 748d2a0b).
+    """
+    from pathlib import Path
+
+    try:
+        # resolve_vllm_file() returns a str, not a Path.
+        text = Path(str(target_path)).read_text(encoding="utf-8")
+    except Exception:  # noqa: BLE001 — a sniff failure must degrade, not kill
+        return candidates[0]
+    for anchor, replacement in candidates:
+        if text.count(anchor) == 1:
+            return anchor, replacement
+    return candidates[0]
 
 
 # ── Upstream drift markers ────────────────────────────────────────────
@@ -294,6 +385,14 @@ def _make_patcher() -> TextPatcher | None:
     target = resolve_vllm_file("v1/core/kv_cache_coordinator.py")
     if target is None:
         return None
+    trim_anchor, trim_replace = _pick_anchor(
+        str(target),
+        (
+            # V2 first: the shape live on all three pinned images today.
+            (PN346B_MAMBA_TRIM_ANCHOR_V2, PN346B_MAMBA_TRIM_REPLACE_V2),
+            (PN346B_MAMBA_TRIM_ANCHOR, PN346B_MAMBA_TRIM_REPLACE),
+        ),
+    )
     return TextPatcher(
         patch_name=(
             "PN346B vllm/v1/core/kv_cache_coordinator.py — "
@@ -316,8 +415,8 @@ def _make_patcher() -> TextPatcher | None:
             # with PN346's manager walk-back (this is the post-loop belt).
             TextPatch(
                 name="pn346b_mamba_group_post_trim",
-                anchor=PN346B_MAMBA_TRIM_ANCHOR,
-                replacement=PN346B_MAMBA_TRIM_REPLACE,
+                anchor=trim_anchor,
+                replacement=trim_replace,
                 required=False,
             ),
         ],
