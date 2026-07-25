@@ -54,9 +54,45 @@ SAFETY MODEL
 
 Status: opt-in via `GENESIS_ENABLE_P82=1`. Default OFF.
 
+================================================================
+P82 HAS NEVER APPLIED — READ BEFORE THE NEXT BOOT
+================================================================
+
+`GENESIS_ENABLE_P82=1` has been set in `compose/single/tcbench8021.yml`
+(line 386), the dispatcher has logged `APPLY P82` every boot, and the patch
+has written NOTHING, for two independent reasons — both fixed 2026-07-26:
+
+  1. `sample_recovered_tokens_kernel` was listed as an upstream drift
+     marker. It is the ORIGINAL vLLM kernel (since #14930), not evidence of
+     anything, so the drift check fired on every image ever built and the
+     boot log read "upstream may have absorbed this fix". Removed.
+  2. The anchor was the pre-#45369 DIVISION form. The build line carries
+     `01d50ae77 Cherry #45369`, which rewrote it to a multiplication, so the
+     anchor was count == 0 on the boot pin. Re-anchored (see P82_ANCHOR_FORMS).
+
+**Consequence: the first boot after this change is the first time P82 would
+actually bias acceptance.** `GENESIS_ENABLE_P82=1` has been in the compose
+the whole time the patch was inert, so it never encoded a decision to ship a
+biased sampler — it encoded "this is broken and harmless". Turning years of
+that into live behaviour on the next unattended restart is not a re-anchor,
+it is a silent quality change, and this file's own SAFETY MODEL says the
+OR-clause does not ship without `genesis_quality_harness.py` ≥ 30/31 plus a
+TPS sweep.
+
+So the re-anchor lands behind a SECOND, explicit acknowledgement:
+
+    GENESIS_P82_ACK_UNVALIDATED=1
+
+Without it P82 resolves and COUNTS its anchor (so drift is still detected and
+still fails loud) and then declines to write, saying exactly that. With it,
+P82 applies. One env var arms it; nothing about the fix is hidden behind it.
+
 Tunable knobs
 -------------
 - `GENESIS_ENABLE_P82` (default unset/0): master switch
+- `GENESIS_P82_ACK_UNVALIDATED` (default unset/0): required second gate —
+  acknowledges that the biased OR-clause has never been validated on this rig
+  because it has never once applied (see above)
 - `GENESIS_P82_THRESHOLD_SINGLE` (default 0.3): float in [0.0, 1.0]
   - 0.0 → disables the OR clause (equivalent to OFF, but with overhead)
   - 0.2-0.3 → SGLang typical range, light bias
@@ -197,16 +233,90 @@ def _read_min_draft_pos() -> int:
 GENESIS_P82_DRAFT_PROB_EPS = 1e-20
 
 
-# ─── Anchor: 3-line block including upstream NOTE comment for uniqueness ───
+# ─── Second gate: acknowledge the OR-clause has never been validated here ──
 
-P82_OLD = (
+_ENV_ACK = "GENESIS_P82_ACK_UNVALIDATED"
+
+
+def _ack_unvalidated() -> bool:
+    return os.environ.get(_ENV_ACK, "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _select_anchor_label(patcher) -> str | None:
+    """Which anchor generation the built patcher ended up carrying."""
+    for sp in patcher.sub_patches:
+        for anchor, _v, label in P82_ANCHOR_FORMS:
+            if sp.anchor == anchor:
+                return label
+    return None
+
+
+# ─── Anchor: 3-line block including upstream NOTE comment for uniqueness ───
+#
+# TWO generations, newest first. Selected by content sniff in
+# `_select_anchor()`; the chosen form is asserted count == 1 before use.
+#
+# v3 (2026-07-26 re-anchor): the build line carries `01d50ae77 Cherry #45369:
+# avoid materializing target probs in spec rejection sampling`, which
+# rewrote the acceptance test from a DIVISION to a MULTIPLICATION:
+#     target_prob / draft_prob >= uniform_prob
+#   → target_prob >= uniform_prob * draft_prob
+# P82_OLD_V2 is therefore count == 0 on the boot pin
+# dev1474cherrymax-1757-20260725 (counted in both the pristine image and the
+# live post-boot container). P82 has never applied on this pin.
+#
+# The v3 vanilla clause keeps upstream's `draft_prob > 0` rather than v2's
+# `>= 1e-20` tightening: that epsilon existed solely to keep the DIVISION out
+# of the fp32 denormal zone, and #45369 removed the division. Re-introducing
+# the epsilon on the multiply form would reject draft_prob in (0, 1e-20) for
+# no numerical reason — a silent behaviour delta versus vanilla.
+
+P82_OLD_V3 = (
+    "                # NOTE(woosuk): While the draft probability should never be 0,\n"
+    "                # we check it to avoid NaNs. If it happens to be 0, we reject.\n"
+    "                accepted = draft_prob > 0 and target_prob >= uniform_prob * draft_prob\n"
+)
+
+P82_OLD_V2 = (
     "                # NOTE(woosuk): While the draft probability should never be 0,\n"
     "                # we check it to avoid NaNs. If it happens to be 0, we reject.\n"
     "                accepted = draft_prob > 0 and target_prob / draft_prob >= uniform_prob\n"
 )
 
+# (anchor, vanilla-clause expression, generation label). Order = preference.
+P82_ANCHOR_FORMS = (
+    (P82_OLD_V3, "draft_prob > 0 and target_prob >= uniform_prob * draft_prob", "v3/#45369-multiply"),
+    (P82_OLD_V2, "draft_prob >= {eps} and target_prob / draft_prob >= uniform_prob", "v2/pre-#45369-divide"),
+)
 
-def _build_replacement(threshold: float, min_draft_pos: int = 0) -> str:
+# Kept for callers/tests that still import the old name.
+P82_OLD = P82_OLD_V2
+
+
+def _select_anchor(content: str) -> tuple[str, str, str] | None:
+    """Pick the anchor generation present in `content`, COUNTED.
+
+    Returns (anchor, vanilla_expr, label) or None. A form that appears more
+    than once is refused outright rather than patched at an arbitrary site —
+    counting is the whole point of this function.
+    """
+    for anchor, vanilla, label in P82_ANCHOR_FORMS:
+        n = content.count(anchor)
+        if n == 1:
+            return anchor, vanilla, label
+        if n > 1:
+            log.error(
+                "[P82] anchor form %s appears %d times — refusing to patch "
+                "an ambiguous site", label, n,
+            )
+            return None
+    return None
+
+
+def _build_replacement(threshold: float, min_draft_pos: int = 0,
+                       vanilla_expr: str | None = None) -> str:
     """Build the Triton-side replacement block.
 
     v2 improvements (2026-04-30):
@@ -233,6 +343,19 @@ def _build_replacement(threshold: float, min_draft_pos: int = 0) -> str:
     # round-trip safe, sufficient for Triton constexpr coercion).
     threshold_literal = repr(float(threshold))
     eps_literal = repr(float(GENESIS_P82_DRAFT_PROB_EPS))
+    # The vanilla half must be whatever this pin's kernel actually says, so
+    # P82 only ever ADDS the OR-clause and never silently reverts an upstream
+    # rewrite of the rejection test itself.
+    if vanilla_expr is None:
+        vanilla_expr = P82_ANCHOR_FORMS[1][1]
+    vanilla_clause = vanilla_expr.format(eps=eps_literal)
+    eps_note = (
+        f"                #   - draft_prob guard tightened: > 0  →  >= {eps_literal}\n"
+        "                #     (fp32 denormal-zone protection; prevents inf/NaN ratio)\n"
+        if "{eps}" in vanilla_expr or eps_literal in vanilla_clause else
+        "                #   - vanilla clause taken verbatim from this pin's kernel\n"
+        "                #     (upstream #45369 multiply form — no division to guard)\n"
+    )
 
     # Build the threshold-clause guard. When min_draft_pos == 0 (default)
     # we omit the position guard entirely so the kernel disasm stays
@@ -261,15 +384,14 @@ def _build_replacement(threshold: float, min_draft_pos: int = 0) -> str:
         "                # Threshold baked from env GENESIS_P82_THRESHOLD_SINGLE at server start.\n"
         "                #\n"
         "                # v2 (2026-04-30) hardening:\n"
-        f"                #   - draft_prob guard tightened: > 0  →  >= {eps_literal}\n"
-        "                #     (fp32 denormal-zone protection; prevents inf/NaN ratio)\n"
-        "                #   - target_prob > 0 explicit (defensive vs malformed softmax)\n"
+        + eps_note
+        + "                #   - target_prob > 0 explicit (defensive vs malformed softmax)\n"
         + (f"                #   - min_draft_pos = {min_draft_pos} (OR-clause restricted)\n"
            if min_draft_pos > 0 else "")
         + "                # ════════════════════════════════════════════════════════════════\n"
         + position_doc
         + "                _genesis_p82_vanilla = (\n"
-        f"                    draft_prob >= {eps_literal} and target_prob / draft_prob >= uniform_prob\n"
+        f"                    {vanilla_clause}\n"
         "                )\n"
         f"                _genesis_p82_threshold = (\n"
         f"                    target_prob > 0 and target_prob >= {threshold_literal}{position_guard}\n"
@@ -282,10 +404,27 @@ def _make_patcher(threshold: float, min_draft_pos: int = 0) -> TextPatcher | Non
     target = resolve_vllm_file("v1/sample/rejection_sampler.py")
     if target is None:
         return None
+    try:
+        with open(target, encoding="utf-8") as f:
+            content = f.read()
+    except OSError as e:
+        log.error("[P82] cannot read %s: %s", target, e)
+        return None
+    picked = _select_anchor(content)
+    if picked is None:
+        log.error(
+            "[P82] NO anchor generation matches %s — the acceptance test has "
+            "been rewritten again. P82 is INERT this boot; re-derive the "
+            "anchor before claiming the OR-clause is in force.", target,
+        )
+        return None
+    anchor, vanilla_expr, label = picked
+    log.info("[P82] anchor generation %s selected (count == 1)", label)
     return TextPatcher(
         patch_name=(
             "P82 v2 v1/sample/rejection_sampler.py — SGLang threshold_single "
-            f"OR-clause (threshold={threshold:.4f}, min_draft_pos={min_draft_pos})"
+            f"OR-clause (threshold={threshold:.4f}, min_draft_pos={min_draft_pos}, "
+            f"anchor={label})"
         ),
         target_file=str(target),
         # B3 fix: marker now embeds threshold + min_draft_pos so a config
@@ -294,8 +433,9 @@ def _make_patcher(threshold: float, min_draft_pos: int = 0) -> TextPatcher | Non
         sub_patches=[
             TextPatch(
                 name="p82_threshold_or_clause",
-                anchor=P82_OLD,
-                replacement=_build_replacement(threshold, min_draft_pos),
+                anchor=anchor,
+                replacement=_build_replacement(threshold, min_draft_pos,
+                                               vanilla_expr),
                 required=True,
             ),
         ],
@@ -322,16 +462,25 @@ def _make_patcher(threshold: float, min_draft_pos: int = 0) -> TextPatcher | Non
             # vllm/config/speculative.py marker for the new SpecVerifyMethod
             # field added by #40819:
             "SpecVerifyMethod",
-            # PR #41258 (masterFoad, OPEN 2026-04-30): "Lazy recovery
-            # evaluation for spec rejection sampling" — removes the
-            # eager `sample_recovered_tokens_kernel` (full-vocab scan
-            # for ALL draft positions) and computes recovered tokens
-            # lazily inside `rejection_random_sample_kernel` only at
-            # the rejected position. If this lands, the kernel that
-            # P82's baked threshold reads from is restructured —
-            # P82 will need a redesign around the lazy path. Watch
-            # for the kernel signature change:
-            "sample_recovered_tokens_kernel",
+            # PR #41258 (masterFoad): "Lazy recovery evaluation for spec
+            # rejection sampling" — computes recovered tokens lazily inside
+            # `rejection_random_sample_kernel` instead of the eager
+            # full-vocab `sample_recovered_tokens_kernel` pass.
+            #
+            # [2026-07-26] `sample_recovered_tokens_kernel` USED TO BE LISTED
+            # HERE and it is the single reason P82 has never applied on any
+            # pin. It is not a signal that #41258 landed — it is the ORIGINAL
+            # vLLM kernel, present since 99abb8b65 "[V1][Spec Decode]
+            # Optimize Rejection Sampler with Triton Kernels (#14930)". A
+            # drift marker whose presence means "nothing has changed" fires
+            # on every image forever: the boot logged
+            #   "upstream drift marker 'sample_recovered_tokens_kernel' ...
+            #    upstream may have absorbed this fix"
+            # while upstream had absorbed nothing. The kernel is still
+            # present (count == 2) on the boot pin AFTER #41258's lazy path
+            # landed as build-line cherry 81cdcb55e, which is the proof the
+            # marker cannot discriminate. The real #41258 signals are the two
+            # below; they stay.
             "_lazy_recovered_token",
             "lazy_recovery",
         ],
@@ -372,7 +521,33 @@ def apply() -> tuple[str, str]:
 
     patcher = _make_patcher(threshold, min_draft_pos)
     if patcher is None:
-        return "skipped", "vllm/v1/sample/rejection_sampler.py not found"
+        # _make_patcher logs the discriminating reason (file missing vs no
+        # anchor generation vs ambiguous anchor). Never report a bare
+        # "not found" for an anchor problem — that is how P82 spent months
+        # reading as an upstream absorption.
+        return "skipped", (
+            "P82 could not be built: rejection_sampler.py missing, or NO "
+            "anchor generation matched (see the [P82] log line above). The "
+            "OR-clause is NOT in force this boot."
+        )
+
+    # Second gate. Deliberately AFTER _make_patcher, so the anchor is still
+    # resolved and counted (drift still fails loud) even when we decline to
+    # write. See "P82 HAS NEVER APPLIED" in the module docstring.
+    if not _ack_unvalidated():
+        log.warning(
+            "[P82] anchor RESOLVED and unique, but NOT writing: %s is unset. "
+            "P82 has never applied on any pin, so its biased OR-clause is "
+            "unvalidated on this rig; set %s=1 alongside GENESIS_ENABLE_P82=1 "
+            "to arm it.", _ENV_ACK, _ENV_ACK,
+        )
+        return "skipped", (
+            f"anchor resolved + counted, write withheld — {_ENV_ACK} not set. "
+            f"P82 has NEVER applied on any pin (drift marker + stale anchor, "
+            f"both fixed 2026-07-26), so enabling it is a first-ever, "
+            f"unvalidated change to acceptance sampling. Set {_ENV_ACK}=1 to "
+            f"arm the OR-clause."
+        )
 
     if not os.path.isfile(patcher.target_file):
         return "skipped", f"target disappeared: {patcher.target_file}"
@@ -412,14 +587,27 @@ def apply() -> tuple[str, str]:
         if min_draft_pos > 0
         else ""
     )
+    # The hardening line must describe the generation that was actually baked.
+    # On the #45369 multiply form there is no division and hence no denormal
+    # guard, and printing one would be the same class of false log line that
+    # kept P82 unread for months.
+    anchor_gen = _select_anchor_label(patcher)
+    hardening = (
+        "vanilla clause taken verbatim from this pin's kernel "
+        "(#45369 multiply form — no division, so no denormal guard), "
+        "explicit target_prob > 0 check"
+        if anchor_gen and anchor_gen.startswith("v3")
+        else "v2 hardening: fp32 denormal guard (draft_prob >= 1e-20), "
+             "explicit target_prob > 0 check"
+    )
     applied_msg = (
-        f"P82 v2 applied: SGLang threshold_single OR-clause installed at "
-        f"threshold={threshold:.4f}{pos_note}. v2 hardening: fp32 denormal guard "
-        "(draft_prob >= 1e-20), explicit target_prob > 0 check"
+        f"P82 applied [anchor={anchor_gen}]: SGLang threshold_single OR-clause "
+        f"installed at threshold={threshold:.4f}{pos_note}. {hardening}"
         + (f", OR-clause restricted to draft pos >= {min_draft_pos}"
            if min_draft_pos > 0 else "")
         + ". Activates on random-sample path (greedy / synthetic untouched). "
-        "BIASED rule — validate with genesis_quality_harness before prod."
+        f"BIASED rule, armed via {_ENV_ACK}=1 — validate with "
+        "genesis_quality_harness before prod."
     )
     return result_to_wiring_status(
         result, failure,
