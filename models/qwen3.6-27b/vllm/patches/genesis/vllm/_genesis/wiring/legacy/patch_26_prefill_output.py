@@ -31,6 +31,28 @@ baseline — zero behavioural regression.
 Upstream drift detection: if `acquire_prefill_output` appears in the file,
 assume we (or upstream) already applied an equivalent and skip.
 
+Partial absorption (2026-07-26 ledger pass)
+-------------------------------------------
+Exactly ONE of the two hunks was absorbed. On the boot pin
+dev1474cherrymax-1757-20260725 (and its pristine image), counted in
+`v1/attention/backends/turboquant_attn.py`:
+
+    output = torch.zeros(N, Hq, D, ...)          count == 1   (NOT absorbed)
+    _cu_2 = torch.zeros(2, ...)  [P26 form]      count == 0   (absorbed)
+    if not hasattr(self, "_cu_2")                count == 1   (the absorption)
+
+`if not hasattr(self, "_cu_2")` was listed as a whole-patch drift marker, so
+the presence of the absorbed HALF retired the patch entirely and the boot
+logged "patch obsolete, skip" — while the per-prefill 32 MiB zero-fill that
+is P26's actual point stayed in the file. That is a drift marker scoped to
+the wrong unit: it is evidence about sub-patch `p26_cu_2_alloc`, not about
+`p26_output_alloc`.
+
+It is therefore no longer a patch-level drift marker. `p26_cu_2_alloc` is
+now `required=False`, so it soft-skips on its own absorbed anchor while the
+output pool still applies. Only real evidence about the OUTPUT pool
+(`acquire_prefill_output`, `_tq_prefill_output_slice`) retires the patch.
+
 Author: Sandermage(Sander)-Barzov Aleksandr, Ukraine, Odessa
 """
 from __future__ import annotations
@@ -46,14 +68,21 @@ log = logging.getLogger("genesis.wiring.p26_prefill_output")
 
 GENESIS_P26_MARKER = "Genesis P26 TQ prefill output prealloc v7.0"
 
+# Patch-level drift markers ONLY. Each must be evidence that the PREFILL
+# OUTPUT POOL — the hunk P26 exists for — is already in the file. A marker
+# that only proves the cu_2 half landed belongs on that sub-patch, not here
+# (see "Partial absorption" in the module docstring).
 UPSTREAM_DRIFT_MARKERS = [
     "acquire_prefill_output",
     "_tq_prefill_output_slice",
-    # [v7.62.13 audit] Upstream nightly 7923b48047be wraps `_cu_2 = torch.zeros(...)`
-    # with `if not hasattr(self, "_cu_2"):` — this is exactly P26's optimization
-    # natively. P26 should auto-skip when this guard is present.
-    'if not hasattr(self, "_cu_2")',
 ]
+
+# Sub-patch-scoped evidence: upstream nightly 7923b48047be wraps
+# `_cu_2 = torch.zeros(...)` in `if not hasattr(self, "_cu_2"):`, which IS
+# P26's cu_2 optimization natively. Kept as a named constant so the fact is
+# not lost, and asserted against below — but it retires one sub-patch, not
+# the patch.
+CU2_ABSORBED_MARKER = 'if not hasattr(self, "_cu_2")'
 
 
 # Anchor 1: line 566 of turboquant_attn.py — the fresh output tensor.
@@ -110,11 +139,17 @@ def _make_patcher() -> TextPatcher | None:
                 replacement=_NEW_OUTPUT,
                 required=True,
             ),
+            # NOT required: upstream absorbed this hunk (CU2_ABSORBED_MARKER)
+            # while leaving the output pool alone. A soft skip here lets the
+            # output hunk land; `required=True` used to abort the whole patch.
+            # It can only ever apply when p26_output_alloc applied too — that
+            # one is required and its replacement is where `_GenesisTQBuf` is
+            # imported into the function scope this hunk reads it from.
             TextPatch(
                 name="p26_cu_2_alloc",
                 anchor=_OLD_CU2,
                 replacement=_NEW_CU2,
-                required=True,
+                required=False,
             ),
         ],
         upstream_drift_markers=UPSTREAM_DRIFT_MARKERS,
@@ -132,7 +167,24 @@ def apply() -> tuple[str, str]:
 
     result, failure = patcher.apply()
     if result == TextPatchResult.APPLIED:
-        return "applied", "prefill output + cu_2 rewired through shared pool"
+        # Report the hunks that were actually WRITTEN, read back off the file.
+        # "prefill output + cu_2 rewired" was printed unconditionally and is
+        # wrong on every pin that already carries the upstream cu_2 guard.
+        try:
+            with open(patcher.target_file, encoding="utf-8") as f:
+                after = f.read()
+        except OSError:
+            after = ""
+        cu2_landed = "acquire_cu_2(query.device)" in after
+        detail = "prefill output pool rewired through the shared TQ buffer"
+        if cu2_landed:
+            detail += "; cu_2 scratch rewired too"
+        else:
+            detail += (
+                f"; cu_2 hunk soft-skipped — upstream already caches it "
+                f"({CU2_ABSORBED_MARKER!r} present), absorbed half"
+            )
+        return "applied", detail
     if result == TextPatchResult.IDEMPOTENT:
         return "applied", "already applied this image layer (idempotent)"
     if result == TextPatchResult.SKIPPED:
