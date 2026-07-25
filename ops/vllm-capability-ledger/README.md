@@ -16,7 +16,19 @@ vllm-capability-inventory.json the inventory (generated; committed)
 vllm-commit-ledger.json        the commit ledger (generated; committed)
 inventory-overlay.json         hand-written per-capability facts, merged on top
 commit-verdict-overrides.json  hand verdicts on commits; survive regeneration
+baseline-*.json                dated --json snapshots; feed `--baseline`
 ```
+
+**Current baseline: `baseline-20260725b-tcbench-dev1474cherrymax-v2.json`**
+(LIVE 280 · DARK 142 · N/A 145 · UNVERIFIABLE 38 · MISSING 53 · INERT 11 ·
+DEGRADED 5, over 674 capabilities; 250 commits fingerprinted, 0 MISSING).
+The `-v2` suffix is load-bearing: the verifier's semantics changed in the same
+commit that produced it (traps 8–11 below), so it is **not** row-comparable with
+`baseline-20260725-tcbench-dev1474cherrymax.json`. That earlier file is kept
+only as the historical first data point. Against the same container and the same
+image, re-running the OLD verifier reproduced the old baseline **exactly — 0 of
+674 rows changed**, which is the evidence that the 54-row delta between the two
+baselines is the tool being corrected, not the rig drifting.
 
 Everything is **stdlib-only python3**. This box's venv ships neither sklearn
 nor scipy and PyYAML is absent, and the verifier has to run inside a bare
@@ -76,11 +88,30 @@ Candidates are ranked by **rarity in the current tree** (a token that occurs
 once is a perfect fingerprint) then length. Multiple fingerprints per commit
 mean one incidental deletion cannot raise a false alarm.
 
-Verdicts: `intact` · **`LOST`** · **`PARTIAL-LOSS`** · `config-drift`
-(compose/yaml values that are *meant* to be retuned) · `doc-only` · `removal` ·
-`unfingerprintable`. Only the two loss verdicts are alarms, and each one needs
-a human verdict of *really lost* vs *superseded with evidence* — recorded in
-`commit-verdict-overrides.json` so it is not re-raised every run.
+Verdicts: `intact` · **`LOST`** · **`PARTIAL-LOSS`** · `off-build-line` ·
+`config-drift` (compose/yaml values that are *meant* to be retuned) ·
+`doc-only` · `removal` · `unfingerprintable`. Only the two loss verdicts are
+alarms, and each one needs a human verdict of *really lost* vs *superseded with
+evidence* — recorded in `commit-verdict-overrides.json` so it is not re-raised
+every run.
+
+`off-build-line` exists because **LOST was conflating two facts**: "the delta
+is absent from the tree that gets BUILT" and "this work exists in one place and
+an `rm -rf` ends it". Only the second deserves the loudest verdict the tool
+emits. So before shouting, `refs_containing()` asks git — and a hit on a
+**remote** ref downgrades the verdict and records which ref. This is a
+**positive-only** signal, which is exactly why it is safe: a hit proves
+durability, a miss proves nothing (the sha may have been rebased away, which is
+the whole reason this file fingerprints content instead of hashes). It can
+therefore downgrade a loss verdict and can never create one.
+
+It was written because it had already produced a false alarm: on 2026-07-25 the
+two KVQ-2 sink commits `f785a3a5f` / `8a7ff61e` carried hand overrides reading
+"NEVER PUSHED … exists in exactly one place on disk" while both were sitting on
+`fork/kvq2-sink-runtime` at github.com/meandmyboiclaude. **A stale LOST costs a
+future session a day**, so a hand override asserting durability must be
+re-checked, not inherited — `git -C <repo> for-each-ref --contains <sha>` is one
+command and the fingerprinter now runs it for you.
 
 `PARTIAL-LOSS` exists because a whole file the commit ADDED is decisive: if
 that module is gone the commit is not intact no matter how many incidental
@@ -137,6 +168,35 @@ source of truth.
 7. **The lanes are read-only bind mounts.** Tree presence == container presence
    for lane *source* files. The interesting container-only signal is the marker
    written into the *installed* vllm at boot.
+8. **Never grep the lane sources for a capability marker.** `_genesis/` and
+   `sndr/` live *inside* `CONTAINER_VLLM`, so a naive whole-tree sweep finds
+   every marker in the very file the extractor read it out of and calls the
+   patch LIVE. That is "applied means nothing" wearing the tool's own badge.
+   The 07-25 baseline carried **31 rows of it** — including three (PN127,
+   PN364, PN401) that were really MISSING and hidden by it. `grep_markers(...,
+   skip_lane_sources=True)` is mandatory for the capability sweep; the COMMIT
+   sweep deliberately does the opposite, because its fingerprints legitimately
+   live in lane sources.
+9. **The registry's `env_flag` is the gate; `cap["flags"]` is not.** `flags` is
+   every `GENESIS_`/`SNDR_` token the extractor harvested from the module
+   source, which includes flags the module merely *mentions* — sibling ids,
+   threshold knobs, the id it is an alternative to. Gating on that union reads
+   "on" for patches the dispatcher plainly skipped, and the verifier then calls
+   them announced-but-inert. Measured: PN58 read "on" off `GENESIS_ENABLE_P62=1`
+   — P62 being the patch it `conflicts_with`, and the one actually applied.
+10. **Markers are often multi-line literals.** A marker the extractor rebuilt
+   from `("Genesis PN125 … " "…continues here")` is *not contiguous in any
+   file*, including its own source, so a literal `in` test can never match it
+   and the row reports MISSING forever. Both marker paths fall back to the
+   leading 40 chars — still unique across the tree, and short enough to
+   survive the wrap. This alone was hiding four working patches (P67B, P99,
+   PN12, PN17).
+11. **Four ids share a `key`.** `key` is `<id>@<lane>:<module-basename>`, and
+   an active module and its `_retired/` or `_archive/` twin have the same
+   basename (G4_05, PN40, PN50, PN350). Anything that indexes results by `key`
+   alone silently keeps one of each pair — so the bump gate keys on
+   `(key, kind, lane)`. Fixing the key itself would re-path every baseline;
+   this is the cheaper correct answer.
 
 ---
 
@@ -179,13 +239,42 @@ Wired into `docs/NIGHTLY_BUMP_RUNBOOK.md` as gates A / B / C.
 | `DEGRADED` | some sub-patches landed, others did not — the PN346B class |
 | `MISSING` | it should be in force and it is not. **Act on these.** |
 
-`MISSING` splits into three actionable shapes, named in the `why` field:
+`MISSING` splits into actionable shapes, named in the `why` field:
 
-- *announced-but-inert (BUG-122 class)* — the gate says on, the target exists,
-  zero markers. Real inertness.
-- *target path no longer exists upstream* — a re-anchor item.
 - *module has apply() but NO registry row* — orphaned work the dispatcher can
   never reach.
+- *announced-but-inert (BUG-122 class)* — the gate says on, the target exists,
+  zero markers.
+- *target path no longer exists upstream* — a re-anchor item.
+- *marker absent anywhere in the installed vllm* — same as above for rows whose
+  target could not be derived statically.
+
+### Read the boot log before acting on "announced-but-inert"
+
+This class is **not** a synonym for silent inertness, and treating it as one
+will send you chasing losses that are not there. Verified row-by-row against
+the 07-25 tcbench boot: of the 15 rows carrying that `why`, **zero** were
+silently inert. Every one either logged an honest reason one line after the
+dispatcher's APPLY, or self-retired because upstream absorbed it:
+
+| what the boot actually said | rows |
+|---|---|
+| `self-retire (no-op)` — upstream drift, the fix is already native | PN80 PN86 PN88 PN94 (+PN90 `verified NO-OP`, PN91G) |
+| `upstream_merged` / `patch obsolete, skip` | P26 P34 P82 |
+| `required_anchor_missing` — a re-anchor item, loudly announced | P91B (`inc.py` gone) PN346 |
+| `md5 mismatch` — the v2 md5+full-file PoC never applies on any pin | PN118 ×2 |
+| disabled / opt-in not set | PN286 |
+| self-install hook off by default (`GENESIS_ENABLE_P39A_SELFINSTALL`) | P39 |
+
+The verifier cannot see any of that: it reads effect, and "no effect because
+upstream already does it" and "no effect because the patch broke" produce the
+identical file. **The `why` field tells you where to look, not what happened.**
+
+The one genuine false announcement found: `patch_pn96_...py` prints
+`applied: grammar FSM now advances…` **unconditionally**, after both of its
+sub-patches took the `self-retire` path and wrote nothing. Its capability is
+upstream-absorbed, so this is a lying log line rather than lost work — but it is
+the exact shape of BUG-122 and the print belongs inside the branch that writes.
 
 ---
 

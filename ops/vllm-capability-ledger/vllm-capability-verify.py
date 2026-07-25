@@ -117,15 +117,27 @@ def flag_state(cap: dict, env: dict[str, str]) -> tuple[str, str]:
     'unset' no gating flag appears in the env at all.  NOTE: unset is NOT the
             same as off — lane-2 rows with default_on=True engage anyway
             because both composes set GENESIS_SNDR_TRUST_DEFAULT_ON=1.
+
+    The registry's `env_flag` is AUTHORITATIVE when it exists.  `cap["flags"]`
+    is every GENESIS_/SNDR_ token the extractor harvested from the module
+    source, which includes flags the module merely MENTIONS — sibling ids,
+    threshold knobs, the id it is an alternative to.  Gating on that union
+    reads "on" for patches the dispatcher plainly skipped, and the verifier
+    then calls them announced-but-inert.  Measured on the 07-25 tcbench boot:
+    PN58 read "on" off `GENESIS_ENABLE_P62=1` (P62 is the patch it CONFLICTS
+    with, and the one actually applied) and P68 read "on" off its P69 sibling
+    while its own `GENESIS_ENABLE_P68_AUTO_FORCE_TOOL` was explicitly 0.
+    Four false MISSING rows, all from the same union.
     """
-    flags = [f for f in cap.get("flags", []) if f.startswith(("GENESIS_", "SNDR_"))]
     reg = cap.get("registry") or {}
-    for extra in (reg.get("env_flag"),):
-        if extra and extra not in flags:
-            flags.append(extra)
-    for a in (reg.get("env_flag_aliases") or []):
-        if a not in flags:
-            flags.append(a)
+    if reg.get("env_flag"):
+        flags = [reg["env_flag"]] + [a for a in (reg.get("env_flag_aliases") or [])
+                                     if a != reg["env_flag"]]
+    else:
+        flags = [f for f in cap.get("flags", []) if f.startswith(("GENESIS_", "SNDR_"))]
+        for a in (reg.get("env_flag_aliases") or []):
+            if a not in flags:
+                flags.append(a)
     if not flags:
         return "n/a", ""
     on = [f for f in flags if _truthy(env.get(f))]
@@ -140,6 +152,77 @@ def flag_state(cap: dict, env: dict[str, str]) -> tuple[str, str]:
 
 
 # ------------------------------------------------------------ capabilities --
+
+def marker_hit(insp, targets: list[str], marker: str) -> tuple[bool, bool]:
+    """(found, by_prefix) for one marker across candidate targets.
+
+    A marker harvested from a Python implicit-concatenated string literal —
+
+        MARKER = ("Genesis PN125 hybrid_gdn FULL_AND_PIECEWISE v1 (closes "
+                  "vLLM upstream gap: ...)")
+
+    — is reconstructed by the extractor as ONE string that never appears
+    contiguously in any file, including the file it was read from.  A literal
+    `in` test can therefore NEVER match it, and the row reports MISSING
+    forever.  So fall back to the longest leading run that a source line can
+    plausibly hold.  40 chars of a house marker ("Genesis PN125 hybrid_gdn
+    FULL_AND_PIEC") is still unique across the tree; below that we do not
+    guess, because a short prefix would start matching siblings.
+    """
+    if any(insp.contains(t, marker) for t in targets):
+        return True, False
+    head = marker.split("\n")[0].strip()
+    if len(head) >= 40:
+        prefix = head[:40]
+        if any(insp.contains(t, prefix) for t in targets):
+            return True, True
+    return False, False
+
+
+def retired_notes(cap: dict) -> list[str]:
+    """['retired'] when any of the four retirement signals is set, else []."""
+    reg = cap.get("registry") or {}
+    if (reg.get("lifecycle") == "retired"
+            or str(cap.get("status", "")).startswith("retired")
+            or reg.get("deprecated")
+            or cap.get("peer_lifecycle") == "retired"):
+        return ["retired"]
+    return []
+
+
+def zero_marker_verdict(cap: dict, fstate: str, notes: list[str]) -> dict | None:
+    """Shared "no markers found — but was it ever supposed to be on?" ruling.
+
+    Both marker paths (declared target and whole-tree sweep) need this.  The
+    sweep path used to carry only the `flag == off` carve-out, so 13 rows that
+    are simply never-enabled — flag unset, default_on false, several already
+    `lifecycle: retired` — reported MISSING on every run while their
+    declared-target twins reported DARK.  Same question, two answers.
+    Returns None when the absence really is unexplained.
+    """
+    reg = cap.get("registry") or {}
+    if fstate == "off":
+        return {"state": DARK, "why": "flag explicitly off; 0 markers as expected"}
+    if cap.get("lane2_suppressed_by_lane1"):
+        return {"state": DARK,
+                "why": "lane-2 copy of a lane-1-owned shared id; sndr_lane "
+                       "sets GENESIS_DISABLE_* by design"}
+    if "retired" in notes:
+        return {"state": NA, "why": "retired; 0 markers as expected"}
+    if reg.get("superseded_by"):
+        # The registry itself records that upstream (or a later patch) absorbed
+        # this.  On the 07-25 boot P3 and P5 both carry `superseded_by:
+        # "absorbed natively ..."` and the dispatcher duly logged
+        # required_anchor_missing / no_applicable_sub_patches.  Reporting them
+        # as lost work buries the rows that really are.
+        return {"state": NA,
+                "why": f"superseded — {str(reg['superseded_by'])[:90]}"}
+    if fstate == "unset" and not reg.get("default_on"):
+        return {"state": DARK,
+                "why": "no gating flag set anywhere and default_on is false "
+                       "— never enabled, nothing lost"}
+    return None
+
 
 def plan_reads(caps: list[dict], mode: str) -> list[str]:
     """Every container path the sweep will need, so we prefetch in one call."""
@@ -169,9 +252,7 @@ def verify_capability(cap: dict, insp, env: dict[str, str], mode: str) -> dict:
         return {"state": UNVERIFIABLE, "why": "registry row with no module; "
                 "nothing to check — it still announces an APPLY decision",
                 "flag": fstate}
-    if lifecycle == "retired" or cap.get("status", "").startswith("retired") \
-            or reg.get("deprecated") or cap.get("peer_lifecycle") == "retired":
-        notes.append("retired")
+    notes += retired_notes(cap)
 
     # Model-family gating: a Gemma-4 patch on a Qwen rig is inert BY DESIGN.
     # Reporting 60 of them as lost every run would bury the real signal.
@@ -213,10 +294,12 @@ def verify_capability(cap: dict, insp, env: dict[str, str], mode: str) -> dict:
                     "why": "marker lives in the INSTALLED vllm; use --container",
                     "flag": fstate}
         targets = expand_targets(targets, insp)
-        hits, miss = [], []
+        hits, miss, by_prefix = [], [], []
         for m in markers:
-            found = any(insp.contains(t, m) for t in targets)
+            found, pfx = marker_hit(insp, targets, m)
             (hits if found else miss).append(m)
+            if pfx:
+                by_prefix.append(m)
         present_targets = [t for t in targets if insp.exists(t)]
         if not present_targets:
             # The target path itself is gone.  Usually upstream moved or
@@ -230,7 +313,9 @@ def verify_capability(cap: dict, insp, env: dict[str, str], mode: str) -> dict:
                            f"or formal retirement",
                     "flag": fstate}
         if hits and not miss:
-            return {"state": LIVE, "why": f"marker present in {len(present_targets)} target(s)",
+            note = " (matched by 40-char prefix: multi-line literal)" if by_prefix else ""
+            return {"state": LIVE,
+                    "why": f"marker present in {len(present_targets)} target(s){note}",
                     "flag": fstate}
         if hits and miss:
             return {"state": DEGRADED,
@@ -240,31 +325,26 @@ def verify_capability(cap: dict, insp, env: dict[str, str], mode: str) -> dict:
                     "flag": fstate}
         # Zero markers.  Now the whole question is whether it was SUPPOSED to
         # be on.  Never-enabled is not a loss; enabled-and-inert is the alarm.
-        if fstate == "off":
-            return {"state": DARK, "why": "flag explicitly off; 0 markers as expected",
-                    "flag": fstate}
-        if cap.get("lane2_suppressed_by_lane1"):
-            return {"state": DARK,
-                    "why": "lane-2 copy of a lane-1-owned shared id; sndr_lane "
-                           "sets GENESIS_DISABLE_* by design",
-                    "flag": fstate}
-        if "retired" in notes:
-            return {"state": NA, "why": "retired; 0 markers as expected",
-                    "flag": fstate}
-        if fstate == "unset" and not (reg.get("default_on")):
-            return {"state": DARK,
-                    "why": "no gating flag set anywhere and default_on is false "
-                           "— never enabled, nothing lost",
-                    "flag": fstate}
+        carve = zero_marker_verdict(cap, fstate, notes)
+        if carve:
+            return {**carve, "flag": fstate}
         return {"state": MISSING,
                 "why": f"0/{len(markers)} markers in an existing target while the "
                        f"gate says it should be on ({fstate}) — "
                        f"announced-but-inert (BUG-122 class)",
                 "flag": fstate}
 
-    if markers and not targets:
+    if markers and not targets and not (kind == "module" and cap.get("source_container")):
         # target could not be derived statically (built by a helper function).
         # Fall back to a whole-tree marker grep; see grep_markers().
+        #
+        # NOT for kind=="module": the only place that marker lives is the
+        # module's OWN source, which is bind-mounted in from the host tree and
+        # is therefore present whether or not the patch did anything.  Grepping
+        # for it is a tautology dressed up as an effect check, and when the
+        # string is a multi-line literal it is a tautology that FAILS —
+        # PN125 read MISSING on the 07-25 boot on which the dispatcher logged
+        # "RESULT applied".  Modules are verified by presence, per the README.
         return {"state": "_NEEDS_TREE_GREP", "why": "", "flag": fstate,
                 "markers": markers}
 
@@ -290,19 +370,34 @@ def verify_capability(cap: dict, insp, env: dict[str, str], mode: str) -> dict:
             "flag": fstate}
 
 
-def grep_markers(insp, markers: list[str], roots: list[str]) -> set[str]:
+def grep_markers(insp, markers: list[str], roots: list[str],
+                 skip_lane_sources: bool = False) -> set[str]:
     """One Aho-Corasick pass for markers whose target we could not derive.
 
     GNU grep -F with a pattern file is O(corpus) regardless of pattern count,
     so this stays cheap even with several hundred markers.
+
+    `skip_lane_sources` prunes `_genesis/` and `sndr/` from the walk, and the
+    CAPABILITY sweep must always set it.  Those trees are the read-only bind
+    mounts holding the patch SOURCES — the very files the marker string was
+    read out of.  Finding a marker there proves the patch exists on disk,
+    which was never in doubt; it says nothing about whether the patch DID
+    anything, and reporting it LIVE is precisely the "applied means nothing"
+    failure this package was built to end.  The COMMIT sweep deliberately does
+    the opposite: its fingerprints legitimately live in lane sources.
     """
     # 5 chars is enough for the house convention ("# PN93:", "# H119:"); an
     # 8-char floor silently dropped those two and reported them MISSING when
     # they were plainly in the file.  Short-but-punctuated markers are fine.
-    usable = sorted({m.split("\n")[0].strip() for m in markers
-                     if len(m.split("\n")[0].strip()) >= 5})
+    # Probe the 40-char prefix alongside the full first line, for the same
+    # multi-line-literal reason marker_hit() carries: a marker the extractor
+    # rebuilt from a concatenated literal is not contiguous in ANY file.
+    heads = {m.split("\n")[0].strip() for m in markers}
+    usable = sorted({h for h in heads if len(h) >= 5}
+                    | {h[:40] for h in heads if len(h) > 40})
     if not usable:
         return set()
+    prune = ["__pycache__"] + (["_genesis", "sndr"] if skip_lane_sources else [])
     if insp.kind == "tree":
         found = set()
         import subprocess
@@ -313,7 +408,7 @@ def grep_markers(insp, markers: list[str], roots: list[str]) -> set[str]:
         try:
             targets = [insp.root + r for r in roots] if insp.root not in ("", "/") else roots
             p = subprocess.run(["grep", "-rohF", "--binary-files=without-match",
-                                "--exclude-dir=__pycache__", "-f", pat, *targets],
+                                *[f"--exclude-dir={d}" for d in prune], "-f", pat, *targets],
                                capture_output=True, text=True, errors="replace",
                                timeout=900)
             found = {ln.strip() for ln in p.stdout.splitlines()} & set(usable)
@@ -325,10 +420,11 @@ def grep_markers(insp, markers: list[str], roots: list[str]) -> set[str]:
         "import sys,os\n"
         f"pats = {usable!r}\n"
         f"roots = {roots!r}\n"
+        f"prune = {prune!r}\n"
         "found=set()\n"
         "for root in roots:\n"
         "    for dp,dn,fn in os.walk(root):\n"
-        "        dn[:] = [d for d in dn if d != '__pycache__']\n"
+        "        dn[:] = [d for d in dn if d not in prune]\n"
         "        for f in fn:\n"
         "            if not f.endswith(('.py','.pyi')): continue\n"
         "            try: b=open(os.path.join(dp,f),encoding='utf-8',errors='replace').read()\n"
@@ -406,7 +502,7 @@ def verify_commits(ledger: dict, insp, mode: str) -> list[dict]:
         if hits:
             state = LIVE
         elif c["verdict"] in ("doc-only", "config-drift", "removal",
-                              "superseded", "accepted-loss"):
+                              "superseded", "accepted-loss", "off-build-line"):
             state = NA
         elif not _reaches_container(c):
             state = NA
@@ -480,18 +576,31 @@ def main() -> int:
         for n in need_grep:
             allm += n["res"]["markers"]
         roots = ([CONTAINER_VLLM] if mode != "tree" else [list(MOUNTS.keys())[0]])
-        found = grep_markers(insp, allm, roots) if mode != "tree" else set()
+        found = (grep_markers(insp, allm, roots, skip_lane_sources=True)
+                 if mode != "tree" else set())
         for n, r in zip(need_grep, [x for x in results if x["state"] == "_NEEDS_TREE_GREP"]):
             ms = [m.split("\n")[0].strip() for m in n["res"]["markers"]]
-            hit = [m for m in ms if m in found]
+            hit = [m for m in ms if m in found or (len(m) > 40 and m[:40] in found)]
+            miss = [m for m in ms if m not in hit]
             if mode == "image":
                 r["state"], r["why"] = NA, "boot marker; image is pristine"
-            elif hit:
+            elif hit and not miss:
                 r["state"], r["why"] = LIVE, "marker found by tree sweep (target undeclared)"
-            elif r["flag"] == "off":
-                r["state"], r["why"] = DARK, "flag off; marker absent as expected"
+            elif hit and miss:
+                # This branch did not exist.  A partial hit reported LIVE, so
+                # the whole PN346B class — the reason DEGRADED exists — was
+                # invisible to every capability whose target is undeclared.
+                r["state"] = DEGRADED
+                r["why"] = (f"PARTIAL: {len(hit)}/{len(ms)} markers found by tree "
+                            f"sweep — missing {miss[:2]} (PN346B class)")
             else:
-                r["state"], r["why"] = MISSING, "marker absent anywhere in installed vllm"
+                carve = zero_marker_verdict(n["cap"], r["flag"],
+                                            retired_notes(n["cap"]))
+                if carve:
+                    r["state"], r["why"] = carve["state"], carve["why"]
+                else:
+                    r["state"] = MISSING
+                    r["why"] = "marker absent anywhere in installed vllm"
             r.pop("markers", None)
 
     tally: dict[str, int] = {}
@@ -538,9 +647,17 @@ def main() -> int:
     rc = 0
     if args.baseline and os.path.exists(args.baseline):
         base = load_json(args.baseline)
-        bmap = {c["key"]: c["state"] for c in base.get("capabilities", [])}
+        # Index on (key, kind, lane), not on key alone: four ids in the
+        # inventory carry the SAME key twice — an active module and its
+        # _retired/ or _archive/ twin share a basename, and `key` is
+        # <id>@<lane>:<module-basename>.  A plain dict silently kept only the
+        # last of each pair, so a regression in the other one could not be
+        # seen by the gate whose entire job is to see regressions.
+        def _ck(c):
+            return (c["key"], c.get("kind"), c.get("lane"))
+        bmap = {_ck(c): c["state"] for c in base.get("capabilities", [])}
         regressed = [r for r in results
-                     if bmap.get(r["key"]) in (LIVE, DARK)
+                     if bmap.get(_ck(r)) in (LIVE, DARK)
                      and r["state"] in (MISSING, DEGRADED)]
         bc = {c["sha"]: c["target_state"] for c in base.get("commits", [])}
         creg = [c for c in commit_results
@@ -549,7 +666,7 @@ def main() -> int:
         print(f"  capabilities regressed: {len(regressed)}")
         print(f"  commits dropped       : {len(creg)}")
         for r in regressed[:40]:
-            print(f"    CAP  {r['key'][:44]:44s} {bmap[r['key']]} -> {r['state']}")
+            print(f"    CAP  {r['key'][:44]:44s} {bmap[_ck(r)]} -> {r['state']}")
         for c in creg[:40]:
             print(f"    CMT  {c['sha']} {c['date']} {c['subject'][:66]}")
         if regressed or creg:

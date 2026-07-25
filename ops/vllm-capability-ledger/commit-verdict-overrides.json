@@ -5,9 +5,12 @@
   "Use them for the two cases the fingerprinter cannot decide on its own:",
   "  1. a commit deliberately superseded by later work (record WHY, with evidence)",
   "  2. a commit whose fingerprints are structurally underivable (pure revert, etc.)",
-  "Allowed verdicts: intact | LOST | superseded | accepted-loss | doc-only |",
-  "                  config-drift | removal | unfingerprintable",
-  "Never set a verdict to 'superseded' without naming the thing that supersedes it."
+  "Allowed verdicts: intact | LOST | off-build-line | superseded | accepted-loss |",
+  "                  doc-only | config-drift | removal | unfingerprintable",
+  "Never set a verdict to 'superseded' without naming the thing that supersedes it.",
+  "Never leave a LOST override standing on a durability claim you have not re-checked:",
+  "  `git -C <repo> for-each-ref --contains <sha>` is one command and the fingerprinter",
+  "  now runs it for you (auto_verdict=off-build-line when a REMOTE ref still has it)."
  ],
  "5192458dcc30": {
   "verdict": "superseded",
@@ -70,11 +73,11 @@
   "note": "The initial models/ import carried two sidecars that have since retired: patch_pr40798_workspace.py (explicitly a research artifact) and patch_tolist_cudagraph.py (P78, superseded by upstream's CPU-mirror metadata path). Both listed in the v7.72.2 drop set, docs/UPSTREAM.md:35 / :101."
  },
  "f785a3a5f196": {
-  "verdict": "LOST",
-  "note": "KVQ-2 sink32 RUNTIME gather. THE SINGLE LARGEST AT-RISK ASSET WE HAVE. cherry-max ships sink32 as ACCOUNTING ONLY — its own source says so at turboquant_attn.py:350 ('the sink side-buffer store/gather is not yet wired into the'). The runtime lives only on the kvq2-sink-runtime worktree: +487 across 4 files, new turboquant/sink.py (tag-validated direct-mapped slot cache, _tq_sink_claim/_tq_sink_write kernels) plus two test files. CPU-tested, never GPU-run, NEVER PUSHED to the fork, in no wheel. It exists in exactly one place on disk. ACTION: `git push fork kvq2-sink-runtime`."
+  "verdict": "off-build-line",
+  "note": "KVQ-2 sink32 RUNTIME gather. cherry-max ships sink32 as ACCOUNTING ONLY — its own source says so at turboquant_attn.py:350 ('the sink side-buffer store/gather is not yet wired into the'). The runtime lives on the kvq2-sink-runtime branch: +1432 across 7 files, new turboquant/sink.py (tag-validated direct-mapped slot cache, _tq_sink_claim/_tq_sink_write kernels) plus two test files. Still CPU-tested only, never GPU-run, in no wheel — that part stands. CORRECTED 2026-07-25 (was LOST, on a note claiming 'NEVER PUSHED ... exists in exactly one place on disk'): it IS pushed. `git -C ~/engines/vllm-build branch -a --contains f785a3a5f` returns kvq2-sink-runtime AND remotes/fork/kvq2-sink-runtime (github.com/meandmyboiclaude/vllm). Durable, so not an alarm. What remains true is that it never reached the line that gets BUILT — vllm-build's own worktree is on club-dev1474-cherry-max, which is why the fingerprints miss. ACTION: GPU-validate and land on cherry-max, or formally park it."
  },
  "8a7ff61ee0dd": {
-  "verdict": "LOST",
-  "note": "The self-review on top of f785a3a5f that closes a SILENT-WRONG stale-tag read — a freed-and-reissued slot could return another sequence's K/V. Same exposure as its parent: unpushed, single copy on disk. Losing this one is worse than losing the feature, because the feature without it is silently incorrect. ACTION: push with the parent."
+  "verdict": "off-build-line",
+  "note": "The self-review on top of f785a3a5f that closes a SILENT-WRONG stale-tag read — a freed-and-reissued slot could return another sequence's K/V. Losing this one would be worse than losing the feature, because the feature without it is silently incorrect — so it must never be landed without its parent. CORRECTED 2026-07-25 (was LOST, inheriting the parent's stale 'unpushed' claim): both are on remotes/fork/kvq2-sink-runtime, and 8a7ff61e IS that branch's head. Same off-build-line status as its parent; travels with it."
  }
 }

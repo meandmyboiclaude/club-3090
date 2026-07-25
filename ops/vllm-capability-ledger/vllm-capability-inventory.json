@@ -40,10 +40,12 @@
    "kind": "text_patch",
    "targets": [],
    "markers": [
+    "# H119-BUDGET:",
     "# H119:"
    ],
    "flags": [
     "GENESIS_ENABLE_H119_LENS_ROUTER",
+    "GENESIS_ENABLE_H119_ROUTE_BUDGET",
     "GENESIS_ENABLE_PN119",
     "GENESIS_ENABLE_PN119_ROUTER"
    ],
@@ -658,7 +660,9 @@
    "targets": [],
    "markers": [],
    "flags": [
+    "GENESIS_ENABLE_H119_ROUTE_BUDGET",
     "GENESIS_ENABLE_PN119_ROUTER",
+    "GENESIS_PN100_BUDGET_CEIL",
     "GENESIS_PN119_PROBE",
     "VLLM_ENABLE_V1_MULTIPROCESSING"
    ],

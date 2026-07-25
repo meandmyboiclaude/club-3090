@@ -40,6 +40,10 @@ Verdicts
                 its incidental tokens survive.  Decisive: without this rule
                 KVQ-2 f785a3a5f read "intact" off two generic Triton kernel
                 params while its entire new sink.py was absent.
+  off-build-line  would have been LOST or PARTIAL-LOSS, except the commit is
+                still reachable from a REMOTE ref — so the work is durable and
+                only absent from the line that gets built.  A backlog item,
+                not an alarm.  See refs_containing().
   config-drift  only compose/yaml/json touched and the values were later
                 retuned — expected, not a loss (KV pins, ctx sizes, ports)
   doc-only      only docs/benchmarks/READMEs touched; no runtime fingerprint
@@ -292,6 +296,47 @@ def bulk_present(root: str, tokens: list[str], subdirs: list[str] | None = None)
     return counts
 
 
+# ------------------------------------------------------------ durability ---
+
+def refs_containing(repo: str, sha: str) -> tuple[list[str], list[str]]:
+    """(local_refs, remote_refs) whose history contains `sha`.
+
+    LOST is the loudest verdict this tool emits, and it was conflating two
+    very different facts:
+
+        (a) the delta is absent from the tree that gets BUILT
+        (b) the work exists in exactly one place and a `rm -rf` ends it
+
+    Only (b) deserves the alarm.  The fingerprint pass answers (a) — it greps
+    a worktree — and had no way to ask (b) at all.  On 2026-07-25 that cost
+    the two KVQ-2 sink commits a LOST verdict whose hand-written note said
+    "unpushed, single copy on disk" while `f785a3a5f` and `8a7ff61e` were
+    both sitting on `fork/kvq2-sink-runtime` at github.com/meandmyboiclaude.
+
+    Containment is a POSITIVE-ONLY signal, which is why it can be trusted
+    here: a hit proves durability, a miss proves nothing (the sha may simply
+    have been rebased away, which is the whole reason this file fingerprints
+    CONTENT instead of hashes).  So it can downgrade a loss verdict and must
+    never create one.
+    """
+    rc, out, _err = run(["git", "-C", repo, "for-each-ref", "--contains", sha,
+                         "--format=%(refname)"], timeout=120)
+    if rc != 0:
+        return [], []
+    local, remote = [], []
+    for line in out.splitlines():
+        ref = line.strip()
+        if not ref:
+            continue
+        if ref.startswith("refs/remotes/"):
+            remote.append(ref[len("refs/remotes/"):])
+        elif ref.startswith("refs/heads/"):
+            local.append(ref[len("refs/heads/"):])
+        elif ref.startswith("refs/tags/"):
+            remote.append(ref)  # a tag is as durable as a branch for our purpose
+    return sorted(local), sorted(remote)
+
+
 # ----------------------------------------------------------------- driver ---
 
 def collect_repo(name: str, repo: str, paths: list[str], rev_args: list[str],
@@ -381,6 +426,15 @@ def collect_repo(name: str, repo: str, paths: list[str], rev_args: list[str],
         else:
             verdict = "LOST"
 
+        # Durability override.  Absent-from-the-build-line is a real finding;
+        # it is just not the same finding as gone-forever, and only the second
+        # one is worth waking a session up for.  Ask git before shouting.
+        local_refs, remote_refs = ([], [])
+        if verdict in ("LOST", "PARTIAL-LOSS"):
+            local_refs, remote_refs = refs_containing(repo, meta["sha"])
+            if remote_refs:
+                verdict = "off-build-line"
+
         records.append({
             "repo": meta["repo"],
             "sha": meta["sha"],
@@ -401,6 +455,8 @@ def collect_repo(name: str, repo: str, paths: list[str], rev_args: list[str],
                 {"kind": k, "token": t} for _s, k, t, _n in absent[:6]
             ] if verdict in ("LOST", "PARTIAL-LOSS") else [],
             "lost_files": lost_files,
+            "preserved_local_refs": local_refs,
+            "preserved_remote_refs": remote_refs,
             "relocated_files": sorted(
                 t for _s, k, t, _n in scored
                 if k == "file" and t in relocated_files),
@@ -496,6 +552,12 @@ def main() -> int:
         print(f"\n  LOST ({len(lost)}):")
         for r in lost:
             print(f"    {r['verdict']:12s} {r['repo']:11s} {r['sha']} {r['date']} {r['subject'][:64]}")
+    off = [r for r in records if r["verdict"] == "off-build-line"]
+    if off:
+        print(f"\n  OFF THE BUILD LINE but preserved on a remote ({len(off)}):")
+        for r in off:
+            refs = ",".join(r["preserved_remote_refs"][:2])
+            print(f"    {r['repo']:11s} {r['sha']} {r['date']} {r['subject'][:52]}  [{refs}]")
     return 0
 
 
