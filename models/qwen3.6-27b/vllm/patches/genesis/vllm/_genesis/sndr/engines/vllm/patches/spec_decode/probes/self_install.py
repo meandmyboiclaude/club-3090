@@ -45,8 +45,35 @@ from typing import Any
 _TRUTHY = ("1", "true", "yes", "on")
 
 
+def _render_gate(low: str, flags: tuple[str, ...]) -> str:
+    """The `if` line(s) of the hook's env gate.
+
+    One flag renders byte-identically to the original single-flag form, so
+    PN241/PN258/PN282's shipped hooks are unchanged. Two or more render an
+    ALL-must-be-truthy genexp — needed when a patch is only lane-2's to
+    install under a second condition the served process cannot otherwise
+    reconstruct (PN65: `apply_policy` hands the shared id over on
+    GENESIS_SNDR_OWNS_PN65, and its GENESIS_DISABLE_ injection lives only in
+    the apply_all process's environ).
+    """
+    if len(flags) == 1:
+        return (
+            f"    if _genesis_{low}_os.environ.get(\n"
+            f"        \"{flags[0]}\", \"\"\n"
+            "    ).strip().lower() in (\"1\", \"true\", \"yes\", \"on\"):\n"
+        )
+    names = ", ".join(f"\"{f}\"" for f in flags)
+    return (
+        f"    if all(\n"
+        f"        _genesis_{low}_os.environ.get(_f, \"\").strip().lower()\n"
+        "        in (\"1\", \"true\", \"yes\", \"on\")\n"
+        f"        for _f in ({names},)\n"
+        "    ):\n"
+    )
+
+
 def render_hook(patch_id: str, env_flag: str, install_module: str,
-                marker: str) -> str:
+                marker: str, also_require: tuple[str, ...] = ()) -> str:
     """The block appended to the target module. Never raises on import."""
     low = patch_id.lower()
     return (
@@ -71,9 +98,7 @@ def render_hook(patch_id: str, env_flag: str, install_module: str,
         "# able to stop the server from booting.\n"
         "try:\n"
         f"    import os as _genesis_{low}_os\n"
-        f"    if _genesis_{low}_os.environ.get(\n"
-        f"        \"{env_flag}\", \"\"\n"
-        "    ).strip().lower() in (\"1\", \"true\", \"yes\", \"on\"):\n"
+        + _render_gate(low, (env_flag,) + tuple(also_require)) +
         f"        from {install_module} import (\n"
         f"            install_runtime as _genesis_{low}_install,\n"
         f"        )\n"
@@ -90,6 +115,7 @@ def make_self_install_patcher(
     env_flag: str,
     install_module: str,
     marker: str,
+    also_require: tuple[str, ...] = (),
 ) -> Any:
     """Build the TextPatcher, or None when the anchor is not UNIQUE.
 
@@ -119,7 +145,7 @@ def make_self_install_patcher(
                 name=f"{patch_id.lower()}_self_install",
                 anchor=anchor,
                 replacement=anchor + render_hook(
-                    patch_id, env_flag, install_module, marker),
+                    patch_id, env_flag, install_module, marker, also_require),
                 required=True,
             ),
         ],

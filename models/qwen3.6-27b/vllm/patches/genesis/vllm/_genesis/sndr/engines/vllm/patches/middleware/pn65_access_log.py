@@ -314,6 +314,122 @@ def install_into_app(app) -> bool:
     return True
 
 
+# ─── runtime install (also called from the exec-survival hook) ──────────
+
+
+def install_runtime() -> tuple[str, str]:
+    """Install the uvicorn.access filters. Idempotent, never raises.
+
+    This is the single installer, called from BOTH ``apply()`` (the patch
+    pass) and the import-time hook text-patched into
+    ``entrypoints/openai/api_server.py`` (the served process). It carries only
+    the explicit kill-switch; the enable decision belongs to ``should_apply``
+    on the apply path and to the hook's own env gate on the serve path.
+    """
+    if os.environ.get(
+        "SNDR_DISABLE_PN65", os.environ.get("GENESIS_DISABLE_PN65", "")
+    ).strip().lower() in ("1", "true", "yes", "y", "on"):
+        return "skipped", "PN65 explicitly disabled (SNDR_/GENESIS_DISABLE_PN65)"
+    if _PN65_REFORMATTER_INSTALLED and _PN65_FILTER_INSTALLED:
+        return "applied", "PN65 already installed (idempotent)"
+    try:
+        # Reformatter first — see install_into_app (deep-audit #5): the
+        # suppressor drops every INFO access record, so installing it ahead of
+        # the reformatter starved it and zero [Genesis-API] lines were emitted.
+        _install_reformatter()
+        _suppress_uvicorn_access_logger()
+    except Exception as exc:  # noqa: BLE001 — a log filter never takes a boot down
+        return (
+            "failed",
+            f"PN65 logging-filter install failed: {type(exc).__name__}: "
+            f"{str(exc)[:120]}",
+        )
+    return (
+        "applied",
+        "PN65 v3 (logging-only): reformatter attached to uvicorn.access; "
+        "Genesis-API structured lines emitted via genesis.api logger. "
+        "Zero request-path overhead — runs at log emit time after the "
+        f"response is on the wire. Quiet paths: {','.join(sorted(_quiet_paths()))}. "
+        "Set GENESIS_PN65_LOG_HEALTH=1 to include /health probes."
+    )
+
+
+# ─── exec-survival hook ─────────────────────────────────────────────────
+#
+# Filters live on a logger OBJECT. `apply_all` runs in its own process and the
+# entrypoint then does `exec vllm serve`, which replaces it — so the logger
+# PN65 decorated is destroyed before uvicorn ever emits an access record. PN65
+# has announced "applied" on every boot of this rig and no [Genesis-API] line
+# has ever been served. The cure is the P103/P39a one, packaged in
+# probes/self_install.py: text-patch an import-time hook into a file the
+# SERVING process imports.
+#
+# api_server.py is the right target: `vllm serve` reaches uvicorn through
+# `entrypoints/cli/serve.py:13  from vllm.entrypoints.openai.api_server import
+# run_server`, so the module is imported in the very process that owns the
+# uvicorn.access logger.
+#
+# The gate is TWO flags, not one. PN65 is a shared lane-1/lane-2 id:
+# sndr_lane.apply_policy() suppresses lane-2's copy unless the operator hands
+# the id over with GENESIS_SNDR_OWNS_PN65=1, and it does that by injecting
+# GENESIS_DISABLE_PN65 into apply_all's OWN environ — which the exec'd server
+# never sees. Mirroring `_sndr_owns` in the hook is what stops this copy from
+# installing itself behind lane-1's back on a boot where lane-1 owns the id.
+# The hook keys on the GENESIS_ spelling because that is the form club-3090's
+# compose sets and the form apply_policy reads.
+from sndr.engines.vllm.patches.spec_decode.probes.self_install import (
+    make_self_install_patcher,
+)
+
+PN65_SELF_INSTALL_TARGET = "entrypoints/openai/api_server.py"
+PN65_SELF_INSTALL_MARKER = (
+    "Genesis PN65 self-install hook (exec-survival, P39a class) v1"
+)
+# Checked for count==1 against POST-BOOT bytes. Carries the line above the
+# bare `uvloop.run(...)` call so the anchor stays specific if a sibling patch
+# ever adds a second run_server call site.
+PN65_SELF_INSTALL_ANCHOR = (
+    "    validate_parsed_serve_args(args)\n"
+    "\n"
+    "    uvloop.run(run_server(args))\n"
+)
+
+
+def install_self_install_hook() -> tuple[str, str]:
+    """Text-patch the import-time hook so the filters survive `exec`."""
+    patcher = make_self_install_patcher(
+        target_rel=PN65_SELF_INSTALL_TARGET,
+        anchor=PN65_SELF_INSTALL_ANCHOR,
+        patch_id="PN65",
+        env_flag="GENESIS_ENABLE_PN65",
+        install_module=(
+            "sndr.engines.vllm.patches.middleware.pn65_access_log"
+        ),
+        marker=PN65_SELF_INSTALL_MARKER,
+        also_require=("GENESIS_SNDR_OWNS_PN65",),
+    )
+    if patcher is None:
+        return "skipped", (
+            "PN65 self-install: entrypoints/openai/api_server.py unresolvable "
+            "or the tail anchor is not uniquely present — refusing to guess "
+            "at the insertion point"
+        )
+    from sndr.kernel.text_patch import TextPatchResult
+
+    result, failure = patcher.apply()
+    if result == TextPatchResult.FAILED:
+        return "failed", (failure.reason if failure else "unknown failure")
+    if result == TextPatchResult.SKIPPED:
+        return "skipped", (failure.reason if failure else "anchor drift")
+    if result == TextPatchResult.IDEMPOTENT:
+        return "applied", "PN65 self-install hook already present"
+    return "applied", (
+        "PN65 self-install hook written into entrypoints/openai/api_server.py "
+        "— the uvicorn.access filters are re-installed on every fresh import, "
+        "so they survive `exec vllm serve`"
+    )
+
+
 # ─── apply() entry ──────────────────────────────────────────────────────
 
 
@@ -325,6 +441,12 @@ def apply() -> tuple[str, str]:
     The filter survives uvicorn ``log_config`` re-init because we
     attach to the logger, not to a handler — re-creating handlers
     doesn't drop logger-level filters.
+
+    Both halves, always. The filter install is what an in-process caller
+    sees; the text half is the only one the served process will ever see.
+    Reporting "applied" off the in-process half alone is the
+    announce-and-do-nothing shape the ledger exists to catch, so a failure of
+    the text half is surfaced rather than swallowed.
     """
     from sndr.dispatcher import should_apply, log_decision
 
@@ -333,24 +455,15 @@ def apply() -> tuple[str, str]:
     if not decision:
         return "skipped", reason
 
-    try:
-        # Reformatter first — see install_into_app (deep-audit #5): the
-        # suppressor drops every INFO access record, so installing it ahead of
-        # the reformatter starved it and zero [Genesis-API] lines were emitted.
-        _install_reformatter()
-        _suppress_uvicorn_access_logger()
-    except Exception as exc:
-        return (
-            "failed",
-            f"PN65 logging-filter install failed: {type(exc).__name__}: "
-            f"{str(exc)[:120]}",
-        )
+    status, install_reason = install_runtime()
+    if status != "applied":
+        return status, install_reason
 
-    return (
-        "applied",
-        "PN65 v3 (logging-only): reformatter attached to uvicorn.access; "
-        "Genesis-API structured lines emitted via genesis.api logger. "
-        "Zero request-path overhead — runs at log emit time after the "
-        f"response is on the wire. Quiet paths: {','.join(sorted(_quiet_paths()))}. "
-        "Set GENESIS_PN65_LOG_HEALTH=1 to include /health probes."
-    )
+    hook_status, hook_reason = install_self_install_hook()
+    if hook_status != "applied":
+        return "failed", (
+            f"{install_reason} IN THIS PROCESS ONLY — the exec-survival hook "
+            f"did not land ({hook_reason}), so the served process will not "
+            f"see PN65"
+        )
+    return "applied", f"{install_reason}; {hook_reason}"
