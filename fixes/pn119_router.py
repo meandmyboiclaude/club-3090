@@ -2585,8 +2585,18 @@ H119_PRIOR_BUDGET = "_h119_prior_budget"
 
 _consumer_state: dict = {"checked": False, "on": False, "deep": _DEEP_DEFAULT,
                          "lean": _LEAN_DEFAULT, "warned": 0,
+                         "lean_mult": 0.75, "deep_mult": 2.0,
+                         "lean_floor": 256,
                          "override_pn100": True,
                          "grace": _ROUTE_GRACE_DEFAULT}
+
+
+def _consumer_float(name: str, default: float) -> float:
+    try:
+        return float(_env(name, "") or default)
+    except ValueError:
+        logger.warning("[H119] %s is not a number — using %s", name, default)
+        return default
 
 
 def _consumer_int(name: str, default: int) -> int:
@@ -2601,6 +2611,8 @@ def reset_consumer_cache() -> None:
     """Re-read the H119 consumer env on the next call (tests only)."""
     _consumer_state.update({"checked": False, "on": False,
                             "deep": _DEEP_DEFAULT, "lean": _LEAN_DEFAULT,
+                            "lean_mult": 0.75, "deep_mult": 2.0,
+                            "lean_floor": 256,
                             "warned": 0, "override_pn100": True,
                             "grace": _ROUTE_GRACE_DEFAULT})
 
@@ -2622,6 +2634,14 @@ def _consumer_active() -> bool:
         st["on"] = _truthy(_env(_CONSUMER_FLAG, "0"))
         st["deep"] = _consumer_int("H119_DEEP_BUDGET", _DEEP_DEFAULT)
         st["lean"] = _consumer_int("H119_LEAN_BUDGET", _LEAN_DEFAULT)
+        # Route-as-modulation knobs (see _h119_route_budget). Defaults chosen
+        # so a lean row lands about one ladder rung below the caller's own
+        # sizing rather than on a flat constant: PN100 grants of 3100/3900
+        # become 2048/2048 instead of 1600, which is where the truncated
+        # wrong answers were coming from.
+        st["lean_mult"] = _consumer_float("H119_LEAN_MULT", 0.75)
+        st["deep_mult"] = _consumer_float("H119_DEEP_MULT", 2.0)
+        st["lean_floor"] = _consumer_int("H119_LEAN_FLOOR", 256)
         st["override_pn100"] = _truthy(_env(_OVERRIDE_PN100_FLAG, "1"))
         st["grace"] = max(_consumer_int("H119_ROUTE_GRACE_TOKENS",
                                         _ROUTE_GRACE_DEFAULT), 0)
@@ -2758,6 +2778,62 @@ def _h119_apply_budget(state: dict, budget: int) -> None:
         state["in_end"] = (budget - state.get("think_count", 0)) <= 0
 
 
+# Budget rungs. PN100 already rounds to a 100-token grid, so these exist to keep
+# a MODULATED budget on a small, stated set of values rather than emitting
+# arbitrary products — announced numbers, logs and sink rows all read better on
+# a ladder, and the probe cannot resolve more than ~3-4 levels anyway (score
+# span 2.31 in ln space against 2-sd spacing 0.88, so a 7-rung ladder would be
+# fitting noise). The ladder is wide; the ROUTE decides where on it you land.
+_BUDGET_LADDER = (128, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 10240)
+
+
+def _snap_to_ladder(v: float) -> int:
+    """Nearest rung, ties to the larger — over-granting is nearly free, and
+    under-granting truncates mid-thought and costs the answer."""
+    return min(_BUDGET_LADDER, key=lambda r: (abs(r - v), -r))
+
+
+def _h119_route_budget(route: str, prior: int | None) -> int:
+    """Turn a route into a budget by MODULATING the caller's, not replacing it.
+
+    [2026-07-26] The consumer used to substitute two constants — lean 1600,
+    deep 10240 — for whatever budget the request already had. That is strictly
+    coarser than what it overwrote: PN100 runs with GENESIS_PN100_CONTINUOUS=1
+    and already sizes every request individually from its own step estimate
+    (measured grants on one bench window: 300, 800, 1000, 1300 x21, 2100 x7,
+    3100 x13, 3900 x10, 6500). Flattening those to 1600 truncates the large end
+    and wastes the small end.
+
+    It was measured, not theorised: on a GPQA-100 stopped at 51 items, 20 rows
+    sat pinned at rtok 1595/1587 (= the 1600 cap minus the </think> slack) and
+    11 of the 17 WRONG answers were exactly those cap-truncated rows. The flat
+    cap was the dominant error source, not the routing.
+
+    So the route now expresses a RELATIVE judgement — "this needs more/less
+    than the classifier thought" — and the per-item sizing survives:
+      lean  -> prior * H119_LEAN_MULT, snapped, and NEVER raised above prior
+      deep  -> prior * H119_DEEP_MULT, snapped, and NEVER lowered below prior
+    Both clamp into [H119_LEAN_FLOOR, H119_DEEP_BUDGET]. A lean route can only
+    ever save tokens and a deep route can only ever spend them, which keeps the
+    direction of the decision legible in the sink.
+
+    With no prior (the caller sent no budget at all, so there is nothing to
+    modulate) the flat defaults are all we have and are used unchanged.
+    """
+    st = _consumer_state
+    if not prior or prior <= 0:
+        return st["lean"] if route == ROUTE_LEAN else st["deep"]
+    if route == ROUTE_LEAN:
+        b = max(_snap_to_ladder(prior * st["lean_mult"]), st["lean_floor"])
+        # The "never raise" clamp must come LAST, after the floor. Applying the
+        # floor afterwards let a tiny prior (100-250) be lifted to 256 — a LEAN
+        # route making a request more expensive, which inverts the whole
+        # contract. Caught by the invariant lean <= prior <= deep.
+        return min(b, int(prior))
+    b = _snap_to_ladder(prior * st["deep_mult"])
+    return min(st["deep"], max(b, int(prior)))
+
+
 def _h119_index_matches(index: int, req_id: str, state: dict) -> bool:
     """True iff batch slot `index` still holds the request we marked.
 
@@ -2891,8 +2967,7 @@ def h119_resolve_routes(holder) -> None:
                 # will never be routed. Commit to the defined fallback once.
                 route = route_for(req_id)
                 _bump("h119_route_missing")
-            budget = (_consumer_state["lean"] if route == ROUTE_LEAN
-                      else _consumer_state["deep"])
+            budget = _h119_route_budget(route, state.get(H119_PRIOR_BUDGET))
             _h119_apply_budget(state, budget)
             state[H119_PROVISIONAL] = False
             # BUG-139: the EFFECTIVE grant, recorded where the finish line can
