@@ -37,6 +37,15 @@ Env knobs:
                                      the benchmarked 70%-accuracy point)
   GENESIS_PN100_MIN_MAX_TOKENS       tiny-request exemption (default 128)
   GENESIS_PN100_TIMEOUT_S            classify timeout (default 20)
+  GENESIS_PN100_SHAPE_TIER0          DEFAULT-DARK [2026-07-25, tier-0/engage
+                                     defect]: request-SHAPE tier-0 rules that
+                                     short-circuit the classify call — see
+                                     _shape_tier0(). OFF (default) = classify
+                                     path byte-identical to before.
+  GENESIS_PN100_SHAPE_SMALL_MAX_TOKENS  small-completion-cap threshold used by
+                                     the temp-0 and forced-tool rules (512)
+  GENESIS_PN100_SHAPE_MAX_TEMP       "very low" temperature ceiling for the
+                                     temp-0 rule (default 0.0 = exactly zero)
 """
 from __future__ import annotations
 
@@ -156,6 +165,7 @@ _STATS: dict[str, int] = {
     "tier_3": 0,
     "explicit_skip": 0,
     "tiny_skip": 0,
+    "shape_tier0": 0,
     "prefilter_default": 0,
     "cache_hits": 0,
     "fallbacks": 0,
@@ -200,6 +210,66 @@ def _flatten_messages(request: Any, cap: int = 8000) -> str:
     return joined
 
 
+def _shape_tier0(request: Any) -> bool:
+    """[2026-07-25 tier-0/engage defect, showdown verdict #1] Request-SHAPE
+    hints that mark a structured-output call — land tier 0 WITHOUT spending a
+    classify call. DEFAULT-DARK behind GENESIS_PN100_SHAPE_TIER0.
+
+    Why: when the server decides (thinking_budget:"auto"), classify engages
+    thinking on ~95% of rows prod actually runs thinking-OFF (prod_mixed_v2:
+    the hindsight extract/consolidate class). Those calls are identifiable
+    from the REQUEST alone: they carry response_format json_schema (grammar-
+    enforced output) — the caller already declared "short structured answer,
+    no prose". Rules are deliberately explicit and narrow (PN16-regex lesson:
+    never infer triviality from prompt TEXT — only from request PARAMS):
+
+      A. structured-output constraint present: response_format type in
+         {json_object, json_schema, structural_tag}, or any vLLM guided-
+         decoding param (guided_json/regex/choice/grammar, structured_outputs).
+      B. temperature <= SHAPE_MAX_TEMP (default: exactly 0) AND completion
+         cap <= SHAPE_SMALL_MAX_TOKENS (default 512) — deterministic tiny
+         answers (label/verdict probes).
+      C. forced NAMED tool call (tool_choice={"type":"function",...}) AND the
+         same small completion cap — the answer is one short tool invocation
+         by construction.
+
+    Deliberately NOT claimed (false-tier-0 costs quality): temp-0 with a
+    large cap (temp-0 reasoning evals live there); tool_choice "auto"/
+    "required" (tool SELECTION can need thinking); short prompts; any
+    prompt-content heuristic; requests with explicit enable_thinking=True
+    (caller wins — handled at the call sites, which skip this check).
+    """
+    if not _env_bool("GENESIS_PN100_SHAPE_TIER0"):
+        return False
+    # Rule A — structured-output constraints.
+    rf = getattr(request, "response_format", None)
+    if rf is not None:
+        rf_type = rf.get("type") if isinstance(rf, dict) else getattr(rf, "type", None)
+        if rf_type in ("json_object", "json_schema", "structural_tag"):
+            return True
+    for attr in ("guided_json", "guided_regex", "guided_choice",
+                 "guided_grammar", "structured_outputs"):
+        if getattr(request, attr, None) is not None:
+            return True
+    cap = _completion_cap(request)
+    small = cap is not None and cap <= _env_int(
+        "GENESIS_PN100_SHAPE_SMALL_MAX_TOKENS", 512)
+    if not small:
+        return False
+    # Rule B — deterministic + tiny answer.
+    temp = getattr(request, "temperature", None)
+    if (isinstance(temp, (int, float)) and not isinstance(temp, bool)
+            and temp <= _env_float("GENESIS_PN100_SHAPE_MAX_TEMP", 0.0)):
+        return True
+    # Rule C — forced named tool call, short by construction.
+    tc = getattr(request, "tool_choice", None)
+    if tc is not None and not isinstance(tc, str):
+        tc_type = tc.get("type") if isinstance(tc, dict) else getattr(tc, "type", None)
+        if tc_type == "function":
+            return True
+    return False
+
+
 def _decide_mode(request: Any) -> tuple[str, bool]:
     """Return (mode, allow_disable). mode: 'skip' | 'classify' | direct int str."""
     ctk = getattr(request, "chat_template_kwargs", None) or {}
@@ -229,6 +299,10 @@ def _decide_mode(request: Any) -> tuple[str, bool]:
         if control == "auto":
             if explicit_thinking is False:
                 return "skip", True
+            # [2026-07-25 shape-tier0, DARK] explicit enable_thinking=True
+            # still wins (rule skipped -> classify clamps tier 0 to 1).
+            if explicit_thinking is not True and _shape_tier0(request):
+                return "shape0", True
             return "classify", explicit_thinking is not True
 
     if explicit_thinking is False:
@@ -239,6 +313,11 @@ def _decide_mode(request: Any) -> tuple[str, bool]:
         return "tiny", True
 
     if _env_bool("GENESIS_PN100_AUTO_DEFAULT"):
+        # [2026-07-25 shape-tier0, DARK] checked BEFORE the length prefilter:
+        # a long structured-output prompt (the prod extract class) must land
+        # tier 0, not the prefilter's default tier.
+        if explicit_thinking is not True and _shape_tier0(request):
+            return "shape0", True
         if _skip_classify_by_length(request):
             return "default", explicit_thinking is not True
         return "classify", explicit_thinking is not True
@@ -559,6 +638,17 @@ async def apply_hook_async(serving: Any, request: Any) -> None:
         return
     if mode == "tiny":
         _STATS["tiny_skip"] += 1
+        return
+    if mode == "shape0":
+        # [2026-07-25 shape-tier0, DARK] structured-output request shape —
+        # tier 0 with zero classify spend. Log line keeps the
+        # "PN100: tier=N -> ..." grammar prod_footprint.py parses.
+        _STATS["shape_tier0"] += 1
+        applied = _apply_tier(request, 0, allow_disable)
+        log.info(
+            "PN100: tier=0 -> %s (shape-hint, no classify)",
+            "thinking off" if applied == 0 else f"budget={applied}",
+        )
         return
     if mode == "default":
         # Prefilter: too long to be trivial, so the classify call could only
