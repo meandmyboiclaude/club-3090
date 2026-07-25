@@ -163,10 +163,50 @@ P101_LOOP_NEW = (
 )
 
 
+# ─── KVQ variant (2026-07-25, wheel v2 / club-dev1474-cherry-max) ──────────
+# Our own KVQ squash added nuqv value-codebook plumbing, which inserts three
+# kwargs into the continuation decode call that P101's literal anchor spans:
+#
+#     PiT=PiT,
+#     value_nuq=..., val_centroids=..., value_outliers=...   <-- new
+#   )
+#
+# That broke sub-patch 2 ("anchor not found") on the v2 image while the v1 and
+# dev1060 images still carry the old form. The tree is DUAL-PIN, so we sniff the
+# target instead of rewriting the anchor: old pins keep the old literal, the KVQ
+# pin gets the spliced one. The REPLACEMENT is spliced too — otherwise P101's
+# rewritten call would silently drop the KVQ kwargs and the nuqv presets would
+# stop taking effect on the continuation path.
+_KVQ_DECODE_KWARGS = (
+    'value_nuq=self.tq_config.value_nuq,',
+    'val_centroids=getattr(layer, "_tq_val_centroids", None),',
+    'value_outliers=self.tq_config.n_value_outliers,',
+)
+# Sniff on a kwarg that only the KVQ squash introduces here.
+_KVQ_SNIFF = "value_nuq=self.tq_config.value_nuq,"
+
+
+def _splice_kvq_kwargs(text: str, indent: int) -> str:
+    """Insert the KVQ kwargs directly after the ``PiT=PiT,`` line."""
+    pit = f"{' ' * indent}PiT=PiT,\n"
+    if pit not in text:
+        return text
+    block = "".join(f"{' ' * indent}{kw}\n" for kw in _KVQ_DECODE_KWARGS)
+    return text.replace(pit, pit + block, 1)
+
+
 def _make_patcher() -> TextPatcher | None:
     target = resolve_vllm_file("v1/attention/backends/turboquant_attn.py")
     if target is None:
         return None
+    loop_old, loop_new = P101_LOOP_OLD, P101_LOOP_NEW
+    try:
+        if _KVQ_SNIFF in target.read_text(encoding="utf-8"):
+            # OLD call is indented 24; the NEW sliced-loop call is indented 28.
+            loop_old = _splice_kvq_kwargs(P101_LOOP_OLD, 24)
+            loop_new = _splice_kvq_kwargs(P101_LOOP_NEW, 28)
+    except OSError:
+        pass  # unreadable target -> fall through; TextPatcher reports the miss
     return TextPatcher(
         patch_name="P101 turboquant_attn.py — TQ continuation 64-token slicing (vllm#41123)",
         target_file=str(target),
@@ -180,8 +220,8 @@ def _make_patcher() -> TextPatcher | None:
             ),
             TextPatch(
                 name="p101_continuation_slicing_loop",
-                anchor=P101_LOOP_OLD,
-                replacement=P101_LOOP_NEW,
+                anchor=loop_old,
+                replacement=loop_new,
                 required=True,
             ),
         ],
