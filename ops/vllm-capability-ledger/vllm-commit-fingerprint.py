@@ -59,7 +59,7 @@ import subprocess
 import sys
 import tempfile
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))  # realpath: these are symlinked into ~/shared/tools
 from vllm_ledger_lib import LEDGER_DIR, REPO, dump_json, eprint, git, run  # noqa: E402
 
 VLLM_BUILD = os.environ.get("VLLM_BUILD", "/home/user/engines/vllm-build")

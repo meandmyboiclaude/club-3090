@@ -29,7 +29,7 @@ import os
 import re
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))  # realpath: these are symlinked into ~/shared/tools
 from vllm_ledger_lib import (  # noqa: E402
     FIXES, GENESIS, LEDGER_DIR, MOUNTS, REPO, SNDR, VLLM_DIR, dump_json,
     eprint, load_json,

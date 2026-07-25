@@ -56,7 +56,7 @@ import json
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))  # realpath: these are symlinked into ~/shared/tools
 from vllm_ledger_lib import (  # noqa: E402
     CONTAINER_VLLM, ContainerInspector, ImageInspector, LEDGER_DIR, MOUNTS,
     REPO, TreeInspector, container_env, eprint, image_of, load_json, run,
@@ -204,6 +204,13 @@ def verify_capability(cap: dict, insp, env: dict[str, str], mode: str) -> dict:
         if mode == "image":
             return {"state": NA,
                     "why": "boot-time text patch; an image holds pristine vllm",
+                    "flag": fstate}
+        if mode == "tree":
+            # There is no installed vllm on the host to carry the marker.
+            # --tree is for the COMMIT sweep and for a syntax-level sanity
+            # pass; it can never answer "is this patch in effect".
+            return {"state": NA,
+                    "why": "marker lives in the INSTALLED vllm; use --container",
                     "flag": fstate}
         targets = expand_targets(targets, insp)
         hits, miss = [], []
