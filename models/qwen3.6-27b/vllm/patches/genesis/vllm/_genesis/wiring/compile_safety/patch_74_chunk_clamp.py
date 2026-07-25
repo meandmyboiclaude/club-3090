@@ -98,14 +98,16 @@ GENESIS_P74_MARKER = "Genesis P74 auto chunk-clamp via long_prefill_token_thresh
 # Anchor on `if self.max_num_partial_prefills > 1:` block which is unique
 # inside SchedulerConfig.__post_init__.
 
+# [2026-07-25 re-anchor] anchor narrowed to the info_once block alone:
+# nightly-0ba2aa35 moved the max_num_partial_prefills check that used to
+# trail it. The block is byte-identical (and unique) in both pins, so one
+# form serves old and new; the clamp still inserts directly after it.
 P74_OLD = (
     "        if self.enable_chunked_prefill:\n"
     "            logger.info_once(\n"
     "                \"Chunked prefill is enabled with max_num_batched_tokens=%d.\",\n"
     "                self.max_num_batched_tokens,\n"
     "            )\n"
-    "\n"
-    "        if self.max_num_partial_prefills > 1:\n"
 )
 
 P74_NEW = (
@@ -156,8 +158,6 @@ P74_NEW = (
     "                '[Genesis P74] auto-clamp failed (%s); upstream behavior preserved.',\n"
     "                _genesis_p74_err,\n"
     "            )\n"
-    "\n"
-    "        if self.max_num_partial_prefills > 1:\n"
 )
 
 

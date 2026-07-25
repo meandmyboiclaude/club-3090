@@ -78,7 +78,10 @@ def ensure_pool_registered() -> None:
     PersistentBufferRegistry().get_slice_pool(POOL_FLA_KKT_PERSISTENT_A)
 
 # Module paths we target. Primary + candidates for future renames.
+# [2026-07-25] vllm#48500 moved fla ops to third_party/flash_linear_attention;
+# new path first, old path kept for prod's dev1060cherry pin.
 _CANDIDATE_MODULE_PATHS = (
+    "vllm.third_party.flash_linear_attention.ops.chunk_scaled_dot_kkt",
     "vllm.model_executor.layers.fla.ops.chunk_scaled_dot_kkt",
 )
 _FN_NAME = "chunk_scaled_dot_kkt_fwd"
@@ -364,13 +367,17 @@ def apply() -> tuple[str, str]:
     # and siblings if they imported it.
     import sys as _sys
     rebound_callers = []
-    fla_ops_prefix = "vllm.model_executor.layers.fla.ops"
+    # [2026-07-25] both fla homes (vllm#48500 move) — old kept for prod pin.
+    fla_ops_prefixes = (
+        "vllm.third_party.flash_linear_attention.ops",
+        "vllm.model_executor.layers.fla.ops",
+    )
     for mod_name, caller_mod in list(_sys.modules.items()):
         if caller_mod is None:
             continue
-        if not mod_name.startswith(fla_ops_prefix):
+        if not mod_name.startswith(fla_ops_prefixes):
             continue
-        if mod_name == _CANDIDATE_MODULE_PATHS[0]:
+        if mod_name in _CANDIDATE_MODULE_PATHS:
             continue
         existing = getattr(caller_mod, _FN_NAME, None)
         if existing is original:

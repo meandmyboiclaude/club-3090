@@ -284,11 +284,15 @@ def _make_kv_cache_manager_patcher(
                 required=False,
             ),
         ],
-        # No explicit upstream_drift_markers: if #45202 merges it removes
-        # the required LOOKUP record() anchor, so the patcher self-skips
-        # with "anchor not found" — the correct drift behavior, with no
-        # self-collision risk (PN369 class).
-        upstream_drift_markers=[],
+        # [2026-07-25] #45202 closed unmerged, but nightly-0ba2aa35's #48860
+        # natively replaces this patch: record_prefix_cache_stats() is now
+        # called from the scheduler at ADMISSION (after allocate_slots
+        # succeeded — the `new_blocks is None -> break` exits first), which
+        # is exactly the double-count fix P88 provided. The marker turns the
+        # former "anchor not found" partial-warning into a clean
+        # upstream-merged self-skip; prod's dev1060cherry pin (no #48860)
+        # still applies normally.
+        upstream_drift_markers=["def record_prefix_cache_stats"],
     )
 
 

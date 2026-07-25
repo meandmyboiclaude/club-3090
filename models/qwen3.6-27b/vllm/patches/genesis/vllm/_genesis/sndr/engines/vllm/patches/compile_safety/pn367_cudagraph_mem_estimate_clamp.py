@@ -141,10 +141,48 @@ PN367_WORKER_NEW = (
 )
 
 
+# [2026-07-25 re-anchor] nightly-0ba2aa35 switched the free-memory probe to
+# torch.accelerator.get_memory_info() and re-indented the worker call site
+# (estimate now initialized to 0 + platform-gated). Same clamps, new shapes.
+PN367_RUNNER_OLD_V2 = PN367_RUNNER_OLD.replace(
+    "free_after = torch.cuda.mem_get_info()[0]",
+    "free_after = torch.accelerator.get_memory_info()[0]",
+)
+PN367_RUNNER_NEW_V2 = PN367_RUNNER_NEW.replace(
+    "free_after = torch.cuda.mem_get_info()[0]",
+    "free_after = torch.accelerator.get_memory_info()[0]",
+)
+PN367_WORKER_OLD_V2 = (
+    "            cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()\n"
+)
+PN367_WORKER_NEW_V2 = (
+    "            cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()\n"
+    "            # [Genesis PN367 cudagraph memory estimate clamp (vendor of vllm#44745, formerly #45076) v2] final non-negative guard\n"
+    "            cudagraph_memory_estimate = max(cudagraph_memory_estimate, 0)\n"
+)
+
+
+def _pick(target: str, old_v1: str, new_v1: str, old_v2: str, new_v2: str):
+    """Content-sniffed anchor generation (dual-pin: prod runs the old shape)."""
+    try:
+        with open(target, encoding="utf-8") as f:
+            content = f.read()
+    except OSError:
+        content = ""
+    if old_v1 in content or old_v2 not in content:
+        return old_v1, new_v1
+    return old_v2, new_v2
+
+
 def _make_runner_patcher() -> TextPatcher | None:
     target = resolve_vllm_file(_RUNNER_REL)
     if target is None:
         return None
+    _r_anchor, _r_repl = _pick(
+        str(target),
+        PN367_RUNNER_OLD, PN367_RUNNER_NEW,
+        PN367_RUNNER_OLD_V2, PN367_RUNNER_NEW_V2,
+    )
     return TextPatcher(
         patch_name=(
             "PN367 gpu_model_runner.py — clamp negative decoder cudagraph "
@@ -155,8 +193,8 @@ def _make_runner_patcher() -> TextPatcher | None:
         sub_patches=[
             TextPatch(
                 name="pn367_decoder_mem_sample_clamp",
-                anchor=PN367_RUNNER_OLD,
-                replacement=PN367_RUNNER_NEW,
+                anchor=_r_anchor,
+                replacement=_r_repl,
                 required=True,
             ),
             TextPatch(
@@ -176,6 +214,11 @@ def _make_worker_patcher() -> TextPatcher | None:
     target = resolve_vllm_file(_WORKER_REL)
     if target is None:
         return None
+    _w_anchor, _w_repl = _pick(
+        str(target),
+        PN367_WORKER_OLD, PN367_WORKER_NEW,
+        PN367_WORKER_OLD_V2, PN367_WORKER_NEW_V2,
+    )
     return TextPatcher(
         patch_name=(
             "PN367 gpu_worker.py — final non-negative cudagraph estimate "
@@ -186,8 +229,8 @@ def _make_worker_patcher() -> TextPatcher | None:
         sub_patches=[
             TextPatch(
                 name="pn367_worker_final_guard",
-                anchor=PN367_WORKER_OLD,
-                replacement=PN367_WORKER_NEW,
+                anchor=_w_anchor,
+                replacement=_w_repl,
                 required=True,
             ),
         ],

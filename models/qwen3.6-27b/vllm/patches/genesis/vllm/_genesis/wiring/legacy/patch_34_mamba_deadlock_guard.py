@@ -131,10 +131,54 @@ _NEW = (
 )
 
 
+# [2026-07-25 re-anchor] nightly-0ba2aa35's #47782 (Marconi selective hybrid
+# cache retention) rewrote the chunk-alignment block into an end/stops shape.
+# #40757 is still OPEN and the new `end = end // block_size * block_size`
+# floor can still empty the chunk -> caller skips -> scheduler spins. Same
+# guard, new shape: only accept the floored end when it keeps the chunk
+# non-empty. The v1 anchors stay for pins predating the rewrite.
+_OLD_V2 = (
+    "        end = start + num_new_tokens\n"
+    "        # Until `last_cache_position`, chunk ends must land on block\n"
+    "        # boundaries. May yield an empty chunk (budget cannot reach the next\n"
+    "        # boundary); the caller then skips the request.\n"
+    "        if end < last_cache_position:\n"
+    "            end = end // block_size * block_size\n"
+)
+
+_NEW_V2 = (
+    "        end = start + num_new_tokens\n"
+    "        # Until `last_cache_position`, chunk ends must land on block\n"
+    "        # boundaries. May yield an empty chunk (budget cannot reach the next\n"
+    "        # boundary); the caller then skips the request.\n"
+    "        # [Genesis P34] Zero-collapse deadlock guard (upstream PR #40757).\n"
+    "        # If flooring to the block grid would empty the chunk, keep the\n"
+    "        # sub-block end — Mamba state is still maintained by\n"
+    "        # preprocess_mamba (\"simply not cached\" applies); a permanently\n"
+    "        # empty chunk spins the scheduler forever when adjacent multimodal\n"
+    "        # inputs can't co-fit in the encoder cache.\n"
+    "        if end < last_cache_position:\n"
+    "            _genesis_p34_floored = end // block_size * block_size\n"
+    "            if _genesis_p34_floored > start:\n"
+    "                end = _genesis_p34_floored\n"
+)
+
+
 def _make_patcher() -> TextPatcher | None:
     target = resolve_vllm_file("v1/core/sched/scheduler.py")
     if target is None:
         return None
+    # Pick the anchor generation by file content (dual-pin: prod's
+    # dev1060cherry image carries the pre-#47782 shape).
+    try:
+        with open(target, encoding="utf-8") as f:
+            _content = f.read()
+    except OSError:
+        _content = ""
+    if _OLD in _content or _OLD_V2 not in _content:
+        anchor, replacement = _OLD, _NEW
+    else:
+        anchor, replacement = _OLD_V2, _NEW_V2
     return TextPatcher(
         patch_name="P34 Mamba zero-collapse deadlock guard",
         target_file=target,
@@ -142,8 +186,8 @@ def _make_patcher() -> TextPatcher | None:
         sub_patches=[
             TextPatch(
                 name="p34_deadlock_guard",
-                anchor=_OLD,
-                replacement=_NEW,
+                anchor=anchor,
+                replacement=replacement,
                 required=True,
             ),
         ],

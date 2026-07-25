@@ -132,10 +132,43 @@ PN293_NEW = (
 )
 
 
+# [2026-07-25 re-anchor] nightly-0ba2aa35 added a 2-line "ReplaySSM handles
+# these rows..." comment inside the if-block. Same code, new comment —
+# v2 anchor includes it, v2 replacement preserves it in the guarded branch.
+PN293_OLD_V2 = PN293_OLD.replace(
+    "        if torch.any(prefill_to_decode).item():\n"
+    "            is_prefilling = is_prefilling.clone()\n",
+    "        if torch.any(prefill_to_decode).item():\n"
+    "            # ReplaySSM handles these rows as single-token flushes (see the\n"
+    "            # write-position derivation below), same as the baseline decode path.\n"
+    "            is_prefilling = is_prefilling.clone()\n",
+)
+
+PN293_NEW_V2 = PN293_NEW.replace(
+    "                if bool(prefill_to_decode.any()):\n"
+    "                    is_prefilling = is_prefilling.clone()\n",
+    "                if bool(prefill_to_decode.any()):\n"
+    "                    # ReplaySSM handles these rows as single-token flushes (see the\n"
+    "                    # write-position derivation below), same as the baseline decode path.\n"
+    "                    is_prefilling = is_prefilling.clone()\n",
+)
+
+
 def _make_patcher() -> TextPatcher | None:
     target = resolve_vllm_file("v1/attention/backends/mamba_attn.py")
     if target is None:
         return None
+    # Pick the anchor generation by file content (dual-pin: prod's
+    # dev1060cherry image carries the comment-free shape).
+    try:
+        with open(target, encoding="utf-8") as f:
+            _content = f.read()
+    except OSError:
+        _content = ""
+    if PN293_OLD_V2 in _content:
+        _anchor, _replacement = PN293_OLD_V2, PN293_NEW_V2
+    else:
+        _anchor, _replacement = PN293_OLD, PN293_NEW
     return TextPatcher(
         patch_name=(
             "PN293 v1/attention/backends/mamba_attn.py — "
@@ -146,8 +179,8 @@ def _make_patcher() -> TextPatcher | None:
         sub_patches=[
             TextPatch(
                 name="pn293_prefill_to_decode_fastpath",
-                anchor=PN293_OLD,
-                replacement=PN293_NEW,
+                anchor=_anchor,
+                replacement=_replacement,
                 required=True,
             ),
         ],

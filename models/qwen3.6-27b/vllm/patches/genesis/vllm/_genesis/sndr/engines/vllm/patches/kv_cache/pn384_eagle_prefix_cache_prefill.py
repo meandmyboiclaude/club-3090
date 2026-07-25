@@ -383,11 +383,156 @@ PN384_HYBRID_DROP_NEW_DEV1060 = (
 )
 
 
+
+
+# [2026-07-25 re-anchor] nightly-0ba2aa35 (v0ba) generation: #48860/#47782
+# widened find_longest_cache_hit to a 3-tuple return
+# (num_uncached_common_prefix_tokens) and reworked the unitary body +
+# manager call site. Same skip_eagle_pop threading, new shapes. The drop
+# anchors are unchanged in this generation (base forms still match).
+PN384_SIG_ABSTRACT_OLD_V0BA = (
+    "    @abstractmethod\n"
+    "    def find_longest_cache_hit(\n"
+    "        self,\n"
+    "        block_hashes: list[BlockHash],\n"
+    "        max_cache_hit_length: int,\n"
+    "    ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:\n"
+    "        \"\"\"Returns the per-group hit blocks, the hit length, and the number of\n"
+    "        ``num_uncached_common_prefix_tokens`` (a shared prefix that a\n"
+    "        sparse-retention group has not cached yet; 0 unless hybrid).\"\"\"\n"
+    "        pass\n"
+)
+
+PN384_SIG_ABSTRACT_NEW_V0BA = (
+    "    @abstractmethod\n"
+    "    def find_longest_cache_hit(\n"
+    "        self,\n"
+    "        block_hashes: list[BlockHash],\n"
+    "        max_cache_hit_length: int,\n"
+    "        # [Genesis PN384 vendor of vllm#44986] Prefill-only flag: when\n"
+    "        # True (num_output_tokens == 0) the EAGLE/MTP last-block drop is\n"
+    "        # suppressed, since no draft tokens exist yet to recompute.\n"
+    "        skip_eagle_pop: bool = False,\n"
+    "    ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:\n"
+    "        \"\"\"Returns the per-group hit blocks, the hit length, and the number of\n"
+    "        ``num_uncached_common_prefix_tokens`` (a shared prefix that a\n"
+    "        sparse-retention group has not cached yet; 0 unless hybrid).\"\"\"\n"
+    "        pass\n"
+)
+
+PN384_SIG_NOPREFIX_OLD_V0BA = (
+    "    def find_longest_cache_hit(\n"
+    "        self,\n"
+    "        block_hashes: list[BlockHash],\n"
+    "        max_cache_hit_length: int,\n"
+    "    ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:\n"
+    "        blocks: tuple[list[KVCacheBlock], ...] = tuple(\n"
+    "            [] for _ in range(self.num_single_type_manager)\n"
+    "        )\n"
+)
+
+PN384_SIG_NOPREFIX_NEW_V0BA = (
+    "    def find_longest_cache_hit(\n"
+    "        self,\n"
+    "        block_hashes: list[BlockHash],\n"
+    "        max_cache_hit_length: int,\n"
+    "        # [Genesis PN384 vendor of vllm#44986] Accepted for signature\n"
+    "        # parity with the base; prefix caching is disabled here so the\n"
+    "        # flag is inert (this override returns an empty hit).\n"
+    "        skip_eagle_pop: bool = False,\n"
+    "    ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:\n"
+    "        blocks: tuple[list[KVCacheBlock], ...] = tuple(\n"
+    "            [] for _ in range(self.num_single_type_manager)\n"
+    "        )\n"
+)
+
+PN384_SIG_UNITARY_OLD_V0BA = (
+    "    def find_longest_cache_hit(\n"
+    "        self,\n"
+    "        block_hashes: list[BlockHash],\n"
+    "        max_cache_hit_length: int,\n"
+    "    ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:\n"
+    "        hit_blocks, hit_length = self.single_type_managers[0].find_longest_cache_hit(\n"
+)
+
+PN384_SIG_UNITARY_NEW_V0BA = (
+    "    def find_longest_cache_hit(\n"
+    "        self,\n"
+    "        block_hashes: list[BlockHash],\n"
+    "        max_cache_hit_length: int,\n"
+    "        # [Genesis PN384 vendor of vllm#44986] Prefill-only flag; folded\n"
+    "        # into drop_eagle_block below so the EAGLE drop is skipped in\n"
+    "        # prefill (num_output_tokens == 0), recovering the lost block.\n"
+    "        skip_eagle_pop: bool = False,\n"
+    "    ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:\n"
+    "        hit_blocks, hit_length = self.single_type_managers[0].find_longest_cache_hit(\n"
+)
+
+PN384_SIG_HYBRID_OLD_V0BA = (
+    "    def find_longest_cache_hit(\n"
+    "        self,\n"
+    "        block_hashes: list[BlockHash],\n"
+    "        max_cache_hit_length: int,\n"
+    "    ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:\n"
+    "        \"\"\"\n"
+    "        Find the longest cache hit using an iterative fixed-point algorithm.\n"
+)
+
+PN384_SIG_HYBRID_NEW_V0BA = (
+    "    def find_longest_cache_hit(\n"
+    "        self,\n"
+    "        block_hashes: list[BlockHash],\n"
+    "        max_cache_hit_length: int,\n"
+    "        # [Genesis PN384 vendor of vllm#44986] Prefill-only flag; folded\n"
+    "        # into the per-group drop_eagle_block decision below so the\n"
+    "        # last-block drop is skipped in prefill (num_output_tokens == 0).\n"
+    "        skip_eagle_pop: bool = False,\n"
+    "    ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:\n"
+    "        \"\"\"\n"
+    "        Find the longest cache hit using an iterative fixed-point algorithm.\n"
+)
+
+PN384_MANAGER_OLD_V0BA = (
+    "        max_cache_hit_length = request.num_tokens - 1\n"
+    "        computed_blocks, num_new_computed_tokens, num_uncached = (\n"
+    "            self.coordinator.find_longest_cache_hit(\n"
+    "                request.block_hashes, max_cache_hit_length\n"
+    "            )\n"
+    "        )\n"
+)
+
+PN384_MANAGER_NEW_V0BA = (
+    "        max_cache_hit_length = request.num_tokens - 1\n"
+    "        # [Genesis PN384 vendor of vllm#44986] Prefill phase has no draft\n"
+    "        # tokens yet (num_output_tokens == 0), so the EAGLE/MTP\n"
+    "        # last-block drop is pure loss here. Thread skip_eagle_pop so the\n"
+    "        # coordinator keeps the final matched block during prefill,\n"
+    "        # recovering 1 prefix-cache block per prefill on every MTP request\n"
+    "        # (the entire hit when block_size > prompt). Decode is unchanged.\n"
+    "        is_prefill_phase = (request.num_output_tokens == 0)\n"
+    "        computed_blocks, num_new_computed_tokens, num_uncached = (\n"
+    "            self.coordinator.find_longest_cache_hit(\n"
+    "                request.block_hashes,\n"
+    "                max_cache_hit_length,\n"
+    "                skip_eagle_pop=is_prefill_phase,\n"
+    "            )\n"
+    "        )\n"
+)
+
+
 def _pick(content: str | None, base: tuple[str, str],
-          dev1060: tuple[str, str]) -> tuple[str, str]:
-    """Pick the (anchor, replacement) variant present in `content`."""
-    if content is not None and dev1060[0] in content:
-        return dev1060
+          dev1060: tuple[str, str],
+          v0ba: tuple[str, str] | None = None) -> tuple[str, str]:
+    """Pick the (anchor, replacement) variant present in `content`.
+
+    [2026-07-25] `v0ba` (nightly-0ba2aa35 generation) is probed first,
+    then dev1060, then base — newest shape wins when present.
+    """
+    if content is not None:
+        if v0ba is not None and v0ba[0] in content:
+            return v0ba
+        if dev1060[0] in content:
+            return dev1060
     return base
 
 
@@ -399,10 +544,29 @@ def coordinator_sub_patches(
     When `target_content` is given, drifted sites select their dev1060
     variant by content probe so every sub-patch can stay required=True.
     """
+    sig_abstract = _pick(
+        target_content,
+        (PN384_SIG_ABSTRACT_OLD, PN384_SIG_ABSTRACT_NEW),
+        (PN384_SIG_ABSTRACT_OLD, PN384_SIG_ABSTRACT_NEW),
+        (PN384_SIG_ABSTRACT_OLD_V0BA, PN384_SIG_ABSTRACT_NEW_V0BA),
+    )
+    sig_noprefix = _pick(
+        target_content,
+        (PN384_SIG_NOPREFIX_OLD, PN384_SIG_NOPREFIX_NEW),
+        (PN384_SIG_NOPREFIX_OLD, PN384_SIG_NOPREFIX_NEW),
+        (PN384_SIG_NOPREFIX_OLD_V0BA, PN384_SIG_NOPREFIX_NEW_V0BA),
+    )
     sig_unitary = _pick(
         target_content,
         (PN384_SIG_UNITARY_OLD, PN384_SIG_UNITARY_NEW),
         (PN384_SIG_UNITARY_OLD_DEV1060, PN384_SIG_UNITARY_NEW_DEV1060),
+        (PN384_SIG_UNITARY_OLD_V0BA, PN384_SIG_UNITARY_NEW_V0BA),
+    )
+    sig_hybrid = _pick(
+        target_content,
+        (PN384_SIG_HYBRID_OLD, PN384_SIG_HYBRID_NEW),
+        (PN384_SIG_HYBRID_OLD, PN384_SIG_HYBRID_NEW),
+        (PN384_SIG_HYBRID_OLD_V0BA, PN384_SIG_HYBRID_NEW_V0BA),
     )
     unitary_drop = _pick(
         target_content,
@@ -417,14 +581,14 @@ def coordinator_sub_patches(
     return [
         TextPatch(
             name="pn384_sig_abstract",
-            anchor=PN384_SIG_ABSTRACT_OLD,
-            replacement=PN384_SIG_ABSTRACT_NEW,
+            anchor=sig_abstract[0],
+            replacement=sig_abstract[1],
             required=True,
         ),
         TextPatch(
             name="pn384_sig_noprefix",
-            anchor=PN384_SIG_NOPREFIX_OLD,
-            replacement=PN384_SIG_NOPREFIX_NEW,
+            anchor=sig_noprefix[0],
+            replacement=sig_noprefix[1],
             required=True,
         ),
         TextPatch(
@@ -435,8 +599,8 @@ def coordinator_sub_patches(
         ),
         TextPatch(
             name="pn384_sig_hybrid",
-            anchor=PN384_SIG_HYBRID_OLD,
-            replacement=PN384_SIG_HYBRID_NEW,
+            anchor=sig_hybrid[0],
+            replacement=sig_hybrid[1],
             required=True,
         ),
         TextPatch(
@@ -454,13 +618,21 @@ def coordinator_sub_patches(
     ]
 
 
-def manager_sub_patches() -> list[TextPatch]:
+def manager_sub_patches(
+    target_content: str | None = None,
+) -> list[TextPatch]:
     """Return the manager sub-patches (exposed for tests)."""
+    mgr = _pick(
+        target_content,
+        (PN384_MANAGER_OLD, PN384_MANAGER_NEW),
+        (PN384_MANAGER_OLD, PN384_MANAGER_NEW),
+        (PN384_MANAGER_OLD_V0BA, PN384_MANAGER_NEW_V0BA),
+    )
     return [
         TextPatch(
             name="pn384_manager_thread",
-            anchor=PN384_MANAGER_OLD,
-            replacement=PN384_MANAGER_NEW,
+            anchor=mgr[0],
+            replacement=mgr[1],
             required=True,
         ),
     ]
@@ -487,6 +659,11 @@ def _make_coordinator_patcher_from(target_file: str) -> TextPatcher:
 
 def _make_manager_patcher_from(target_file: str) -> TextPatcher:
     """Build the manager TextPatcher for an explicit target path."""
+    try:
+        with open(target_file, encoding="utf-8") as f:
+            _content = f.read()
+    except (OSError, UnicodeDecodeError):
+        _content = None
     return TextPatcher(
         patch_name=(
             "PN384 v1/core/kv_cache_manager.py — derive is_prefill_phase + "
@@ -494,7 +671,7 @@ def _make_manager_patcher_from(target_file: str) -> TextPatcher:
         ),
         target_file=target_file,
         marker=GENESIS_PN384_MARKER,
-        sub_patches=manager_sub_patches(),
+        sub_patches=manager_sub_patches(_content),
         upstream_drift_markers=list(_MANAGER_DRIFT_MARKERS),
     )
 
