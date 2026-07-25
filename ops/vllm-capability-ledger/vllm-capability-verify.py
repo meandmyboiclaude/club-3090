@@ -280,6 +280,26 @@ def verify_capability(cap: dict, insp, env: dict[str, str], mode: str) -> dict:
                        "Needs a self-install hook or a text patch.",
                 "flag": fstate}
 
+    # Shared-id suppression carve, for every marker-sweep outcome that is NOT
+    # a clean LIVE.  It used to exist only inside zero_marker_verdict(), i.e.
+    # only where ZERO markers were found, so a suppressed lane-2 row whose
+    # lane-1 twin had written a DIFFERENTLY-VERSIONED marker came out
+    # DEGRADED/PARTIAL or MISSING instead of DARK.  Four of the five PARTIAL
+    # rows on the 07-25 baseline were exactly that shape: lane-1 applies and
+    # writes ITS marker, lane-2's copy is DISABLE'd by
+    # sndr_lane.apply_policy(), and lane-2's own newer marker constant is
+    # correctly absent.  A clean LIVE is deliberately left alone — the marker
+    # really is in the installed file, and downgrading a demonstrated effect
+    # to DARK would re-path 63 rows to say something less true.
+    def _suppressed() -> dict | None:
+        if not cap.get("lane2_suppressed_by_lane1"):
+            return None
+        return {"state": DARK,
+                "why": "lane-2 copy of a lane-1-owned shared id; sndr_lane "
+                       "sets GENESIS_DISABLE_* by design — the lane-1 row "
+                       "carries the verdict",
+                "flag": fstate}
+
     # --- marker sweep: the primary EFFECT check -----------------------------
     if markers and targets:
         if mode == "image":
@@ -307,17 +327,25 @@ def verify_capability(cap: dict, insp, env: dict[str, str], mode: str) -> dict:
             # reasoning/qwen3_reasoning_parser.py removed).  This is a
             # RE-ANCHOR item, distinct from "applied but had no effect".
             state = NA if "retired" in notes else MISSING
-            return {"state": state,
+            # A retired row's N/A is more specific than the suppression DARK;
+            # only let the carve rewrite the MISSING case.
+            return (_suppressed() if state is MISSING else None) or {
+                    "state": state,
                     "why": f"target path no longer exists upstream "
                            f"({os.path.basename(targets[0])}) — needs re-anchor "
                            f"or formal retirement",
                     "flag": fstate}
         if hits and not miss:
             note = " (matched by 40-char prefix: multi-line literal)" if by_prefix else ""
+            if cap.get("lane2_suppressed_by_lane1"):
+                note += " — written by the lane-1 twin, not this suppressed copy"
             return {"state": LIVE,
                     "why": f"marker present in {len(present_targets)} target(s){note}",
                     "flag": fstate}
         if hits and miss:
+            supp = _suppressed()
+            if supp:
+                return supp
             return {"state": DEGRADED,
                     "why": f"PARTIAL: {len(hits)}/{len(markers)} markers present "
                            f"— missing {miss[:2]} (PN346B class: one sub-patch "
@@ -586,6 +614,11 @@ def main() -> int:
                 r["state"], r["why"] = NA, "boot marker; image is pristine"
             elif hit and not miss:
                 r["state"], r["why"] = LIVE, "marker found by tree sweep (target undeclared)"
+            elif hit and miss and n["cap"].get("lane2_suppressed_by_lane1"):
+                r["state"] = DARK
+                r["why"] = ("lane-2 copy of a lane-1-owned shared id; sndr_lane "
+                            "sets GENESIS_DISABLE_* by design — the lane-1 row "
+                            "carries the verdict")
             elif hit and miss:
                 # This branch did not exist.  A partial hit reported LIVE, so
                 # the whole PN346B class — the reason DEGRADED exists — was

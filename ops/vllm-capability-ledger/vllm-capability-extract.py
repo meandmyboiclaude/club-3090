@@ -381,10 +381,33 @@ def main() -> int:
     # deliberately no-ops.  Its boot line reads "explicitly disabled by
     # operator", which looks like operator action but is self-inflicted by
     # design.  Without this flag the verifier calls ~120 of them lost.
+    # sndr_lane.apply_policy() computes this as
+    #     shared = set(lane2_registry) & set(lane1_registry)   (+ a rename map)
+    # i.e. on REGISTRY KEYS.  Keying it on the extractor's own filename-derived
+    # id instead marked 6 rows suppressed that the boot plainly applies: the
+    # chunk_o consolidated module is registry id PN298 (no lane-1 twin) but its
+    # filename `pn29_pn298_...` derives to PN29, which lane-1 does own.  Its
+    # boot line reads `APPLY PN298`, and the ledger called it partially lost.
+    # Cross-checked all 7 flips against the boot's own words: P18B_TEXT,
+    # PN16_V6 and PN298 log APPLY; P23_WIRE, P29_HEAL and PN102 log a plain
+    # "opt-in only"; only P18b logs "explicitly disabled by operator".
+    # Rows with no registry join keep the filename-derived fallback.
     l1_ids = {c["id"] for c in caps if c["lane"].startswith("lane1")}
+    l1_reg_ids = {str(k).upper() for k in reg1}
+    renamed = {"PN40-CLASSIFIER": "PN40C"}  # sndr_lane._LANE1_RENAMED_SHARED
     shared = 0
     for c in caps:
-        if c["lane"] == "lane2-sndr" and c["id"] in l1_ids:
+        if c["lane"] != "lane2-sndr":
+            continue
+        rid = c.get("registry_id")
+        if rid:
+            rid_u = str(rid).upper()
+            owned = rid_u in l1_reg_ids or renamed.get(rid_u, "") in l1_reg_ids
+            if not (c.get("registry") or {}).get("env_flag"):
+                owned = False   # apply_policy `continue`s on a flagless row
+        else:
+            owned = c["id"] in l1_ids
+        if owned:
             c["lane2_suppressed_by_lane1"] = True
             shared += 1
     print(f"  lane-2 rows suppressed as lane-1-owned shared ids: {shared}")
