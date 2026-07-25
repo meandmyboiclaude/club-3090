@@ -530,6 +530,34 @@ def _stash_steps(request: Any, steps: int) -> None:
     request.chat_template_kwargs = ctk
 
 
+def _stamp_h119(request: Any, overridable: int) -> None:
+    """Tell the H119 route consumer whether this budget is ours to override.
+
+    [2026-07-25] H119's consumer defers to any non-None thinking_token_budget so
+    an explicit CLIENT budget always wins. But PN100 runs with AUTO_DEFAULT=1 and
+    budgets ~every request, so from the worker's side PN100's grant is
+    indistinguishable from a client's — and the consumer deferred 100% of the
+    time. Measured: a GPQA-30 with the consumer correctly installed on all seven
+    sites was byte-identical to the control on every compared row.
+
+    The stamp rides SamplingParams.extra_args, which is where vllm_xargs lands
+    (chat_completion/protocol.py: extra_args = self.vllm_xargs) and which
+    reaches the worker inside the same params object BatchUpdate.added hands the
+    consumer. 1 = "PN100 chose this, H119 may re-decide it"; 0 = "keep out"
+    (tier-0/thinking-off, and a client-pinned numeric).
+
+    vllm_xargs is typed dict[str, str|int|float|list] — an int, never a bool.
+    Fail-open: PN100's contract is that it never breaks a request, and an
+    unstamped budget simply reads as a caller's, which is today's behaviour.
+    """
+    try:
+        xargs = dict(getattr(request, "vllm_xargs", None) or {})
+        xargs["h119_overridable"] = int(overridable)
+        request.vllm_xargs = xargs
+    except Exception:  # noqa: BLE001 — a stamp is never worth a failed request
+        log.debug("PN100: could not stamp h119_overridable", exc_info=True)
+
+
 def _apply_tier(request: Any, tier: int, allow_disable: bool) -> int:
     budgets = _tier_budgets()
     if tier == 0 and not allow_disable:
@@ -540,10 +568,14 @@ def _apply_tier(request: Any, tier: int, allow_disable: bool) -> int:
     if tier == 0 and budgets[0] <= 0:
         ctk["enable_thinking"] = False
         request.chat_template_kwargs = ctk
+        # Thinking is OFF and no budget is set. H119 must not install a
+        # provisional entry here: PN100 keeps absolute authority over tier 0.
+        _stamp_h119(request, 0)
         return 0
     ctk["enable_thinking"] = True
     request.chat_template_kwargs = ctk
     request.thinking_token_budget = budgets[tier]
+    _stamp_h119(request, 1)
     return budgets[tier]
 
 
@@ -616,6 +648,7 @@ def _apply_budget(request: Any, budget: int) -> int:
     ctk["enable_thinking"] = True
     request.chat_template_kwargs = ctk
     request.thinking_token_budget = budget
+    _stamp_h119(request, 1)
     # [2026-07-23 total-completion ceiling, DARK] the answer channel is
     # unbounded, and capped-think grinders relocate their burn there (measured:
     # every atok>=1500 trace had capped think; 115/127 ran 8.4K answer tokens).
@@ -676,6 +709,9 @@ async def apply_hook_async(serving: Any, request: Any) -> None:
         ctk["enable_thinking"] = True
         request.chat_template_kwargs = ctk
         request.thinking_token_budget = budget
+        # Client-pinned via chat_template_kwargs.thinking_budget: this is the
+        # caller's number, not ours. H119 must leave it entirely alone.
+        _stamp_h119(request, 0)
         log.info("PN100: direct budget=%d (client-pinned)", budget)
         return
 

@@ -961,8 +961,29 @@ _DEEP_DEFAULT = 10240
 #   is exactly why it is tunable and why the flag ships OFF.
 _LEAN_DEFAULT = 800
 
+# PN100 stamps this into SamplingParams.extra_args (via the request's
+# vllm_xargs) on every budget IT chose, and sets it to 0 on the two it must keep
+# absolute authority over: tier-0/thinking-off, and a client-pinned numeric.
+# Without it the consumer cannot tell PN100's budget from a real caller's, and
+# since PN100 runs with AUTO_DEFAULT=1 it budgets ~every request — which made
+# the 2026-07-25 consumer boot a measured no-op (GPQA-30 identical to control on
+# every compared row) even with all seven patch sites correctly installed.
+# The protocol types vllm_xargs as str|int|float, so this is 1/0, never a bool.
+H119_OVERRIDABLE = "h119_overridable"
+
+# Kill switch for the PN100 override alone; the rest of the consumer is
+# unaffected. Default ON — a consumer that defers to PN100 does nothing at all.
+_OVERRIDE_PN100_FLAG = "H119_OVERRIDE_PN100"
+
+# Set on an entry we took over from PN100, holding the budget PN100 had chosen.
+# If the route never lands, this is what the row falls back to — PN100's own
+# grant is a far better fail-safe than route_for()'s generic default, because it
+# is what the request would have got if H119 had never touched it.
+H119_PRIOR_BUDGET = "_h119_prior_budget"
+
 _consumer_state: dict = {"checked": False, "on": False, "deep": _DEEP_DEFAULT,
-                         "lean": _LEAN_DEFAULT, "warned": 0}
+                         "lean": _LEAN_DEFAULT, "warned": 0,
+                         "override_pn100": True}
 
 
 def _consumer_int(name: str, default: int) -> int:
@@ -977,7 +998,7 @@ def reset_consumer_cache() -> None:
     """Re-read the H119 consumer env on the next call (tests only)."""
     _consumer_state.update({"checked": False, "on": False,
                             "deep": _DEEP_DEFAULT, "lean": _LEAN_DEFAULT,
-                            "warned": 0})
+                            "warned": 0, "override_pn100": True})
 
 
 def _consumer_active() -> bool:
@@ -997,6 +1018,7 @@ def _consumer_active() -> bool:
         st["on"] = _truthy(_env(_CONSUMER_FLAG, "0"))
         st["deep"] = _consumer_int("H119_DEEP_BUDGET", _DEEP_DEFAULT)
         st["lean"] = _consumer_int("H119_LEAN_BUDGET", _LEAN_DEFAULT)
+        st["override_pn100"] = _truthy(_env(_OVERRIDE_PN100_FLAG, "1"))
         if st["on"] and st["deep"] <= 0:
             # A non-positive deep budget would mean "install no entry", and
             # without an entry at step 1 the LEAN route can never be applied
@@ -1030,6 +1052,26 @@ def _consumer_warn(msg: str, exc: Exception) -> None:
                        msg, _consumer_state["warned"], exc)
 
 
+def _h119_overridable_stamp(params) -> int | None:
+    """PN100's ownership stamp off SamplingParams.extra_args, or None.
+
+    None means "nobody stamped this" — an un-stamped budget is a real caller's
+    and is never touched. Read defensively: extra_args is operator-supplied data
+    that arrives from the wire, so a bad value must degrade to None (defer),
+    never raise inside sync_batch.
+    """
+    try:
+        xargs = getattr(params, "extra_args", None)
+        if not xargs:
+            return None
+        raw = xargs.get(H119_OVERRIDABLE)
+        if raw is None:
+            return None
+        return 1 if int(raw) else 0
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
 def h119_on_batch_add(holder, index, params, prompt_tok_ids,
                       output_tok_ids) -> bool:
     """Called from ThinkingBudgetStateHolder.sync_batch for EVERY added row.
@@ -1041,13 +1083,38 @@ def h119_on_batch_add(holder, index, params, prompt_tok_ids,
     behaviour is reached by simply doing what the unpatched code did.
     """
     try:
-        if getattr(params, "thinking_token_budget", None) is not None:
-            # Explicit caller budget: sync_batch's own branch already built the
-            # entry, we only record that the router deferred to it.
-            if _consumer_active():
+        budget = getattr(params, "thinking_token_budget", None)
+        stamp = _h119_overridable_stamp(params)
+        if budget is not None:
+            # sync_batch's own branch has already built the entry by the time we
+            # are called, on BOTH F variants — so taking it over is a matter of
+            # marking it, not rebuilding it.
+            if not _consumer_active():
+                return False
+            if stamp != 1 or not _consumer_state["override_pn100"]:
+                # A real caller's budget (or the override switched off): an
+                # explicit client budget outranks the router, unconditionally.
                 _bump("h119_caller_explicit")
+                return False
+            entry = holder._state.get(index)
+            if entry is None:
+                # Shouldn't happen on either variant, but never assume the
+                # upstream branch above us ran: decline rather than corrupt.
+                _bump("h119_pn100_entry_missing")
+                return False
+            entry[H119_PRIOR_BUDGET] = budget
+            entry[H119_PROVISIONAL] = True
+            _bump("h119_pn100_override")
+            # False = "caller keeps its own entry", which is right here: we
+            # amended the entry in place rather than installing one.
             return False
         if not _consumer_active():
+            return False
+        if stamp == 0:
+            # PN100 tier-0 / thinking-off. It deliberately left the budget unset
+            # AND told us to keep out; installing a provisional deep entry here
+            # would start tracking a request that never enters <think>.
+            _bump("h119_tier0_respected")
             return False
         deep = _consumer_state["deep"]
         entry = holder._init_state_entry(prompt_tok_ids, deep)
@@ -1116,6 +1183,16 @@ def h119_resolve_routes(holder) -> None:
                 if not state.get("output_tok_ids"):
                     # Still prefilling (chunked prefill spans steps). Expected,
                     # not a miss — do NOT burn route_for()'s fallback here.
+                    continue
+                prior = state.get(H119_PRIOR_BUDGET)
+                if prior is not None:
+                    # We took this row over from PN100 and the route never
+                    # landed. PN100's own grant is the honest fail-safe: it is
+                    # exactly what the request would have run with had H119
+                    # never touched it, so an unrouted row costs nothing.
+                    _h119_apply_budget(state, prior)
+                    state[H119_PROVISIONAL] = False
+                    _bump("h119_route_missing_kept_pn100")
                     continue
                 # Generation started with no decision on record: this request
                 # will never be routed. Commit to the defined fallback once.
