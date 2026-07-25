@@ -165,6 +165,45 @@ def _failed(reason: str) -> _Result:
     return _Result(status="failed", reason=reason)
 
 
+# ── RETIRED 2026-07-25 ────────────────────────────────────────────────
+# Never applied on any pin, and cannot: the post-patch payload
+# (tests/unit/integrations/attention/gdn/fixtures/
+# pn79_v2_md5_chunk_post_patch.py.txt) does not exist anywhere in the
+# tree, so _load_post_patch_content() has always returned "" and the boot
+# log's "post-patch fixture missing — regenerate from rig" is permanent,
+# not a rig hiccup. (Its sibling PN79_V2_MD5_CHUNK_DELTA_H has the same
+# missing fixture; there the md5 gate fires first and hides it.)
+#
+# Not regenerated, on three grounds:
+#   1. md5+full-file is single-pin by construction. This tree is DUAL-PIN;
+#      a regenerated baseline would pin to one image with no fallback.
+#      (chunk.py happens to be 2949617813535680de692d4c24a7b809 on all
+#      three pins today, but the pattern offers no fallback when that
+#      stops being true — which is exactly what killed the sibling.)
+#   2. A full-file write races the other text-patchers on the FLA ops
+#      tree; whichever runs second wins.
+#   3. The capability is not lost. The anchor-based original PN79 covers
+#      exactly this file and ALL EIGHT of its chunk.py anchors
+#      (1B, 1C, 1D×3, 1E×3) are count==1 on dev1060cherry-20260713 and
+#      wheel v2 dev1474cherrymax-1757. Note this REFUTES the registry
+#      credit line above ("pn79 silently applies only 3 of its 7 chunk.py
+#      anchors on current pin", scouted 2026-06-03): re-counted against
+#      the extracted images on 2026-07-25, 8/8 match. The PoC's stated
+#      reason to exist no longer holds. PN79 is merely env-gated OFF in
+#      the current compose, which is an operator choice, not a drift.
+#
+# The env flag stays honored and now executes an explicit no-op (PN78
+# precedent) instead of announcing APPLY and doing nothing.
+_RETIRED_REASON = (
+    "PN79_V2_MD5_CHUNK RETIRED 2026-07-25 — md5+full-file PoC, no "
+    "post-patch fixture ever committed, so it could not apply on any pin. "
+    "Not regenerated: md5+full-file is single-pin while this tree is "
+    "dual-pin. Capability is covered by the anchor-based PN79 (all 8 "
+    "chunk.py anchors count==1 on wheel v2 and dev1060cherry, refuting "
+    "the 2026-06-03 '3 of 7' scout finding)."
+)
+
+
 def _file_md5(path: Path) -> str:
     """Compute md5 of a file's bytes. Matches stdlib hashlib.md5."""
     return hashlib.md5(path.read_bytes()).hexdigest()
@@ -221,6 +260,8 @@ def apply() -> tuple[str, str]:
     log_decision("PN79_V2_MD5_CHUNK", decision, reason)
     if not decision:
         return "skipped", reason
+
+    return "skipped", _RETIRED_REASON
 
     if vllm_install_root() is None:
         return "skipped", "vllm install root not discoverable"

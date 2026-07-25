@@ -593,7 +593,7 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
         "implementation_status": "full",
     },
     "PN79_V2_MD5_CHUNK": {
-        "title": "PN79 v2 — md5+full-file PoC (PN119 reference pattern, chunk.py scope)",
+        "title": "PN79 v2 — md5+full-file PoC, chunk.py scope (RETIRED — fixture never existed; anchor-based PN79 covers it)",
         "tier": "community",
         "family": "attention.gdn",
         "env_flag": "GENESIS_ENABLE_PN79_V2_MD5_CHUNK",
@@ -621,12 +621,27 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
         "implementation_status": "full",
         "apply_module": "sndr.engines.vllm.patches.attention.gdn.pn79_v2_md5_chunk",
         "source": "vllm_pr_backport",
-        "lifecycle": "experimental",
+        "lifecycle": "retired",  # RETIRED 2026-07-25 — see retired_reason.
+        "retired_waiver": True,  # No upstream supersession: the replacement is our own anchor-based PN79, whose 8/8 chunk.py anchors are count==1 on wheel v2 + dev1060cherry.
+        "retired_reason": (
+            "The post-patch payload fixture "
+            "(tests/unit/integrations/attention/gdn/fixtures/"
+            "pn79_v2_md5_chunk_post_patch.py.txt) was never committed, so "
+            "this patch could not apply on ANY pin — it announced APPLY and "
+            "did nothing (applies-but-degraded class). Not regenerated: "
+            "md5+full-file is single-pin by construction while this tree is "
+            "dual-pin, and a full-file write races the other FLA text "
+            "patchers. Capability covered by the anchor-based PN79. The "
+            "credit line's '3 of 7 chunk.py anchors' scout finding "
+            "(2026-06-03) was re-counted against images extracted from all "
+            "three pins on 2026-07-25: 8/8 anchors are count==1, so the "
+            "PoC's stated reason to exist no longer holds."
+        ),
         "conflicts_with": [],
         "requires_patches": [],
     },
     "PN79_V2_MD5_CHUNK_DELTA_H": {
-        "title": "PN79 v2 — md5+full-file PoC (PN119 reference pattern, chunk_delta_h.py scope)",
+        "title": "PN79 v2 — md5+full-file PoC, chunk_delta_h.py scope (RETIRED — fixture never existed; anchor-based PN79 covers it)",
         "tier": "community",
         "family": "attention.gdn",
         "env_flag": "GENESIS_ENABLE_PN79_V2_MD5_CHUNK_DELTA_H",
@@ -644,7 +659,27 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
         "implementation_status": "full",
         "apply_module": "sndr.engines.vllm.patches.attention.gdn.pn79_v2_md5_chunk_delta_h",
         "source": "vllm_pr_backport",
-        "lifecycle": "experimental",
+        "lifecycle": "retired",  # RETIRED 2026-07-25 — see retired_reason.
+        "retired_waiver": True,  # No upstream supersession: the replacement is our own anchor-based PN79, whose 7/7 chunk_delta_h.py anchors are count==1 on wheel v2 + dev1060cherry.
+        "retired_reason": (
+            "Same missing-payload defect as the sibling: "
+            "pn79_v2_md5_chunk_delta_h_post_patch.py.txt was never "
+            "committed, so it could not apply on ANY pin. The md5 gate "
+            "fires first and masks it — and the pinned baseline "
+            "71b7a5017e8cb4c08617c19f5b5f7d4b matches NO pinned image "
+            "(chunk_delta_h.py is 9b47f8bbdc07d262fa6a68ea6616f088 on "
+            "dev1060cherry-20260713, wheel v1 dev1474cherry-1711 and wheel "
+            "v2 dev1474cherrymax-1757, identical on all three), so the "
+            "baseline came from a build that no longer exists. Not "
+            "regenerated: md5+full-file is single-pin while this tree is "
+            "dual-pin, and a full-file write on THIS file would clobber (or "
+            "be clobbered by) PN345's 2 sub-patches and PN106-A's 2 "
+            "sub-patches, which both text-patch chunk_delta_h.py in the "
+            "same boot. Capability covered by the anchor-based PN79: its "
+            "seven chunk_delta_h.py anchors (2A..2G) are count==1 on wheel "
+            "v2 and dev1060cherry, refuting the credit line's "
+            "'ANCHOR_2B_KERNEL_SIG drifted' scout finding."
+        ),
         "conflicts_with": [],
         "requires_patches": [],
     },

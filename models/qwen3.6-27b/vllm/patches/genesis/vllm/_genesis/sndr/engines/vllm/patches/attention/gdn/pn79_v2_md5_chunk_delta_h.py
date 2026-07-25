@@ -159,6 +159,43 @@ def _failed(reason: str) -> _Result:
     return _Result(status="failed", reason=reason)
 
 
+# ── RETIRED 2026-07-25 ────────────────────────────────────────────────
+# Never applied on any pin, and cannot: the post-patch payload
+# (tests/unit/integrations/attention/gdn/fixtures/
+# pn79_v2_md5_chunk_delta_h_post_patch.py.txt) does not exist anywhere in
+# the tree, so _load_post_patch_content() has always returned "" and the
+# fixture check has always short-circuited. The md5 gate fires first and
+# masks it: the pinned baseline 71b7a501… matches NO pinned image —
+# chunk_delta_h.py is 9b47f8bb… on dev1060cherry-20260713, wheel v1
+# dev1474cherry-1711 AND wheel v2 dev1474cherrymax-1757 (identical on all
+# three), so the "expected" md5 came from a build that no longer exists.
+#
+# Not regenerated, on three grounds:
+#   1. md5+full-file is single-pin by construction. This tree is DUAL-PIN;
+#      a regenerated baseline would pin to one image with no fallback.
+#   2. A full-file write is unsafe on this target: chunk_delta_h.py is
+#      text-patched at boot by PN345 (2 sub-patches) and PN106-A (2
+#      sub-patches). Whichever runs second wins — the PoC would clobber
+#      them or be clobbered.
+#   3. The capability is not lost. The anchor-based original PN79 covers
+#      exactly this file and ALL SEVEN of its chunk_delta_h.py anchors
+#      (2A…2G) are count==1 on dev1060cherry-20260713 and wheel v2. PN79
+#      is merely env-gated OFF in the current compose, which is an
+#      operator choice, not a drift.
+#
+# The env flag stays honored and now executes an explicit no-op (PN78
+# precedent) instead of announcing APPLY and doing nothing.
+_RETIRED_REASON = (
+    "PN79_V2_MD5_CHUNK_DELTA_H RETIRED 2026-07-25 — md5+full-file PoC, no "
+    "post-patch fixture ever committed (could not apply on any pin) and the "
+    "pinned baseline 71b7a501 matches no image (all three pins are "
+    "9b47f8bb). Not regenerated: md5+full-file is single-pin while this "
+    "tree is dual-pin, and a full-file write would race PN345 + PN106-A on "
+    "the same file. Capability is covered by the anchor-based PN79 (all 7 "
+    "chunk_delta_h.py anchors count==1 on wheel v2 and dev1060cherry)."
+)
+
+
 def _file_md5(path: Path) -> str:
     """Compute md5 of a file's bytes. Matches stdlib hashlib.md5."""
     return hashlib.md5(path.read_bytes()).hexdigest()
@@ -215,6 +252,8 @@ def apply() -> tuple[str, str]:
     log_decision("PN79_V2_MD5_CHUNK_DELTA_H", decision, reason)
     if not decision:
         return "skipped", reason
+
+    return "skipped", _RETIRED_REASON
 
     if vllm_install_root() is None:
         return "skipped", "vllm install root not discoverable"
