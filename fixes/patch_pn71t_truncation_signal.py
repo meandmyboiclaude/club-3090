@@ -38,6 +38,7 @@ partial patch, never a silent skip.
 from __future__ import annotations
 
 import logging
+import os
 import pathlib
 import shutil
 import sys
@@ -152,10 +153,23 @@ def _shout(detail: str) -> None:
         pass
 
 
+def _drift_rc() -> int:
+    """Exit code for a drift.
+
+    ZERO, unlike PN71's. The entrypoint runs under ``set -e`` and this patch is
+    pure observability — a NEW capability, not a restore. Losing the signal is bad;
+    refusing to serve because the signal could not be installed is worse. The boxed
+    ERROR above is the alarm. Set ``PN71T_STRICT=1`` to make a drift abort the boot
+    instead (use it in a pin-bump gate, where you do want the hard stop).
+    """
+    val = os.environ.get("PN71T_STRICT", "").strip().lower()
+    return 1 if val in ("1", "true", "yes", "on") else 0
+
+
 def main() -> int:
     if not TARGET.exists():
         _shout(f"{TARGET} not present on this pin")
-        return 1
+        return _drift_rc()
     text = TARGET.read_text(encoding="utf-8")
     if MARKER in text:
         print(f"{LOG} already applied (idempotent)")
@@ -164,13 +178,13 @@ def main() -> int:
     hunks, problems = resolve(text)
     if problems:
         _shout("; ".join(problems))
-        return 1
+        return _drift_rc()
 
     try:
         shutil.copy2(SIDECAR_SRC, SIDECAR_DST)
     except OSError as e:
         _shout(f"sidecar install failed: {e}")
-        return 1
+        return _drift_rc()
 
     for name, old, new in hunks:
         text = text.replace(old, new, 1)
@@ -180,7 +194,7 @@ def main() -> int:
         compile(text, str(TARGET), "exec")
     except SyntaxError as e:
         _shout(f"patched serving.py does not byte-compile ({e}) — refusing to write")
-        return 1
+        return _drift_rc()
 
     TARGET.write_text(text, encoding="utf-8")
     print(f"{LOG} applied — grep container logs for PN71T-TRUNC")

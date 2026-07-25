@@ -235,6 +235,22 @@ def resolve(text: str):
     return (HUNKS if not problems else ()), problems
 
 
+def _fatal_rc() -> int:
+    """Exit code for a drift.
+
+    The compose entrypoint runs under ``set -e``, so returning non-zero ABORTS THE
+    BOOT — deliberate. PN71 is a restore of a capability callers depend on, not a
+    new one: without it ``reasoning:`` silently stops meaning anything and every
+    tiered request quietly loses its budget, its bound and its sampling defaults.
+    A pin bump is exactly when you want to be stopped rather than served a stack
+    that no longer does what its name says. ``PN71_ALLOW_DRIFT=1`` downgrades to a
+    warning-and-continue for an operator who has read the shout and wants to boot
+    anyway.
+    """
+    val = os.environ.get("PN71_ALLOW_DRIFT", "").strip().lower()
+    return 0 if val in ("1", "true", "yes", "on") else 1
+
+
 def _shout(detail: str) -> None:
     """Fail LOUD. A PN71-family patch that announces APPLY while skipping is BUG-122."""
     bar = "=" * 78
@@ -256,7 +272,7 @@ def _shout(detail: str) -> None:
 def apply() -> int:
     if not TARGET.exists():
         _shout(f"{TARGET} not present on this pin")
-        return 1
+        return _fatal_rc()
     text = TARGET.read_text(encoding="utf-8")
     if MARKER in text:
         log.info("%s already applied (v3)", LOG)
@@ -265,18 +281,18 @@ def apply() -> int:
         _shout("this container already carries PN71 v2 — a stale apply, not an "
                "idempotent one. v2 has NO thinking budget; the empty-content class "
                "is live. Rebuild the container rather than layering v3 on top.")
-        return 1
+        return _fatal_rc()
 
     _hunks, problems = resolve(text)
     if problems:
         _shout("; ".join(problems))
-        return 1
+        return _fatal_rc()
 
     if NATIVE_BUDGET_FIELD not in text:
         _shout("protocol.py has no native `thinking_token_budget` field on this pin — "
                "(B)'s budget would be dropped by pydantic and thinking would stay "
                "unbounded. Re-wire /fixes/_archive/patch_pn109_budget_bridge.py first.")
-        return 1
+        return _fatal_rc()
 
     for name, old, new in _hunks:
         text = text.replace(old, new, 1)
@@ -286,7 +302,7 @@ def apply() -> int:
         compile(text, str(TARGET), "exec")
     except SyntaxError as e:
         _shout(f"patched protocol.py does not byte-compile ({e}) — refusing to write")
-        return 1
+        return _fatal_rc()
 
     TARGET.write_text(text, encoding="utf-8")
     log.info("%s v3 applied — thinking budget restored, clamped, grace default %s",

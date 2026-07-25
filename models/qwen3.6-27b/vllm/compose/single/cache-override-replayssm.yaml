@@ -1,0 +1,47 @@
+# Opt-in variant of cache-override.yaml that trades prefix caching for the
+# GDN speculative-checkpoint blocks. UNBOOTED — see the WARNING at the bottom.
+#
+# Engage with (BOTH halves are required, see tcbench8021.yml):
+#   CACHE_OVERRIDE=cache-override-replayssm.yaml podman-compose ... up -d
+#   ...and drop `--enable-prefix-caching`, add `--mamba-backend triton`.
+#
+# WHY. At turboquant_3bit_nc the KV pool is 68 uniform pages of 3,269,376 B.
+# A max_model_len=82,560 request charges 20 attention blocks + 15 GDN blocks:
+# 3 GDN groups x (2 + num_speculative_tokens) = 3 x 5. Those 15 blocks are 43%
+# of the per-request cost and they exist only because mamba_cache_mode=align
+# reserves a speculative checkpoint per MTP draft token
+# (kv_cache_interface.py:731-737, mamba/abstract.py:76-84).
+#
+# use_replayssm_spec sets num_speculative_blocks to 0 — the cached GDN spec
+# kernel never reads the per-token checkpoints the baseline kernel writes — and
+# mamba_cache_mode=none drops the align pair to a single resident block. GDN
+# cost falls 15 -> 3 blocks/request:
+#
+#   blocks/req 35 -> 23   =>  KV tokens 160,402 -> 244,090  (+83,688, +52%)
+#
+# That is by far the largest capacity lever available without more VRAM; every
+# kv_cache_dtype rung is a LOSS by comparison (see ~/shared/capacity/
+# kv-capacity-model.py, which reproduces 13 banked boots to the token).
+#
+# WHAT IT COSTS. --enable-prefix-caching must come off:
+# use_replayssm_spec requires mamba_cache_mode=none (config/vllm.py:2407-2410),
+# and prefix caching force-sets that mode to "align" for Qwen3.5/3.6
+# (models/config.py:558-566, the arch lacks supports_mamba_prefix_caching).
+# Per BUG-130 that feature currently returns zero hits anyway — hash_block_size
+# resolves to 4128, so nothing under 4129 prompt tokens can produce a block
+# hash — but prompts ABOVE 4128 can hash, and this file gives that up for good.
+# mamba_block_size is therefore omitted, not set to 4128: with prefix caching
+# off, setting it is a hard ValueError (config/vllm.py:2346-2353), and
+# platforms/interface.py:894 re-derives the same 4128 automatically.
+#
+# WARNING — UNVALIDATED. This has never been booted. It moves the GDN decode
+# onto the cached-spec kernel, which is a correctness-relevant path, not a
+# sizing knob. Gate a boot on: (1) the engine logs mamba_cache_mode=none and
+# "GPU KV cache size: 244,090 tokens", (2) MTP acceptance stays near the 83.3%
+# banked on the fp8-MTP champion, (3) a full verify-full pass. If acceptance
+# drops, the +52% is not worth it — revert to cache-override.yaml.
+mamba_cache_mode: none
+use_replayssm_spec: true
+# B >= 1 + num_speculative_tokens (= 4 here); 16 is the upstream default and is
+# a multiple of nothing that matters, the ring is next_pow2(B + max_spec_len).
+replayssm_buffer_len: 16
