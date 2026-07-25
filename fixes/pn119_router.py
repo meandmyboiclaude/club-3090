@@ -17,14 +17,22 @@ PN100/PN102 holder side (the route-action consumer wiring is a follow-up —
 v1 enforce publishes, never mutates requests itself).
 
 v2 self-training sink (PN119-BUILD-PACK §v2): every finalized prefill
-appends (bf16 features row, meta line w/ score) to PN119_SINK; request
-finish appends a generated-token line keyed by req_id. Shadow traffic is
+appends (bf16 features row, meta line w/ score+mode+explore) to PN119_SINK;
+request finish appends a label line (generated, thinking flag, true rtok =
+tokens before </think>, cap_hit) keyed by req_id. Shadow traffic is
 uncensored → doubles as the v2 training bootstrap.
+
+v2 loop (fixes/refit_pn119_probe.py + pn119-refit.timer): refits the probe
+from the sink on CPU and ATOMICALLY swaps the npz (pn119_atomic.py); this
+router hot-reloads it on (mtime,size) change — PN119_RELOAD_S throttle,
+no restart. PN119_EXPLORE=<frac> flags a deterministic ~frac of requests
+for generous caps in enforce mode so labels stay uncensored (EXPLORE set).
 
 Never raises into serving: every entry point is fully guarded.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -40,6 +48,10 @@ FEAT_DIM = len(LAYERS) * 2 * D_MODEL  # 30720
 
 # Enforce-mode consumers (PN100/PN102 holder side) read this: req_id -> score.
 SCORES: dict[str, float] = {}
+# PN119_EXPLORE (BUILD-PACK §v2 censoring guard): req_ids selected for
+# exploration. Enforce-mode consumers MUST give these generous caps
+# regardless of score — that is what keeps the self-training labels honest.
+EXPLORE: set[str] = set()
 
 
 def _env(name: str, default: str = "") -> str:
@@ -86,19 +98,30 @@ class PN119Router:
             return None
 
     def __init__(self, runner, npz_path: str):
-        import numpy as np
-
         self.runner = runner
         self.mode = _env("PN119_MODE", "shadow").lower() or "shadow"
         self.tdeep = float(_env("PN119_TDEEP", "0.5") or 0.5)
-        z = np.load(npz_path, allow_pickle=True)
-        dev = runner.device
-        self.mu = torch.from_numpy(z["mu"]).float().to(dev)
-        self.sd = torch.from_numpy(z["sd"]).float().to(dev)
-        self.vt = torch.from_numpy(z["Vt10"]).float().to(dev)  # [10, FEAT_DIM]
-        self.w = torch.from_numpy(z["w"]).float().to(dev)      # [11] incl bias
-        if self.mu.numel() != FEAT_DIM:
-            raise ValueError(f"probe dim {self.mu.numel()} != {FEAT_DIM}")
+        # v2 explore knob (BUILD-PACK §v2): fraction of requests flagged for
+        # generous caps regardless of score. Deterministic per req_id so the
+        # sink row and the enforce-side consumer always agree.
+        try:
+            self.explore_rate = min(max(float(_env("PN119_EXPLORE", "0") or 0.0), 0.0), 1.0)
+        except ValueError:
+            self.explore_rate = 0.0
+        # v2 hot-reload: refit timer atomically swaps the npz; we re-load on
+        # (mtime, size) change, throttled to one stat() per PN119_RELOAD_S.
+        self._probe_path = npz_path
+        self._reload_every = max(float(_env("PN119_RELOAD_S", "60") or 60.0), 1.0)
+        self._next_reload_check = time.time() + self._reload_every
+        self._probe_sig = self._stat_sig(npz_path)
+        self._failed_sig = None
+        self.mu, self.sd, self.vt, self.w = self._load_probe(npz_path)
+        # v2 label plumbing: think-region markers of the SERVED model's
+        # tokenizer (defaults = thinkingcap-gptq-pro-v2 / Qwen3.6 template:
+        # thinking-ON prompt ends "<think>\n", thinking-OFF ends
+        # "<think>\n\n</think>\n\n"; </think> in OUTPUT marks end of spend).
+        self._think_start = int(_env("PN119_THINK_START_ID", "248068") or 248068)
+        self._think_end = int(_env("PN119_THINK_END_ID", "248069") or 248069)
         # per-request prefill accumulators: req_id -> state dict
         self._acc: dict[str, dict] = {}
         self.scored: dict[str, float] = {}
@@ -120,9 +143,68 @@ class PN119Router:
                 logger.warning("[PN119] sink unavailable (%s) — logging only", e)
                 self._sink_feat = self._sink_meta = None
 
+    # ── probe loading + hot-reload ──────────────────────────────────────────
+    def _load_probe(self, path: str):
+        """Load npz -> (mu, sd, vt, w) tensors on the runner device.
+        Raises on any problem — callers decide whether that is fatal
+        (__init__) or a keep-old-weights warning (_maybe_reload)."""
+        import numpy as np
+
+        z = np.load(path, allow_pickle=True)
+        dev = self.runner.device
+        mu = torch.from_numpy(np.asarray(z["mu"])).float().to(dev)
+        sd = torch.from_numpy(np.asarray(z["sd"])).float().to(dev)
+        vt = torch.from_numpy(np.asarray(z["Vt10"])).float().to(dev)  # [10, FEAT_DIM]
+        w = torch.from_numpy(np.asarray(z["w"])).float().to(dev)      # [pcs+1] incl bias
+        if mu.numel() != FEAT_DIM or sd.numel() != FEAT_DIM:
+            raise ValueError(f"probe dim {mu.numel()} != {FEAT_DIM}")
+        if vt.shape[1] != FEAT_DIM or w.numel() != vt.shape[0] + 1:
+            raise ValueError(f"probe shapes Vt{tuple(vt.shape)} w{tuple(w.shape)} inconsistent")
+        return mu, sd, vt, w
+
+    @staticmethod
+    def _stat_sig(path: str):
+        try:
+            st = os.stat(path)
+            return (st.st_mtime_ns, st.st_size)
+        except OSError:
+            return None
+
+    def _maybe_reload(self) -> None:
+        """Pick up an atomically-swapped probe without a restart. The swap
+        writer (pn119_atomic) guarantees the file at this name is always a
+        complete npz, so the only failure modes here are transient FS errors
+        — on ANY failure we keep the current weights and remember the bad
+        signature so we don't retry-spin until the file changes again."""
+        now = time.time()
+        if now < self._next_reload_check:
+            return
+        self._next_reload_check = now + self._reload_every
+        sig = self._stat_sig(self._probe_path)
+        if sig is None or sig == self._probe_sig or sig == self._failed_sig:
+            return
+        try:
+            new = self._load_probe(self._probe_path)
+        except Exception as e:  # noqa: BLE001 — never break serving on a bad swap
+            self._failed_sig = sig
+            logger.warning("[PN119] probe hot-reload FAILED (%s) — keeping current weights", e)
+            return
+        self.mu, self.sd, self.vt, self.w = new
+        self._probe_sig = sig
+        self._failed_sig = None
+        logger.info("[PN119] probe hot-reloaded from %s (mtime_ns=%d size=%d)",
+                    self._probe_path, sig[0], sig[1])
+
+    def _is_explore(self, req_id: str) -> bool:
+        if self.explore_rate <= 0.0:
+            return False
+        h = int.from_bytes(hashlib.sha1(req_id.encode()).digest()[:4], "big")
+        return (h / 0x100000000) < self.explore_rate
+
     # ── observation (called from execute_model postprocess) ────────────────
     def observe(self, scheduler_output, aux_hidden_states) -> None:
         try:
+            self._maybe_reload()
             self._observe(scheduler_output, aux_hidden_states)
         except Exception as e:  # noqa: BLE001 — never break a serving step
             self._warned += 1
@@ -195,10 +277,15 @@ class PN119Router:
         self.scored[req_id] = score
         self._acc.pop(req_id, None)
         route = "deep" if score >= self.tdeep else "lean"
-        logger.info("[PN119] req=%s score=%.4f route=%s prompt_tok=%d mode=%s",
-                    req_id, score, route, prompt_len, self.mode)
+        explore = self._is_explore(req_id)
+        logger.info("[PN119] req=%s score=%.4f route=%s explore=%s prompt_tok=%d mode=%s",
+                    req_id, score, route, explore, prompt_len, self.mode)
         if self.mode == "enforce":
             SCORES[req_id] = score
+            if explore:
+                # Consumer contract: explore requests get generous caps
+                # regardless of score (keeps v2 labels uncensored).
+                EXPLORE.add(req_id)
         if self._sink_feat is not None:
             try:
                 # bf16 has no numpy dtype — reinterpret as uint16 for the raw
@@ -210,6 +297,7 @@ class PN119Router:
                 self._sink_meta.write(json.dumps({
                     "req_id": req_id, "row": self._sink_rows, "score": score,
                     "route": route, "prompt_tok": prompt_len, "ts": time.time(),
+                    "mode": self.mode, "explore": explore,
                 }) + "\n")
                 self._sink_meta.flush()
                 self._sink_rows += 1
@@ -223,19 +311,67 @@ class PN119Router:
             self._acc.pop(req_id, None)
             score = self.scored.pop(req_id, None)
             SCORES.pop(req_id, None)
+            EXPLORE.discard(req_id)
             if score is None or req_state is None:
                 return
             prompt_len = getattr(req_state, "num_prompt_tokens", 0) or 0
             computed = getattr(req_state, "num_computed_tokens", 0) or 0
             generated = max(computed - prompt_len, 0)
-            logger.info("[PN119] finish req=%s score=%.4f generated=%d", req_id, score, generated)
+            thinking, rtok, cap_hit = self._label_fields(req_state, generated)
+            logger.info("[PN119] finish req=%s score=%.4f generated=%d thinking=%s rtok=%s cap_hit=%s",
+                        req_id, score, generated, thinking, rtok, cap_hit)
             if self._sink_meta is not None:
                 self._sink_meta.write(json.dumps({
                     "req_id": req_id, "finish": True, "score": score,
                     "generated": generated, "ts": time.time(),
+                    "thinking": thinking, "rtok": rtok, "cap_hit": cap_hit,
+                    "explore": self._is_explore(req_id), "mode": self.mode,
                 }) + "\n")
                 self._sink_meta.flush()
         except Exception as e:  # noqa: BLE001
             self._warned += 1
             if self._warned <= 5:
                 logger.warning("[PN119] finish error: %s", e)
+
+    def _label_fields(self, req_state, generated: int):
+        """v2 label plumbing (BUILD-PACK §v2 items 3+4).
+
+        thinking: True  = prompt tail opens a <think> region (spend signal
+                          exists — the ONLY rows the refit may learn from);
+                  False = template pre-closed </think> (thinking-off);
+                  None  = neither marker found (raw/completion prompt) —
+                          refit treats unknown as ineligible.
+        rtok:     tokens generated BEFORE </think> = true thinking spend
+                  (better label than total `generated`, which includes the
+                  answer). Falls back to `generated` when </think> never
+                  appeared (capped inside the think region).
+        cap_hit:  spend was truncated (</think> never emitted while
+                  thinking, or generated >= max_tokens). Censoring guard:
+                  refit must treat cap_hit as positive-label evidence, and
+                  under enforce a lean-routed cap_hit is the ONE lean row
+                  that may be learned from (y=1).
+        """
+        thinking = None
+        rtok = None
+        cap_hit = False
+        prompt_ids = getattr(req_state, "prompt_token_ids", None)
+        if prompt_ids:
+            tail = list(prompt_ids[-8:])
+            if self._think_end in tail:
+                thinking = False
+            elif self._think_start in tail:
+                thinking = True
+        out_ids = getattr(req_state, "output_token_ids", None)
+        if thinking and out_ids is not None:
+            try:
+                rtok = list(out_ids).index(self._think_end)
+            except ValueError:
+                rtok = generated  # never closed the think region => capped
+                cap_hit = True
+        elif thinking:
+            rtok = generated
+        sp = getattr(req_state, "sampling_params", None)
+        max_tokens = getattr(sp, "max_tokens", None) if sp is not None else None
+        if max_tokens and generated >= max_tokens:
+            cap_hit = True
+        return thinking, rtok, cap_hit

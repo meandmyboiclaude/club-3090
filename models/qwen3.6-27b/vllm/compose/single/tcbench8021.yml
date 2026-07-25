@@ -72,8 +72,16 @@ services:
       # switched to the model's OWN native template (XReyRobert/Qwopus3.6-27B-v2-GPTQ-Pro-MTP-BF16).
       - ../../patches/qwopus-chat-template/chat_template_v2json.jinja:/chat_template.jinja:ro
       - ../../../../../fixes:/fixes:ro
-      # [PN119 2026-07-25] lens-router probe (ro) + v2 self-training sink (rw)
-      - /home/user/shared/needfit/pn119-probe-lens_only.npz:/pn119/probe.npz:ro
+      # [PN119 2026-07-25] lens-router probe (ro) + v2 self-training sink (rw).
+      # [PN119-v2] probe is now a DIRECTORY mount: the refit timer swaps
+      # pn119-live/probe.npz via atomic rename (pn119_atomic.py), and a
+      # single-FILE bind pins the container to the old inode — the rename
+      # would be invisible until reboot. Directory mount + router mtime
+      # hot-reload = refits take effect without a restart.
+      # pn119-live/probe.npz is seeded from pn119-probe-lens_only.npz
+      # (rollback = restore the old file-mount line below).
+      # was: - /home/user/shared/needfit/pn119-probe-lens_only.npz:/pn119/probe.npz:ro
+      - /home/user/shared/needfit/pn119-live:/pn119:ro
       - /home/user/shared/needfit/pn119-sink:/pn119-sink
       - ./cache-override.yaml:/config/cache-override.yaml:ro
     environment:
@@ -124,6 +132,18 @@ services:
       - PN119_TDEEP=0.5
       - GENESIS_PN119_PROBE=/pn119/probe.npz
       - PN119_SINK=/pn119-sink
+      # [PN119-v2 2026-07-25] self-training loop knobs (BUILD-PACK §v2):
+      # EXPLORE: fraction of requests flagged for generous caps regardless
+      #   of score — the censoring guard that keeps labels honest. 0.0 while
+      #   shadow (shadow acts on nothing anyway); pack value once enforcing
+      #   = 0.03. RELOAD_S: probe hot-reload mtime-poll throttle (refit swap
+      #   takes effect without restart). THINK ids: thinkingcap-gptq-pro-v2
+      #   tokenizer <think>/</think> — the finish-line label plumbing
+      #   (thinking flag, true rtok, cap_hit) keys on these.
+      - PN119_EXPLORE=0.0
+      - PN119_RELOAD_S=60
+      - PN119_THINK_START_ID=248068
+      - PN119_THINK_END_ID=248069
       - TRITON_CACHE_DIR=/root/.triton/cache
       # Genesis opt-ins
       # [BUG-071 CORRECTED 2026-07-14] GENESIS_PREALLOC_TOKEN_BUDGET=16384 REMOVED —
