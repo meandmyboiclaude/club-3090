@@ -19,6 +19,12 @@ commit-verdict-overrides.json  hand verdicts on commits; survive regeneration
 baseline-*.json                dated --json snapshots; feed `--baseline`
 ```
 
+> **2026-07-26, later the same day: the `-v3` act-on list of 15 is CLOSED, and
+> a new baseline is owed.** Every row got a verdict with named evidence — see
+> "Closing the 15" below. Three of them needed a real re-anchor and now APPLY,
+> so the next boot changes what is in force and `-v3` is no longer the
+> pre-state of anything. Re-baseline against the container after the next boot.
+
 **Current baseline: `baseline-20260726-tcbench-dev1474cherrymax-v3.json`**
 (LIVE 272 · N/A 175 · DARK 144 · UNVERIFIABLE 45 · INERT 31 · MISSING 15 ·
 DEGRADED 0, over 682 capabilities; 250 commits fingerprinted, 1 MISSING).
@@ -290,6 +296,70 @@ Wired into `docs/NIGHTLY_BUMP_RUNBOOK.md` as gates A / B / C.
 - *target path no longer exists upstream* — a re-anchor item.
 - *marker absent anywhere in the installed vllm* — same as above for rows whose
   target could not be derived statically.
+
+### Closing the 15 (2026-07-26)
+
+The standing rule that produced this list — **a log line is not evidence** —
+was right, and it was right about more than absorption. Of the 15, only 8 were
+absorption claims at all; the framing that "they are all the same class" came
+from reading the `why` field instead of the boot log, which is the trap two
+sections below.
+
+| row | verdict | evidence |
+|---|---|---|
+| PN80 | absorbed **on the build line** | cherries `535b8ecde` (#48177) + `820362196` (#49798); both upstream PRs still OPEN |
+| PN86 | absorbed **on the build line** | cherry `60085ab6b` (#46461, OPEN upstream) |
+| PN88 | absorbed upstream **with a coverage gap** | `8ce53a616` (#47574, merged) — see below |
+| PN90 | never an absorption | precondition no-op; not retirable |
+| PN94 | absorbed upstream | `b2b8f679d` (#47953, merged, ancestor of the build base) |
+| PN96 | absorbed upstream | `0416dab27` (#44993, merged, ancestor) |
+| P26 | **partially** absorbed → RE-ANCHORED | 1 of 2 hunks; the drift marker retired both |
+| P34 | absorbed, then deliberately removed | cherry `a1d5ec96f`, then `/fixes` pr48361 |
+| P39 | never absorbed | self-install flag simply off |
+| P82 | **never applied on any pin** → RE-ANCHORED | see below |
+| P91B | path relocation → RE-ANCHORED | `quantization/inc.py` became a package |
+| PN118 v2 ×2 | PoC, retired | pinned whole-file md5 cannot survive a moving pin |
+| PN286 | not absorbed, **and unsafe to enable** | see below |
+| PN346 | superseded by a sibling | `/fixes` pn87 is a strict superset |
+| P29 (both lanes) | absorbed upstream | `c4a3f9d13` (#45413) deleted the target |
+
+Three findings worth carrying forward, because each is a *shape* of mistake
+rather than a fact about one patch:
+
+1. **A drift marker whose presence means "nothing changed" fires forever.**
+   P82 listed `sample_recovered_tokens_kernel` to watch for PR #41258 REMOVING
+   it — but the check tests for presence, so every image ever built retired
+   P82 with "upstream may have absorbed this fix". It had absorbed nothing.
+   Underneath that, the anchor was count 0 anyway. P82 has never once applied.
+2. **A drift marker scoped to the wrong unit retires work that survived.**
+   P26 has two hunks; upstream absorbed the small one, and the marker for it
+   was patch-level, so the 32 MiB-per-prefill zero-fill that is P26's whole
+   point stayed in the file while the boot said "patch obsolete, skip".
+3. **"Absorbed" is not always "identical", and the delta can be a COVERAGE
+   GAP.** Upstream's #47574 predicate is "more than one distinct (dtype,
+   kv_quant_mode)", which cannot see a TQ layer as quantized because
+   `TQFullAttentionSpec` keeps `kv_quant_mode == NONE`. Proven by execution on
+   the boot pin: for a TQ + sliding-window hybrid, upstream
+   `needs_kv_cache_zeroing` → False where PN88's → True. Not live on a
+   full-attention-only compose; live the day a TQ+SWA hybrid is served.
+   Recorded in the row as `behavioural_delta`, which is now a documented
+   overlay field precisely so this does not get flattened again.
+
+And one hazard: **PN286 is armed, not absent.** Three of its four components
+are `setattr` monkey-patches that `exec vllm serve` discards; the fourth is a
+text patch that survives. Enabling it therefore leaves the FA forward reading
+a pre-#42095 layout out of a post-#42095 allocation — wrong KV bytes, no
+crash. The registry said `default_on: True`; only an undocumented disagreement
+with the module's own gate kept it off. `default_on` is back to False.
+
+New verifier inputs from this pass: `noop_by_precondition`,
+`behavioural_delta`, and a fix to `retired_notes()` — the extractor spells an
+uncertain status `"retired?"` and `startswith("retired")` was promoting that
+guess to a verdict (it read P26 as retired while P26 was applying).
+
+`verify_genesis_reanchors.py [--live]` counts the three re-anchors the way the
+boot sees them, against the pristine pin and against the serving container's
+post-boot files.
 
 ### Read the boot log before acting on "announced-but-inert"
 

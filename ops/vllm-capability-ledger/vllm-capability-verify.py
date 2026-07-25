@@ -199,10 +199,20 @@ def marker_hit(insp, targets: list[str], marker: str) -> tuple[bool, bool]:
 
 
 def retired_notes(cap: dict) -> list[str]:
-    """['retired'] when any of the four retirement signals is set, else []."""
+    """['retired'] when any of the four retirement signals is set, else [].
+
+    `status` is the EXTRACTOR'S HEURISTIC, and it spells its uncertainty with
+    a trailing '?'.  `startswith("retired")` swallowed that question mark and
+    promoted a guess to a verdict: P26 carries `status: "retired?"` (harvested
+    from its own docstring saying upstream absorbed a hunk) and read N/A
+    "retired; 0 markers as expected" on 2026-07-26 while it was in fact
+    applying on every boot.  A guess is not a retirement, so only the exact
+    string counts; the registry's `lifecycle` and a hand overlay `status` are
+    where a real verdict lives.
+    """
     reg = cap.get("registry") or {}
     if (reg.get("lifecycle") == "retired"
-            or str(cap.get("status", "")).startswith("retired")
+            or str(cap.get("status", "")).strip() == "retired"
             or reg.get("deprecated")
             or cap.get("peer_lifecycle") == "retired"):
         return ["retired"]
@@ -232,6 +242,18 @@ def zero_marker_verdict(cap: dict, fstate: str, notes: list[str]) -> dict | None
         return {"state": NA,
                 "why": f"superseded (overlay evidence) — "
                        f"{str(cap['superseded_by'])[:120]}"}
+    # A patch that ran, checked a PRECONDITION, and found the bug it fixes
+    # unreachable on this deployment.  Distinct from `superseded_by`: nothing
+    # absorbed it and it is NOT retirable — it re-engages the moment the
+    # precondition stops holding, which is the entire point of shipping it.
+    # PN90 is the reference case: its dense-safety invariants hold, so the
+    # #47828 FusedMoE quant leak cannot be reached and it writes nothing.
+    # Zero markers is the CORRECT outcome, so MISSING is a false alarm, but
+    # so would be retiring the row.
+    if cap.get("noop_by_precondition"):
+        return {"state": NA,
+                "why": f"no-op by precondition (overlay evidence) — "
+                       f"{str(cap['noop_by_precondition'])[:120]}"}
     if cap.get("lane2_suppressed_by_lane1"):
         return {"state": DARK,
                 "why": "lane-2 copy of a lane-1-owned shared id; sndr_lane "

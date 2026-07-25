@@ -119,7 +119,7 @@ def main() -> int:
     say("\n== P26 TQ prefill output prealloc (partial absorption)")
     from vllm._genesis.wiring.legacy import patch_26_prefill_output as p26
     tq = VLLM / "v1/attention/backends/turboquant_attn.py"
-    present("P26 cu_2 absorbed-by-upstream marker", tq, p26.CU2_ABSORBED_MARKER, 1)
+    present("P26 cu_2 absorbed-by-upstream marker", tq, p26.CU2_ABSORBED_UPSTREAM_FORM, 1)
     tq_live = (LIVE / tq.name).is_file()
     if not tq_live:
         # Only meaningful pre-boot: post-boot the pool IS in the file because

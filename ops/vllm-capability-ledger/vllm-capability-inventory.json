@@ -385,10 +385,11 @@
     "# PN100:"
    ],
    "flags": [
-    "GENESIS_ENABLE_PN100_AUTO_BUDGET"
+    "GENESIS_ENABLE_PN100_AUTO_BUDGET",
+    "GENESIS_ENABLE_PN16_LAZY_REASONER"
    ],
    "upstream": [],
-   "status": "retired?",
+   "status": "live",
    "summary": "PN100 \u2014 call-site for the auto thinking-budget router (house-original).",
    "key": "PN100",
    "compose_invoked": [
@@ -407,10 +408,15 @@
     "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/openai/chat_completion/serving.py"
    ],
    "markers": [
-    "# PN101"
+    "# PN101a:",
+    "# PN101b:"
    ],
    "flags": [
-    "GENESIS_ENABLE_PN101_ANSWER_RESCUE"
+    "GENESIS_ENABLE_PN101_ANSWER_RESCUE",
+    "GENESIS_ENABLE_PN102_CONTRACT",
+    "GENESIS_ENABLE_PN16_LAZY_REASONER",
+    "GENESIS_PN101_HINT",
+    "GENESIS_PN101_REPAIR"
    ],
    "upstream": [],
    "status": "default-dark",
@@ -796,6 +802,7 @@
     "GENESIS_ENABLE_H119_ROUTE_BUDGET",
     "GENESIS_ENABLE_PN119_ROUTER",
     "GENESIS_PN100_BUDGET_CEIL",
+    "GENESIS_PN100_CONTINUOUS",
     "GENESIS_PN119_PROBE",
     "VLLM_ENABLE_V1_MULTIPROCESSING"
    ],
@@ -1059,7 +1066,8 @@
     "tcbench8021"
    ],
    "compose_commented": [],
-   "note": "Announced-but-inert by the marker check, honest self-retire in fact. Boot line, captured 2026-07-26 by replaying the full patch pass: 'upstream drift: exemption already present - self-retire (no-op)'. The verifier reads EFFECT, and 'no effect because upstream already does it' produces the identical file to 'no effect because the patch broke' - which is why this note exists. NOT yet backed by a named upstream commit; that is the remaining work on this row, and until it is done the row is deliberately left MISSING rather than promoted to N/A on a log line."
+   "superseded_by": "Build-line cherries 535b8ecde 'Cherry #48177: Merge branch main into skavulya/dev/fix-turboquant-reshape' and 820362196 'Cherry #49798 essence: TQFullAttentionSpec guard in _reshape_kv_cache_tensors dtype selection'. Absorbing code, gpu_model_runner.py:7418-7426 in the PRISTINE boot pin dev1474cherrymax-1757-20260725: `layer_cache_dtype_str = \"auto\" if (kv_cache_spec.kv_quant_mode == KVQuantMode.NONE and not isinstance(kv_cache_spec, TQFullAttentionSpec)) and not isinstance(kv_cache_spec, TQFullAttentionSpec) else getattr(kv_cache_spec, \"cache_dtype_str\", None) or self.cache_config.cache_dtype`. That is PN80's exemption, semantically identical. Boot line: 'upstream drift: exemption already present - self-retire (no-op)', and the self-retire is content-sniffed (TQFullAttentionSpec inside the _reshape_kv_cache_tensors body), not a log line. Note vllm#47609 / fa4321de3, which PN80's docstring cites, is MERGED but covers only the Model Runner V2 worker; the V1 runner path this row backported came from the two cherries above. NOTE ON SCOPE: this is a BUILD-LINE cap, not a vllm version cap. The upstream PR is OPEN; the fix reaches us only through our own cherry onto club-dev1474-cherry-max. A nightly bump that drops the cherry re-exposes the bug and this row must go back to LIVE.",
+   "note": "COSMETIC DEFECT worth one line to whoever owns ~/engines/vllm-build: the two cherries each add `and not isinstance(kv_cache_spec, TQFullAttentionSpec)`, so the built wheel carries the clause TWICE - `\"auto\" if (X and not Y) and not Y else Z`. Harmless (A and B and B == A and B) and it does not change the verdict, but it is a duplicated cherry and the next rebase should collapse it."
   },
   {
    "id": "PN81",
@@ -1212,7 +1220,7 @@
     "tcbench8021"
    ],
    "compose_commented": [],
-   "note": "Announced-but-inert by the marker check, honest self-retire in fact. Boot line, captured 2026-07-26 by replaying the full patch pass: 'upstream drift: continuation guard already present - self-retire (no-op)'. The verifier reads EFFECT, and 'no effect because upstream already does it' produces the identical file to 'no effect because the patch broke' - which is why this note exists. NOT yet backed by a named upstream commit; that is the remaining work on this row, and until it is done the row is deliberately left MISSING rather than promoted to N/A on a log line."
+   "superseded_by": "Build-line cherry 60085ab6b 'Cherry #46461: TurboQuant prefill continuation guard'. Absorbing code, turboquant_attn.py:717-736 in the PRISTINE boot pin: `_has_continuation = ((_qsl[1:len(_sl)+1] - _qsl[:len(_sl)]) != _sl).any().item()` feeding `if _HAS_FLASH_ATTN and attn_metadata.max_query_len == attn_metadata.max_seq_len and not _has_continuation:` - byte-identical to PN86's own replacement minus the '# PN86:' comment banner. Upstream vllm#46461 is NOT in origin/main (`git log --grep '#46461' origin/main` is empty). Boot line: 'upstream drift: continuation guard already present - self-retire (no-op)', content-sniffed on `_has_continuation`. NOTE ON SCOPE: this is a BUILD-LINE cap, not a vllm version cap. The upstream PR is OPEN; the fix reaches us only through our own cherry onto club-dev1474-cherry-max. A nightly bump that drops the cherry re-exposes the bug and this row must go back to LIVE."
   },
   {
    "id": "PN87",
@@ -1263,7 +1271,8 @@
     "tcbench8021"
    ],
    "compose_commented": [],
-   "note": "Announced-but-inert by the marker check, honest self-retire in fact. Boot line, captured 2026-07-26 by replaying the full patch pass: 'upstream drift: quantized/hybrid zeroing properties already present - self-retire (no-op)'. The verifier reads EFFECT, and 'no effect because upstream already does it' produces the identical file to 'no effect because the patch broke' - which is why this note exists. NOT yet backed by a named upstream commit; that is the remaining work on this row, and until it is done the row is deliberately left MISSING rather than promoted to N/A on a log line."
+   "superseded_by": "vllm#47574, MERGED upstream as 8ce53a616 '[Bugfix] Zero new KV blocks for quantized + sliding-window hybrid caches' (EdalatiAli, 2026-07-20), a strict ancestor of the boot pin's build base 4e2e9bf00. Absorbing code, kv_cache_interface.py:996-1023 in the PRISTINE boot pin: a `has_mixed_precision_kv_cache` property collecting {(spec.dtype, spec.kv_quant_mode)} across attention groups and returning len(...) > 1, feeding `return self.has_mamba_layers or self.has_mixed_precision_kv_cache`. READ THE COVERAGE DELTA BELOW - absorbed is not identical here.",
+   "behavioural_delta": "P27-CLASS CAVEAT, and worse than P27's: this is a COVERAGE GAP, not a routing difference. PN88 predicated on `has_block_dropping_layers and has_quantized_kv_cache` and counted TQFullAttentionSpec EXPLICITLY, because TQ encodes its quantization in the spec subclass and leaves kv_quant_mode == NONE. Upstream's predicate is 'more than one distinct (dtype, kv_quant_mode) across attention groups', which cannot see a TQ layer as quantized. PROVEN BY EXECUTION on the boot pin, CPU-only throwaway container, a KVCacheConfig with one TQFullAttentionSpec group + one SlidingWindowSpec group, both float16: TQ kv_quant_mode == 0 (NONE); upstream has_mixed_precision_kv_cache -> False; upstream needs_kv_cache_zeroing -> False; PN88's predicate -> True. So on a TQ + sliding-window/chunked-local hybrid, upstream does NOT zero and the stale quantized bytes PN88 existed to kill come back, silently, as NaN/Inf. NOT A LIVE LOSS on this deployment: the tools-text compose is full-attention-only, so has_block_dropping_layers is False and both predicates agree on False - PN88's own docstring says as much. It becomes live the moment a TQ + SWA hybrid is served. RECOMMENDED, and OUT OF THIS AGENT'S LANE (fixes/** belongs to another lane): narrow PN88's self-retire so `has_mixed_precision_kv_cache` alone does not retire it, and have it widen needs_kv_cache_zeroing with the TQ clause instead. The widening is provably free here - has_block_dropping_layers is False, so no extra memset."
   },
   {
    "id": "PN89",
@@ -1317,7 +1326,7 @@
     "tcbench8021"
    ],
    "compose_commented": [],
-   "note": "Not upstream absorption - a PRECONDITION check that found the bug unreachable here. Boot line: 'verified NO-OP: dense-safety invariants intact in Qwen3_5DecoderLayer (explicit quant_config= on self_attn + Qwen3NextMLP); #47828 leak unreachable on dense qwen3_5_text - guard not applied'. Zero markers is the correct outcome on THIS model; the patch would engage on a model where the invariant does not hold, so it is not retirable."
+   "noop_by_precondition": "NOT an absorption - a precondition check that found the bug unreachable. vllm#47828 is absent from origin/main and its guard is absent from the pin: qwen3_5_mtp.py on the boot pin contains neither set_current_vllm_config nor _needs_noquant, so PN90 does NOT take its self-retire branch. It takes the documented dense-safety branch: verified on the pin, Qwen3_5DecoderLayer carries all three invariants (`quant_config = vllm_config.quant_config`, Qwen3NextAttention(..., quant_config=quant_config, prefix=f\"{prefix}.self_attn\"), Qwen3NextMLP(..., quant_config=quant_config, prefix=f\"{prefix}.mlp\")), so the #47828 FusedMoE leak site is unreachable on a dense qwen3_5_text model and the checkpoint's GPTQ dynamic '-:.*mtp.*' already un-quantizes every MTP submodule. Boot line: 'verified NO-OP: dense-safety invariants intact ... guard not applied'. Zero markers is CORRECT and this row is NOT retirable: the patcher self-ACTIVATES and applies the full #47828 guard the moment a rebuild breaks those invariants, which is the reason to keep shipping it."
   },
   {
    "id": "PN91G",
@@ -1420,7 +1429,8 @@
     "tcbench8021"
    ],
    "compose_commented": [],
-   "note": "Announced-but-inert by the marker check, honest self-retire in fact. Boot line, captured 2026-07-26 by replaying the full patch pass: 'upstream drift: EAGLE-only width guard already present - self-retire (no-op)'. The verifier reads EFFECT, and 'no effect because upstream already does it' produces the identical file to 'no effect because the patch broke' - which is why this note exists. NOT yet backed by a named upstream commit; that is the remaining work on this row, and until it is done the row is deliberately left MISSING rather than promoted to N/A on a log line."
+   "superseded_by": "vllm#47953, MERGED upstream as b2b8f679d '[Bugfix][Spec Decode] Restrict embedding-width share guard to EAGLE drafts' (2026-07-21), a strict ancestor of the boot pin's build base 4e2e9bf00. Absorbing code, llm_base_proposer.py:1480 in the PRISTINE boot pin: `if share_embeddings and hasattr(self.model, \"has_own_embed_tokens\"):` with the comment 'EAGLE drafts consume input embeddings at their own hidden size ... MTP drafts project target-width embeddings ... so the width check does not apply to them'. That is PN94's SUB2 narrowing, expressed as an inline hasattr instead of a named is_eagle_model local. Boot line: 'upstream drift: EAGLE-only width guard already present - self-retire (no-op)'; the self-retire has two alternatives and it is the SECOND (`share_embeddings and hasattr(...)`) that matches - the first (`is_eagle_model`) is count 0, which is why a check of only the first alternative reads as a false alarm. Of the PR pair PN94 backported, only #47953 landed; #47833 is absent from origin/main and was not needed.",
+   "behavioural_delta": "None for this deployment and none in principle: upstream narrows the same guard to the same set. PN94 additionally introduced a named `is_eagle_model` local used at both sites; upstream repeats the hasattr at the second site. Same predicate. Our method='mtp' Qwen3_5MTP defines no has_own_embed_tokens, so it takes the MTP branch and always shares, which is what PN94 wanted."
   },
   {
    "id": "PN95",
@@ -1469,14 +1479,16 @@
     "vllm#44993",
     "vllm#48228"
    ],
-   "status": "live",
+   "status": "retired?",
    "summary": "PN96 \u2014 advance the grammar FSM across the reasoning boundary (marker step).",
    "key": "PN96@fixes:patch_pn96_44993_structured_output_marker_step_fsm",
    "compose_invoked": [
     "endgame8020",
     "tcbench8021"
    ],
-   "compose_commented": []
+   "compose_commented": [],
+   "superseded_by": "vllm#44993, MERGED upstream as 0416dab275d51327b331a1c6baaec754a68d7764 '[Bugfix][Structured Output][Spec Decode] Advance grammar across reasoning boundary' (2026-07-23 09:14 -0700). `git merge-base --is-ancestor 0416dab275 4e2e9bf00` -> true, so the merge is a strict ancestor of the boot pin's build base. Absorbing code counted in the PRISTINE boot pin, both markers exactly once: structured_output/__init__.py carries `new_token_ids: list[int] | None = None,` in should_advance's signature (count 1) and sched/scheduler.py carries `self.structured_output_manager.should_advance(request, new_token_ids=new_token_ids)` (count 1). The #44297 precondition trim_reasoning_for_advance is also present. Boot: both targets take the SELF-RETIRED path. BUG-070 (`{{` first-token duplication under json_schema x MTP, vllm#48228) is covered by upstream on this pin, not by PN96.",
+   "note": "The patch itself was corrected in d6c72abd / 0194adf2 (another lane) - until 2026-07-26 it printed 'applied: grammar FSM now advances across the reasoning boundary' unconditionally AFTER both targets self-retired and nothing was written. That false line is gone; this row is the ledger half of the same verdict."
   },
   {
    "id": "PN98",
@@ -1944,7 +1956,7 @@
     "GENESIS_P26_MARKER"
    ],
    "upstream": [],
-   "status": "live",
+   "status": "retired?",
    "summary": "Wiring for Patch 26 \u2014 TurboQuant `_prefill_attention` output prealloc.",
    "registry": {
     "title": "TurboQuant prefill output prealloc",
@@ -2042,11 +2054,13 @@
     "env_flag": "GENESIS_LEGACY_P29",
     "default_on": true,
     "category": "structured_output",
-    "lifecycle": "legacy"
+    "lifecycle": "retired",
+    "superseded_by": "vllm#45413 (+ #45588), merged as c4a3f9d137099023a93fbb2299f3c5 2477751176 '[Frontend] Add Streaming Parser Engine and new Qwen3 Parser' on 2026-06-15, a strict ancestor of the boot pin's build base 4e2e9bf00. That commit DELETES tool_parsers/qwen3coder_tool_parser.py \u2014 the only file this row guards \u2014 and replaces it with tool_parsers/qwen3_engine_tool_parser.py driven by vllm/parser/engine/*. Verified on the boot pin dev1474cherrymax-1757-20260725: no file matching *qwen3coder* exists anywhere in the installed vllm, and qwen3_engine_tool_parser.py contains ZERO occurrences of streamed_args_for_tool or current_tool_index \u2014 the list-index state whose overrun this row wraps is structurally absent, so there is no IndexError class left to guard. Same deletion commit, same class, and the same verdict already recorded for P12/P27/P59/PN51 (f742f09c) and for lane-2's P29_HEAL (retired 2026-07-05) \u2014 this bare registry_only row is the half that never got one, and it has been printing 'skipped: P29 tool parser IndexError guard \u2014 qwen3coder_tool_parser.py not found' on every boot since. Sibling PN56 self-retires with the same finding: 'upstream parser engine absorbed'."
    },
    "registry_id": "P29",
    "key": "P29@lane1-genesis:",
-   "peer_lifecycle": "legacy"
+   "peer_lifecycle": "retired",
+   "peer_superseded_by": "vllm#45413 (+ #45588), merged c4a3f9d13 2026-06-15, ancestor of the boot pin's build base 4e2e9bf00. It DELETES tool_parsers/qwen3coder_tool_parser.py; the engine-native qwen3_engine_tool_parser.py has no streamed_args_for_tool / current_tool_index list state, so the IndexError class is structurally absent (verified on the pin: zero occurrences, and no *qwen3coder* file anywhere in the installed vllm)."
   },
   {
    "id": "P31",
@@ -2122,11 +2136,13 @@
     "env_flag": "GENESIS_LEGACY_P34",
     "default_on": true,
     "category": "stability",
-    "lifecycle": "legacy"
+    "lifecycle": "retired",
+    "superseded_by": "TWICE, and the second one is why this row must not be re-anchored. (1) ABSORBED on the build line as a1d5ec96f 'Cherry #40757 intent (adapted to #47782 Marconi shape): zero-collapse floor guard'. Upstream vllm#40757 is still OPEN \u2014 `git log -S 'aligned = end // block_size * block_size' origin/main` is empty \u2014 so this is a build-line cap, not a vllm version cap: a nightly without our cherries re-exposes the spin. The absorbing code, scheduler.py in the PRISTINE boot pin dev1474cherrymax-1757-20260725: 'aligned = end // block_size * block_size' / 'if aligned > start: end = aligned', which is _NEW_V2 minus the Genesis comment. (2) THEN REMOVED ON PURPOSE by /fixes patch_pr48361_mamba_align_split.py, which floors UNCONDITIONALLY and says so in the code it writes: 'PR48361: floor UNCONDITIONALLY. The old escape kept a sub-block end when flooring would empty the chunk, which buys progress by writing a boundary the mamba hash contract forbids. Hunk B restores progress the correct way.' apply_all runs BEFORE /fixes, so P34 still self-retires on the drift marker at its own dispatch time and the post-boot file carries pr48361's form. Verified 2026-07-26 by counting both the pristine image and the live post-boot container (ops/vllm-capability-ledger/verify_genesis_reanchors.py --live). Re-anchoring P34 would reinstate the escape pr48361 deliberately deleted. PN388 keeps requires_patches ['P34'] and its dual pristine/post-P34 anchor; the post-P34 arm is dead on this line."
    },
    "registry_id": "P34",
    "key": "P34@lane1-genesis:patch_34_mamba_deadlock_guard",
-   "peer_lifecycle": "legacy"
+   "peer_lifecycle": "retired",
+   "peer_superseded_by": "build-line cherry a1d5ec96f (vllm#40757 intent, OPEN upstream), then superseded again by /fixes patch_pr48361_mamba_align_split.py which removes the guard deliberately. Do NOT re-anchor."
   },
   {
    "id": "P36",
@@ -2276,7 +2292,8 @@
     "_genesis_p39a_wrapped"
    ],
    "key": "P39",
-   "note": "P39a FLA chunk_scaled_dot_kkt persistent A pool. Was setattr-only and therefore INERT across `exec vllm serve` for months while logging 'applied' every boot. 69cae1bd gave it a self-install hook text-patched into chunk_scaled_dot_kkt.py, gated OFF by default behind GENESIS_ENABLE_P39A_SELFINSTALL. Zero markers with the flag unset is CORRECT. Live behaviour remains unverified until a boot with the flag on."
+   "effective_env_flag": "GENESIS_ENABLE_P39A_SELFINSTALL",
+   "note": "P39a FLA chunk_scaled_dot_kkt persistent A pool. Was setattr-only and therefore INERT across `exec vllm serve` for months while logging 'applied' every boot. 69cae1bd gave it a self-install hook text-patched into chunk_scaled_dot_kkt.py, gated OFF by default behind GENESIS_ENABLE_P39A_SELFINSTALL. Zero markers with the flag unset is CORRECT. Live behaviour remains unverified until a boot with the flag on. [2026-07-26] Row was reading MISSING because the gate was taken from the union of flags the module mentions (GENESIS_PREALLOC_TOKEN_BUDGET etc. are set); the gate that actually decides whether the MARKER gets written is GENESIS_ENABLE_P39A_SELFINSTALL, now recorded as effective_env_flag so the row reads DARK. Boot line confirms: 'applied: P39a ... self-install=skipped (GENESIS_ENABLE_P39A_SELFINSTALL not set (default OFF)); module-level fn replaced ... NOTE: the setattr half does NOT survive `exec vllm serve`; only the self-install text-patch does.' Nothing absorbed it and nothing is lost - it has simply never been switched on."
   },
   {
    "id": "P3",
@@ -3617,6 +3634,7 @@
    ],
    "flags": [
     "GENESIS_ENABLE_P82",
+    "GENESIS_P82_ACK_UNVALIDATED",
     "GENESIS_P82_DRAFT_PROB_EPS",
     "GENESIS_P82_MARKER",
     "GENESIS_P82_MARKER_PREFIX",
@@ -3634,7 +3652,9 @@
    },
    "registry_id": "P82",
    "key": "P82@lane1-genesis:patch_82_sglang_acceptance_threshold",
-   "peer_lifecycle": "research"
+   "peer_lifecycle": "research",
+   "effective_env_flag": "GENESIS_P82_ACK_UNVALIDATED",
+   "note": "Re-anchored 2026-07-26 (ed8602f0) after establishing that P82 had NEVER applied on any pin: its drift marker sample_recovered_tokens_kernel is the ORIGINAL vLLM kernel (since #14930) so the obsolete-check fired on every image, and underneath that its anchor was count==0 because build-line cherry 01d50ae77 (vllm#45369) rewrote the acceptance test from a division to a multiplication. Both fixed; anchor v3/#45369-multiply is count==1 on the boot pin, pristine and post-boot alike (ops/vllm-capability-ledger/verify_genesis_reanchors.py). The WRITE is now gated behind a second GENESIS_P82_ACK_UNVALIDATED=1, because GENESIS_ENABLE_P82=1 sat in tcbench8021.yml the whole time the patch was inert and therefore never encoded a decision to ship a biased sampler; the module's own safety model requires genesis_quality_harness >=30/31 first. effective_env_flag points at the ack gate so zero markers reads DARK, not MISSING. NOTE: the 00:50 CEST 2026-07-26 self-restart of vllm-tcbench-8021 picked up the re-anchor BEFORE the ack gate existed, so that one boot did serve with the OR-clause live."
   },
   {
    "id": "P83",
@@ -10387,7 +10407,7 @@
     "GENESIS_LEGACY_P29"
    ],
    "upstream": [],
-   "status": "legacy",
+   "status": "retired",
    "summary": "tool parser IndexError guard",
    "registry": {
     "title": "tool parser IndexError guard",
@@ -10396,8 +10416,10 @@
     "category": "structured_output",
     "family": "tool_parsing",
     "tier": "community",
-    "lifecycle": "legacy",
-    "implementation_status": "marker_only"
+    "lifecycle": "retired",
+    "implementation_status": "marker_only",
+    "superseded_by": "vllm#45413 (+ #45588), merged c4a3f9d13 2026-06-15, ancestor of the boot pin's build base 4e2e9bf00. It DELETES tool_parsers/qwen3coder_tool_parser.py; the engine-native qwen3_engine_tool_parser.py has no streamed_args_for_tool / current_tool_index list state, so the IndexError class is structurally absent (verified on the pin: zero occurrences, and no *qwen3coder* file anywhere in the installed vllm).",
+    "vllm_version_range": "<0.23.0"
    },
    "registry_id": "P29",
    "key": "P29@lane2-sndr:",
@@ -10522,8 +10544,13 @@
     "category": "stability",
     "family": "scheduler",
     "tier": "community",
-    "lifecycle": "legacy",
-    "implementation_status": "full"
+    "lifecycle": "retired",
+    "implementation_status": "full",
+    "superseded_by": "build-line cherry a1d5ec96f (vllm#40757 intent, OPEN upstream), then superseded again by /fixes patch_pr48361_mamba_align_split.py which removes the guard deliberately. Do NOT re-anchor.",
+    "vllm_version_range": [
+     ">=0.19.0",
+     "<0.24.0"
+    ]
    },
    "registry_id": "P34",
    "key": "P34@lane2-sndr:p34_mamba_deadlock_guard",
@@ -12799,8 +12826,7 @@
    "kind": "text_patch",
    "targets": [
     "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a8_fp8.py",
-    "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/compressed_tensors/schemes/compressed_tensors_wNa16.py",
-    "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/inc.py"
+    "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/compressed_tensors/schemes/compressed_tensors_wNa16.py"
    ],
    "markers": [
     "Genesis P91B AutoRound row-group cdiv multi-scheme (vllm#39460-derived)",
@@ -13355,9 +13381,10 @@
     "category": "perf_hotfix",
     "family": "attention.turboquant",
     "tier": "community",
-    "lifecycle": "experimental",
+    "lifecycle": "retired",
     "implementation_status": "full",
-    "upstream_pr": 42551
+    "upstream_pr": 42551,
+    "superseded_by": "the anchor-based PN118 (pn118_tq_workspace_fallback), which APPLIED on the boot pin. md5 + whole-file PoC; boot line 'skipped \u2014 md5 mismatch (got cd3de45f97a67bd7e32169806ea1e9bc, expected 8ee234caac59bf099d717e56d7cfa00c) \u2014 upstream drifted from PoC baseline'. A pinned whole-file digest cannot survive a moving pin by construction, and the anchor-based original already covers this target. No capability is lost."
    },
    "registry_id": "PN118_V2_MD5_TURBOQUANT_ATTN",
    "key": "PN118@lane2-sndr:pn118_v2_md5_turboquant_attn"
@@ -13387,9 +13414,10 @@
     "category": "perf_hotfix",
     "family": "attention.turboquant",
     "tier": "community",
-    "lifecycle": "experimental",
+    "lifecycle": "retired",
     "implementation_status": "full",
-    "upstream_pr": 42551
+    "upstream_pr": 42551,
+    "superseded_by": "the anchor-based PN118 (pn118_tq_workspace_fallback), which APPLIED on the boot pin dev1474cherrymax-1757-20260725 and covers this file plus turboquant_attn.py. This row is an md5 + whole-file PoC of the PN119 pattern: it pins a 32-char digest of one exact pre-patch file, so ANY upstream edit retires it permanently. Boot line: 'skipped \u2014 md5 mismatch (got 902951004e1d5710276b33aa1c86d2c1, expected 439f0c086cc50f467960b6e610bdf803) \u2014 upstream drifted from PoC baseline', and the same line names the fallback: 'The original PN118 (anchor-based) will continue to attempt patching this file on its own.' Re-baselining the digest would buy one pin and break on the next; the pattern it was built to demonstrate is demonstrated. No capability is lost."
    },
    "registry_id": "PN118_V2_MD5_WORKSPACE",
    "key": "PN118@lane2-sndr:pn118_v2_md5_workspace"
@@ -13540,18 +13568,19 @@
   {
    "id": "PN126",
    "lane": "lane2-sndr",
-   "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/compile_safety/pn126_v1_decode_kernel_warmup.py",
-   "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/compile_safety/pn126_v1_decode_kernel_warmup.py",
+   "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/_retired/pn126_v1_decode_kernel_warmup.py",
+   "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/_retired/pn126_v1_decode_kernel_warmup.py",
    "kind": "module",
    "targets": [],
    "markers": [],
    "flags": [
+    "GENESIS_ALLOW_RETIRED",
     "GENESIS_DISABLE_PN126_V1_DECODE_WARMUP",
     "GENESIS_ENABLE_PN126_V1_DECODE_WARMUP",
     "GENESIS_PN126_MARKER"
    ],
    "upstream": [],
-   "status": "live",
+   "status": "retired",
    "summary": "PN126 \u2014 V1 decode + spec-decode kernel warmup orchestrator.",
    "markers_doc": [
     "Genesis PN126 V1 decode + spec-decode kernel warmup v1"
@@ -13563,8 +13592,9 @@
     "category": "perf_hotfix",
     "family": "compile_safety",
     "tier": "community",
-    "lifecycle": "experimental",
-    "implementation_status": "full"
+    "lifecycle": "retired",
+    "implementation_status": "full",
+    "retired_reason": "RETIRED 2026-07-26 (exec-discard triage). Installs by setattr on\n            Worker.compile_or_warm_up_model inside apply_all's own process,\n            which `exec vllm serve` then replaces -- so it announced \"RESULT\n            applied\" on every boot of this rig and never ran once. Restoring\n            it (P103/P39a self-install hook into v1/worker/gpu_worker.py) was\n            priced and declined: the payoff is first-request TTFT only, the\n            Triton cache is host-mounted so that cost is paid once per pin,\n            the 3-warm-run bench protocol hides it, and compile_or_warm_up_model\n            runs AFTER KV allocation -- the tightest VRAM point of the boot on a\n            0.935-util 3090. It does NOT address BUG-128: that death is in\n            get_kv_cache_configs, strictly before this hook is reached. Grounds\n            per module in patches/_retired/README.md."
    },
    "registry_id": "PN126",
    "key": "PN126",
@@ -13609,12 +13639,13 @@
   {
    "id": "PN128",
    "lane": "lane2-sndr",
-   "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/compile_safety/pn128_spec_decode_helper_warmup.py",
-   "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/compile_safety/pn128_spec_decode_helper_warmup.py",
+   "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/_retired/pn128_spec_decode_helper_warmup.py",
+   "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/_retired/pn128_spec_decode_helper_warmup.py",
    "kind": "module",
    "targets": [],
    "markers": [],
    "flags": [
+    "GENESIS_ALLOW_RETIRED",
     "GENESIS_DISABLE_PN128_SPEC_DECODE_WARMUP",
     "GENESIS_ENABLE_PN128_SPEC_DECODE_WARMUP",
     "GENESIS_PN128_MARKER"
@@ -13622,7 +13653,7 @@
    "upstream": [
     "vllm#41481"
    ],
-   "status": "live",
+   "status": "retired",
    "summary": "PN128 \u2014 Spec-decode helper kernel warmup (backport vllm-project/vllm#41481).",
    "markers_doc": [
     "Genesis PN128 spec-decode helper warmup v1 (vllm#41481)"
@@ -13634,9 +13665,10 @@
     "category": "perf_hotfix",
     "family": "compile_safety",
     "tier": "community",
-    "lifecycle": "experimental",
+    "lifecycle": "retired",
     "implementation_status": "full",
-    "upstream_pr": 41481
+    "upstream_pr": 41481,
+    "retired_reason": "RETIRED 2026-07-26 (exec-discard triage). Installs by setattr on\n            Worker.compile_or_warm_up_model inside apply_all's own process,\n            which `exec vllm serve` then replaces -- so it announced \"RESULT\n            applied\" on every boot of this rig and never ran once. Restoring\n            it (P103/P39a self-install hook into v1/worker/gpu_worker.py) was\n            priced and declined: the payoff is first-request TTFT only, the\n            Triton cache is host-mounted so that cost is paid once per pin,\n            the 3-warm-run bench protocol hides it, and compile_or_warm_up_model\n            runs AFTER KV allocation -- the tightest VRAM point of the boot on a\n            0.935-util 3090. It does NOT address BUG-128: that death is in\n            get_kv_cache_configs, strictly before this hook is reached. Grounds\n            per module in patches/_retired/README.md."
    },
    "registry_id": "PN128",
    "key": "PN128",
@@ -13645,12 +13677,13 @@
   {
    "id": "PN129",
    "lane": "lane2-sndr",
-   "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/compile_safety/pn129_slot_mapping_warmup.py",
-   "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/compile_safety/pn129_slot_mapping_warmup.py",
+   "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/_retired/pn129_slot_mapping_warmup.py",
+   "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/_retired/pn129_slot_mapping_warmup.py",
    "kind": "module",
    "targets": [],
    "markers": [],
    "flags": [
+    "GENESIS_ALLOW_RETIRED",
     "GENESIS_DISABLE_PN129_SLOT_MAPPING_WARMUP",
     "GENESIS_ENABLE_PN129_SLOT_MAPPING_WARMUP",
     "GENESIS_PN129_MARKER"
@@ -13658,7 +13691,7 @@
    "upstream": [
     "vllm#42165"
    ],
-   "status": "live",
+   "status": "retired",
    "summary": "PN129 \u2014 V1 slot mapping kernel warmup (backport vllm-project/vllm#42165).",
    "markers_doc": [
     "Genesis PN129 V1 slot mapping warmup v1 (vllm#42165)"
@@ -13670,9 +13703,10 @@
     "category": "perf_hotfix",
     "family": "compile_safety",
     "tier": "community",
-    "lifecycle": "experimental",
+    "lifecycle": "retired",
     "implementation_status": "full",
-    "upstream_pr": 42165
+    "upstream_pr": 42165,
+    "retired_reason": "RETIRED 2026-07-26 (exec-discard triage). Installs by setattr on\n            Worker.compile_or_warm_up_model inside apply_all's own process,\n            which `exec vllm serve` then replaces -- so it announced \"RESULT\n            applied\" on every boot of this rig and never ran once. Restoring\n            it (P103/P39a self-install hook into v1/worker/gpu_worker.py) was\n            priced and declined: the payoff is first-request TTFT only, the\n            Triton cache is host-mounted so that cost is paid once per pin,\n            the 3-warm-run bench protocol hides it, and compile_or_warm_up_model\n            runs AFTER KV allocation -- the tightest VRAM point of the boot on a\n            0.935-util 3090. It does NOT address BUG-128: that death is in\n            get_kv_cache_configs, strictly before this hook is reached. Grounds\n            per module in patches/_retired/README.md."
    },
    "registry_id": "PN129",
    "key": "PN129",
@@ -13735,12 +13769,13 @@
   {
    "id": "PN130",
    "lane": "lane2-sndr",
-   "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/compile_safety/pn130_turboquant_decode_warmup.py",
-   "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/compile_safety/pn130_turboquant_decode_warmup.py",
+   "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/_retired/pn130_turboquant_decode_warmup.py",
+   "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/_retired/pn130_turboquant_decode_warmup.py",
    "kind": "module",
    "targets": [],
    "markers": [],
    "flags": [
+    "GENESIS_ALLOW_RETIRED",
     "GENESIS_DISABLE_PN130_TQ_DECODE_WARMUP",
     "GENESIS_ENABLE_PN130_TQ_DECODE_WARMUP",
     "GENESIS_PN130_MARKER"
@@ -13748,7 +13783,7 @@
    "upstream": [
     "vllm#42215"
    ],
-   "status": "live",
+   "status": "retired",
    "summary": "PN130 \u2014 TurboQuant decode kernel warmup (backport vllm-project/vllm#42215).",
    "markers_doc": [
     "Genesis PN130 TQ decode warmup v1 (vllm#42215)"
@@ -13760,9 +13795,10 @@
     "category": "perf_hotfix",
     "family": "compile_safety",
     "tier": "community",
-    "lifecycle": "experimental",
+    "lifecycle": "retired",
     "implementation_status": "full",
-    "upstream_pr": 42215
+    "upstream_pr": 42215,
+    "retired_reason": "RETIRED 2026-07-26 (exec-discard triage). Installs by setattr on\n            Worker.compile_or_warm_up_model inside apply_all's own process,\n            which `exec vllm serve` then replaces -- so it announced \"RESULT\n            applied\" on every boot of this rig and never ran once. Restoring\n            it (P103/P39a self-install hook into v1/worker/gpu_worker.py) was\n            priced and declined: the payoff is first-request TTFT only, the\n            Triton cache is host-mounted so that cost is paid once per pin,\n            the 3-warm-run bench protocol hides it, and compile_or_warm_up_model\n            runs AFTER KV allocation -- the tightest VRAM point of the boot on a\n            0.935-util 3090. It does NOT address BUG-128: that death is in\n            get_kv_cache_configs, strictly before this hook is reached. Grounds\n            per module in patches/_retired/README.md."
    },
    "registry_id": "PN130",
    "key": "PN130",
@@ -15271,7 +15307,7 @@
    "lane": "lane2-sndr",
    "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/attention/flash/pn286_fa_layout_revert_sm86.py",
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/attention/flash/pn286_fa_layout_revert_sm86.py",
-   "kind": "text_patch",
+   "kind": "text_patch_selfinstall",
    "targets": [
     "/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/flash_attn.py"
    ],
@@ -15289,7 +15325,7 @@
    "registry": {
     "title": "FA KV cache layout revert for Ampere SM 8.6 (closes #42095 MTP K=3 regression)",
     "env_flag": "GENESIS_ENABLE_PN286_FA_LAYOUT_REVERT_SM86",
-    "default_on": true,
+    "default_on": false,
     "category": "perf_hotfix",
     "family": "attention.flash",
     "tier": "community",
@@ -16234,9 +16270,10 @@
     "category": "correctness",
     "family": "kv_cache",
     "tier": "community",
-    "lifecycle": "experimental",
+    "lifecycle": "retired",
     "implementation_status": "full",
-    "upstream_pr": 43650
+    "upstream_pr": 43650,
+    "superseded_by": "/fixes patch_pn87_43650_mamba_eagle_cache_hit_boundary.py \u2014 same vllm#43650 vendor, emits the byte-identical coarse guard AND additionally fixes the fine-grained max_num_partial_units loop the upstream refactor added. Verified by effect 2026-07-26: both PN87 markers present in the LIVE container's single_type_kv_cache_manager.py while PN346_ANCHOR_OLD is count == 0 on all three pinned images. Do NOT re-anchor \u2014 lane-2 runs first and would consume pn87's anchor."
    },
    "registry_id": "PN346",
    "key": "PN346",
@@ -16982,12 +17019,13 @@
   {
    "id": "PN364",
    "lane": "lane2-sndr",
-   "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/compile_safety/pn364_hybrid_gdn_mamba_warmup.py",
-   "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/compile_safety/pn364_hybrid_gdn_mamba_warmup.py",
+   "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/_retired/pn364_hybrid_gdn_mamba_warmup.py",
+   "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/_retired/pn364_hybrid_gdn_mamba_warmup.py",
    "kind": "monkey_patch",
    "targets": [],
    "markers": [],
    "flags": [
+    "GENESIS_ALLOW_RETIRED",
     "GENESIS_DISABLE_PN364",
     "GENESIS_ENABLE_PN364_HYBRID_GDN_WARMUP",
     "GENESIS_PN364_MARKER"
@@ -16996,7 +17034,7 @@
     "vllm#41126",
     "vllm#43642"
    ],
-   "status": "live",
+   "status": "retired",
    "summary": "PN364 \u2014 vendor of OPEN PR vllm#43642 (hybrid GDN/Mamba/MRoPE startup warmup).",
    "markers_doc": [
     "_genesis_pn364_hybrid_gdn_warmup_installed"
@@ -17008,9 +17046,10 @@
     "category": "ttft_warmup",
     "family": "compile_safety",
     "tier": "community",
-    "lifecycle": "experimental",
+    "lifecycle": "retired",
     "implementation_status": "full",
-    "upstream_pr": 43642
+    "upstream_pr": 43642,
+    "retired_reason": "RETIRED 2026-07-26 (exec-discard triage). Installs by setattr on\n            Worker.compile_or_warm_up_model inside apply_all's own process,\n            which `exec vllm serve` then replaces -- so it announced \"RESULT\n            applied\" on every boot of this rig and never ran once. Restoring\n            it (P103/P39a self-install hook into v1/worker/gpu_worker.py) was\n            priced and declined: the payoff is first-request TTFT only, the\n            Triton cache is host-mounted so that cost is paid once per pin,\n            the 3-warm-run bench protocol hides it, and compile_or_warm_up_model\n            runs AFTER KV allocation -- the tightest VRAM point of the boot on a\n            0.935-util 3090. It does NOT address BUG-128: that death is in\n            get_kv_cache_configs, strictly before this hook is reached. Grounds\n            per module in patches/_retired/README.md."
    },
    "registry_id": "PN364",
    "key": "PN364",
@@ -18718,18 +18757,19 @@
   {
    "id": "PN522",
    "lane": "lane2-sndr",
-   "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/compile_safety/pn522_tq_raw_tail_kernel_warmup.py",
-   "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/compile_safety/pn522_tq_raw_tail_kernel_warmup.py",
+   "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/_retired/pn522_tq_raw_tail_kernel_warmup.py",
+   "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/_retired/pn522_tq_raw_tail_kernel_warmup.py",
    "kind": "module",
    "targets": [],
    "markers": [],
    "flags": [
+    "GENESIS_ALLOW_RETIRED",
     "GENESIS_ENABLE_PN521_SPLIT_K",
     "GENESIS_ENABLE_PN521_TQ_RAW_TAIL_VERIFY",
     "GENESIS_ENABLE_PN522_TQ_RAW_TAIL_WARMUP"
    ],
    "upstream": [],
-   "status": "live",
+   "status": "retired",
    "summary": "PN522 \u2014 pre-capture warmup of the PN521 raw-bf16-tail spec-verify kernel.",
    "registry": {
     "title": "PN521 raw-tail kernel pre-capture warmup \u2014 remove the first-request JIT latency spike on the INT4 non-pow2-GQA 27B spec-verify path",
@@ -18738,8 +18778,9 @@
     "category": "compile_safety",
     "family": "compile_safety",
     "tier": "community",
-    "lifecycle": "experimental",
+    "lifecycle": "retired",
     "implementation_status": "full",
+    "retired_reason": "RETIRED 2026-07-26 (exec-discard triage). Installs by setattr on\n            Worker.compile_or_warm_up_model inside apply_all's own process,\n            which `exec vllm serve` then replaces -- so it announced \"RESULT\n            applied\" on every boot of this rig and never ran once. Restoring\n            it (P103/P39a self-install hook into v1/worker/gpu_worker.py) was\n            priced and declined: the payoff is first-request TTFT only, the\n            Triton cache is host-mounted so that cost is paid once per pin,\n            the 3-warm-run bench protocol hides it, and compile_or_warm_up_model\n            runs AFTER KV allocation -- the tightest VRAM point of the boot on a\n            0.935-util 3090. It does NOT address BUG-128: that death is in\n            get_kv_cache_configs, strictly before this hook is reached. Grounds\n            per module in patches/_retired/README.md.",
     "requires_patches": [
      "P67",
      "P67b"
@@ -19327,13 +19368,20 @@
    "source_host": "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/sndr/engines/vllm/patches/middleware/pn65_access_log.py",
    "source_container": "/usr/local/lib/python3.12/dist-packages/vllm/_genesis/sndr/engines/vllm/patches/middleware/pn65_access_log.py",
    "kind": "monkey_patch",
-   "targets": [],
-   "markers": [],
+   "targets": [
+    "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/openai/api_server.py"
+   ],
+   "markers": [
+    "Genesis PN65 self-install hook (exec-survival, P39a class) v1"
+   ],
    "flags": [
+    "GENESIS_DISABLE_PN65",
     "GENESIS_ENABLE_PN65",
     "GENESIS_PN65_KEEP_UVICORN_ACCESS",
     "GENESIS_PN65_LOG_HEALTH",
-    "GENESIS_PN65_QUIET_PATHS"
+    "GENESIS_PN65_QUIET_PATHS",
+    "GENESIS_SNDR_OWNS_PN65",
+    "SNDR_DISABLE_PN65"
    ],
    "upstream": [],
    "status": "live",
@@ -20403,6 +20451,10 @@
    "targets": [],
    "markers": [],
    "flags": [
+    "GENESIS_DISABLE_",
+    "GENESIS_MODEL_",
+    "GENESIS_SNDR_OWNS_PN65",
+    "SNDR_EAGLE3_AUX_HIDDEN_001",
     "SNDR_ENABLE_SPEC_DECODE_ACCEPTANCE_METRIC"
    ],
    "upstream": [],
