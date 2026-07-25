@@ -55,12 +55,25 @@ from __future__ import annotations
 import importlib.util
 import logging
 import os
+import re
 import sys
 from collections import Counter
 from pathlib import Path
 from typing import Any, Optional
 
 log = logging.getLogger("genesis.sndr_lane")
+
+# Bares whose GENESIS_DISABLE_<bare> was injected by apply_policy step 1 (NOT
+# by the operator). Module-level so a second apply_policy() call (it advertises
+# idempotency) does not misread its OWN first-call injection as an operator
+# opt-out. bare -> patch id.
+_POLICY_INJECTED_DISABLES: dict[str, str] = {}
+
+_TRUTHY = ("1", "true", "yes", "on")
+
+# Sub-patch name as sndr's text_patch bakes it into a failure detail, e.g.
+#   "PN79: required_anchor_missing — sub-patch 'chunk_inplace': anchor not found"
+_SUB_PATCH_RE = re.compile(r"sub-patch ['\"]([^'\"]+)['\"]")
 
 # Our /fixes house series numbers that also exist (as DIFFERENT patches)
 # in Sander's registry — S-prefix alias targets (policy step 3).
@@ -176,6 +189,153 @@ def _sndr_owns(bare: str) -> bool:
     )
 
 
+def _env_is_enabled(bare: str) -> bool:
+    """Mirror of `sndr.env.is_enabled` (SNDR_ wins over GENESIS_)."""
+    val = os.environ.get(f"SNDR_ENABLE_{bare}")
+    if val is None:
+        val = os.environ.get(f"GENESIS_ENABLE_{bare}")
+    return val is not None and val.strip().lower() in _TRUTHY
+
+
+def _env_is_disabled(bare: str) -> bool:
+    """Mirror of `sndr.env.is_disabled` (SNDR_ wins over GENESIS_)."""
+    val = os.environ.get(f"SNDR_DISABLE_{bare}")
+    if val is None:
+        val = os.environ.get(f"GENESIS_DISABLE_{bare}")
+    return val is not None and val.strip().lower() in _TRUTHY
+
+
+def audit_env_conflicts(his_reg: dict[str, Any]) -> dict[str, list[str]]:
+    """Classify every ENABLE+DISABLE conflict lane-2's dispatcher will resolve
+    as "DISABLE wins".
+
+    Why this exists (observability gap, 2026-07-25): `decision._check_disable_
+    gate` logs ONE warning per conflict, scattered through a ~500-line boot
+    block. On the 07-25 fixwave boot that was 42 separate warnings — nothing
+    aggregated them, so an operator who set `GENESIS_ENABLE_X=1` in a compose
+    had no way to see that lane-2 overrode it, and no way to tell the 42 apart.
+
+    Most of them are BY DESIGN: `apply_policy` step 1 injects
+    `GENESIS_DISABLE_<bare>=1` for every shared id precisely so lane-1 stays
+    authoritative. Those are EXPECTED and carry no operator signal. A conflict
+    whose DISABLE came from the operator's own env is GENUINE — that is the one
+    worth a warning.
+
+    Resolution is deliberately NOT changed here (DISABLE-wins is the contract);
+    this only makes the set visible and separates the two classes. Mirrors
+    `decision._resolve_env_state` (canonical flag, then enabled-and-not-disabled
+    aliases) so the classification tracks what the dispatcher actually decides.
+    """
+    expected: list[str] = []
+    genuine: list[str] = []
+    for pid, meta in his_reg.items():
+        if not isinstance(meta, dict):
+            continue
+        flag = meta.get("env_flag")
+        if not flag:
+            continue
+        bare = _bare(flag)
+        if not _env_is_disabled(bare):
+            continue
+        if _env_is_enabled(bare):
+            via = bare
+        else:
+            via = None
+            for alias in (meta.get("env_flag_aliases") or ()):
+                abare = _bare(alias)
+                if _env_is_enabled(abare) and not _env_is_disabled(abare):
+                    via = f"{bare}<-alias {alias}"
+                    break
+            if via is None:
+                continue  # DISABLE only — no conflict, operator intent is clear
+        entry = f"{pid}({via})"
+        if _POLICY_INJECTED_DISABLES.get(bare) is not None:
+            expected.append(entry)
+        else:
+            genuine.append(entry)
+    return {"expected": sorted(expected), "genuine": sorted(genuine)}
+
+
+def log_env_conflicts(conflicts: dict[str, list[str]]) -> None:
+    """One summary line for the whole conflict set (WARNING iff genuine)."""
+    expected = conflicts.get("expected") or []
+    genuine = conflicts.get("genuine") or []
+    total = len(expected) + len(genuine)
+    if not total:
+        return
+    if genuine:
+        log.warning(
+            "[Genesis lane-2/sndr] env conflicts: %d ENABLE+DISABLE pair(s) — "
+            "%d expected (policy-injected shared-id suppression, lane-1 owns "
+            "them), %d GENUINE operator conflict(s) silently resolved "
+            "DISABLE-wins against stated intent: %s. Drop one env var per "
+            "pair to clear.",
+            total, len(expected), len(genuine), ", ".join(genuine),
+        )
+    else:
+        log.info(
+            "[Genesis lane-2/sndr] env conflicts: %d ENABLE+DISABLE pair(s), "
+            "all policy-injected (expected — lane-1 owns these shared ids); "
+            "0 genuine operator conflicts.",
+            total,
+        )
+
+
+def log_partial_apply_warnings(stats: Any) -> None:
+    """Lane-2 mirror of lane-1's partial-apply enumeration.
+
+    Why (observability gap, 2026-07-25): under the spec-driven loop that this
+    bridge forces (`SNDR_APPLY_VIA_SPECS=1`), `sndr.apply.orchestrator.run()`
+    returns immediately after `_run_via_specs(stats)` + `log.info("Genesis %s")`
+    — it never reaches the enumeration block that the LEGACY path runs. Net
+    effect on the 07-25 fixwave boot: lane-1 printed its 4 warnings one by one,
+    lane-2 printed the string "25 ⚠️ partial-apply warning(s)" and dropped
+    every detail. A lane-2 patch landing 1 of 4 sub-patches was invisible.
+
+    Emitted from the bridge rather than the vendored tree so `sndr/` stays
+    byte-identical for `git read-tree` grafts.
+    """
+    try:
+        warnings = list(getattr(stats, "partial_apply_warnings", None) or ())
+    except Exception as exc:  # pragma: no cover - reporting must not break boot
+        log.warning("[Genesis lane-2/sndr] partial-apply enumeration "
+                    "unavailable: %s", exc)
+        return
+    if not warnings:
+        return
+    # sndr's BENIGN list (apply/_state.py) does not know about registry entries
+    # that carry no apply_module — pure documentation rows that can never touch
+    # source. On the 07-25 boot they were 15 of the 24 warnings and would bury
+    # the 9 that matter. Collapse them to one line here rather than editing the
+    # vendored BENIGN tuple (the sndr/ tree stays byte-identical).
+    informational = [r for r in warnings
+                     if "no apply_module declared" in (getattr(r, "reason", "") or "")]
+    actionable = [r for r in warnings if r not in informational]
+    if actionable:
+        log.warning(
+            "[Genesis lane-2/sndr] %d partial-apply warning(s) — patch(es) "
+            "failed to match expected source pattern. Review below to confirm "
+            "anchor drift vs upstream change vs config issue:",
+            len(actionable),
+        )
+        for r in actionable:
+            reason = getattr(r, "reason", "") or ""
+            m = _SUB_PATCH_RE.search(reason)
+            log.warning(
+                "[Genesis lane-2/sndr] ⚠️  %s [sub-patch: %s] — %s",
+                getattr(r, "name", "?"), m.group(1) if m else "-", reason,
+            )
+    if informational:
+        log.info(
+            "[Genesis lane-2/sndr] %d further warning-classified skip(s) are "
+            "registry rows with no apply_module (documentation entries, "
+            "nothing to apply): %s",
+            len(informational),
+            ", ".join(str(getattr(r, "name", "?")).split(" ")[0]
+                      for r in informational),
+        )
+
+
 def apply_policy() -> dict[str, Any]:
     """Apply the club-3090 policy overlay to the (already imported) sndr
     registry.  Returns a summary dict for logging.  Idempotent."""
@@ -233,6 +393,18 @@ def apply_policy() -> dict[str, Any]:
             )
             lane1_hardowned.append(f"{pid}→{s_flag}")
             continue
+        # Record WHOSE disable this is before writing it, so the conflict
+        # audit below can tell "policy injected it so lane-1 keeps the id"
+        # apart from "the operator set both ENABLE and DISABLE themselves".
+        # Guard on the module-level ledger too: apply_policy advertises
+        # idempotency, and on a second call our own first-call injection
+        # would otherwise read as pre-existing operator intent.
+        if (
+            bare not in _POLICY_INJECTED_DISABLES
+            and os.environ.get(f"GENESIS_DISABLE_{bare}") is None
+            and os.environ.get(f"SNDR_DISABLE_{bare}") is None
+        ):
+            _POLICY_INJECTED_DISABLES[bare] = pid
         os.environ[f"GENESIS_DISABLE_{bare}"] = "1"
         suppressed.append(pid)
 
@@ -304,6 +476,9 @@ def apply_policy() -> dict[str, Any]:
         "s_aliases": aliased,
         "s_alias_mirrored": alias_mirrored,
         "lane1_hardowned": lane1_hardowned,
+        # Audited AFTER all three policy steps so the S-alias mirroring above
+        # (which writes ENABLE vars) is reflected in the classification.
+        "env_conflicts": audit_env_conflicts(his_reg),
     }
 
 
@@ -346,6 +521,14 @@ def run_lane2(dry: bool) -> Optional[Any]:
         ",".join(summary["lane1_hardowned"]) or "-",
         ",".join(summary["handed_to_lane2"]) or "-",
     )
+    # Single summary line for the whole ENABLE/DISABLE conflict set. The
+    # dispatcher's per-conflict warnings stay where they are; this is what
+    # makes them readable as a SET and separates by-design suppression from a
+    # genuine operator conflict. Best-effort: never take the boot down.
+    try:
+        log_env_conflicts(summary.get("env_conflicts") or {})
+    except Exception as exc:  # pragma: no cover - reporting must not break boot
+        log.warning("[Genesis lane-2/sndr] env-conflict audit failed: %s", exc)
 
     from sndr.apply import run as sndr_run
     stats = sndr_run(verbose=True, apply=not dry)
@@ -376,5 +559,10 @@ def run_lane2(dry: bool) -> Optional[Any]:
             )
     except Exception as exc:  # pragma: no cover - reporting must not break boot
         log.warning("[Genesis lane-2/sndr] result logging failed: %s", exc)
+
+    # Enumerate the partial-apply warnings the way lane-1 does. The spec-driven
+    # orchestrator path returns before sndr's own enumeration block, so without
+    # this the aggregate count is the ONLY signal lane-2 emits.
+    log_partial_apply_warnings(stats)
 
     return stats
