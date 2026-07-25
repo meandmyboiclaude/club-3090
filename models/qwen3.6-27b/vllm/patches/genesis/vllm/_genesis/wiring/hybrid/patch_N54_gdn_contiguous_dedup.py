@@ -46,6 +46,46 @@ Default OFF until live A/B on Cliff 2b multi-turn reproducer (Genesis Issue
 
 Author: Sandermage (Sander) Barzov Aleksandr.
 Inspiration: adurham (MLX-LM #1077) — slice-kept-alive class of bug.
+
+RETIRED 2026-07-25 — superseded upstream (Sub-A) + premise now false (Sub-B)
+===========================================================================
+
+This wiring reported ``skipped: gdn_linear_attn.py not found`` on the
+wheel-v2 boot while PN11 text-patched *that exact module* 98 lines later.
+The resolver was stale, not the file: ``gdn_linear_attn.py`` was moved to
+``model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py`` and the flat
+path is count==0 on ALL THREE pinned images (dev1060cherry-20260713,
+wheel v1 dev1474cherry-1711, wheel v2 dev1474cherrymax-1757) — so PN54
+has been "not found" on every pin, not newly broken.
+
+The resolver is fixed below (both paths, tried in order) so the log tells
+the truth. But the patch itself is now a no-op, on evidence:
+
+  * **Sub-A** (``pn54_ssm_state``, ``required=True``, the HIGH-IMPACT
+    half) is **delivered natively by upstream**. All three images already
+    read ``initial_state = ssm_state[prefill_state_indices]`` with **no**
+    ``.contiguous()`` — the exact edit PN54 makes, done upstream (the
+    index tensor was also renamed from ``non_spec_state_indices_tensor``,
+    which is count==0 in the relocated file on every pin). Same job,
+    equally well → drop.
+
+  * **Sub-B** (``pn54_lora_ba``, ``required=False``) must NOT be
+    re-anchored: its premise is now FALSE. The site moved from the LoRA
+    branch to the Qwen3.5 ``else`` branch and now reads
+    ``b, a = self.split_ba(ba)``. ``split_ba`` chunks *and then*, when
+    ``disable_tp_for_ba_proj and tp_size > 1`` (Marlin replicates
+    ``ba_proj`` — our AutoRound-INT4 TP=2 shape), slices
+    ``b = b[:, ba_start:ba_start + ba_chunk]``. That slice is a
+    NON-contiguous view, so the following ``b.contiguous()`` /
+    ``a.contiguous()`` are load-bearing on exactly the config we run.
+    Removing them would be a regression, not a dedup.
+
+Lane-2/sndr retired its own copy on 2026-06-11 and disables the id; this
+house-lane copy is the last live one. ``apply()`` now returns an explicit
+``superseded`` skip (content-sniffed, so it degrades to the historical
+behaviour on an image that still carries the pre-move shape) instead of a
+misleading "not found". The anchors are retained: they are the evidence
+of what was checked, and other patches' conflict docs reference them.
 """
 from __future__ import annotations
 
@@ -113,8 +153,47 @@ LORA_BA_NEW = (
 )
 
 
+# The module moved; try the current home first, then the historical flat path
+# so an older image (dual-pin: prod rollback rides dev1060cherry / wheel v1)
+# still resolves. Kept LOCAL to PN54 on purpose — the alias table inside
+# resolve_vllm_file() is shared, and widening it there would silently wake
+# every other patch still pointing at the flat path (P7b, P28, …).
+PN54_TARGET_CANDIDATES = (
+    "model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py",
+    "model_executor/layers/mamba/gdn_linear_attn.py",
+)
+
+# Upstream's own removal of Sub-A's copy: the advanced-index gather with no
+# trailing .contiguous(). Present on all three pinned images.
+PN54_SUB_A_UPSTREAM_NATIVE = "initial_state = ssm_state[prefill_state_indices]"
+
+
+def _resolve_target() -> str | None:
+    for rel in PN54_TARGET_CANDIDATES:
+        target = resolve_vllm_file(rel)
+        if target is not None:
+            return str(target)
+    return None
+
+
+def _upstream_superseded(target: str) -> bool:
+    """True when upstream already ships Sub-A's edit.
+
+    Content sniff, never a rewrite: resolve_vllm_file() returns a str, so the
+    read goes through Path(str(...)), and any failure degrades to False —
+    i.e. the historical anchor path — rather than killing the boot.
+    """
+    from pathlib import Path
+
+    try:
+        text = Path(str(target)).read_text(encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        return False
+    return PN54_SUB_A_UPSTREAM_NATIVE in text and SSM_STATE_OLD not in text
+
+
 def _make_patcher() -> TextPatcher | None:
-    target = resolve_vllm_file("model_executor/layers/mamba/gdn_linear_attn.py")
+    target = _resolve_target()
     if target is None:
         return None
     return TextPatcher(
@@ -144,6 +223,25 @@ def apply() -> tuple[str, str]:
 
     if vllm_install_root() is None:
         return "skipped", "vllm install root not discoverable"
+
+    target = _resolve_target()
+    if target is None:
+        return "skipped", (
+            "qwen_gdn_linear_attn.py not found (tried "
+            + " and ".join(PN54_TARGET_CANDIDATES)
+            + ")"
+        )
+
+    if _upstream_superseded(target):
+        return "skipped", (
+            "PN54 SUPERSEDED — Sub-A is native upstream ("
+            "`initial_state = ssm_state[prefill_state_indices]`, no "
+            ".contiguous()) and Sub-B must not be re-anchored: the site now "
+            "reads `b, a = self.split_ba(ba)`, and split_ba TP-slices b/a "
+            "when disable_tp_for_ba_proj and tp_size > 1, so the trailing "
+            ".contiguous() is load-bearing on our Marlin TP=2 shape. "
+            "See the module docstring for the per-pin evidence."
+        )
 
     patcher = _make_patcher()
     if patcher is None:
