@@ -39,7 +39,7 @@ services:
     # [2026-07-25 17:1x] wheel v1 bake: stock nightly-0ba2aa35 base + club-dev1474-cherry
     # wheel (11 picks, GLIBC<=2.34, CI run 30161714847). v2 (max+kvq+mtpq) builds as
     # CI 30163221644. Rollback: stock digest sha256:e4f85549... (line above history).
-    image: localhost/vllm-qwen36-endgame:dev1474cherry-1711-20260725
+    image: localhost/vllm-qwen36-endgame:dev1474cherrymax-1757-20260725
     container_name: vllm-tcbench-8021
     restart: unless-stopped
     healthcheck:
