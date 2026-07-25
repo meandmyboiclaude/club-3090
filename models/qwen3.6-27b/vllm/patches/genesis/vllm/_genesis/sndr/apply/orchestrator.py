@@ -866,7 +866,10 @@ def _apply_spec_module(spec, stats: PatchStats) -> str:
     # reaching it), so without this the spec-driven path was invisible to
     # get_apply_matrix() — and thus to the apply-plan validator / doctor /
     # telemetry that read it. log_decision() is idempotent by patch_id, so a
-    # patch whose apply() also logs is not double-counted.
+    # patch whose apply() also logs is not double-counted in the matrix — and
+    # since 2026-07-25 it also suppresses the duplicate ANNOUNCEMENT line when
+    # the second call carries the identical (applied, reason) pair, which is
+    # the normal case for a patch that re-logs the same gate result here.
     log_decision(spec.patch_id, decision, reason)
     if not decision:
         stats.results.append(_skipped(display, reason))

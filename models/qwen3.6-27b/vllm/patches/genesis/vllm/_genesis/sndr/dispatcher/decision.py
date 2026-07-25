@@ -648,11 +648,6 @@ def log_decision(patch_id: str, applied: bool, reason: str) -> None:
     """
     meta = _live_registry().get(patch_id, {})
     title = meta.get("title", patch_id)
-    status = "APPLY" if applied else "SKIP "
-    log.info(
-        "[Genesis Dispatcher] %s %s — %s | %s",
-        status, patch_id, title, reason[:120],
-    )
     record = {
         "patch_id": patch_id,
         "title": title,
@@ -669,10 +664,32 @@ def log_decision(patch_id: str, applied: bool, reason: str) -> None:
     # in the raw apply matrix that telemetry / doctor consume. Replace the
     # prior record in place (preserving first-seen order) so the matrix holds
     # exactly one entry per patch.
+    prior_index = None
     for i, existing in enumerate(_DECISIONS):
         if existing.get("patch_id") == patch_id:
-            _DECISIONS[i] = record
-            return
+            prior_index = i
+            break
+
+    # [2026-07-25] The dedup above kept the MATRIX honest but left the log
+    # line doubled: every spec-only patch that also calls log_decision() from
+    # its own apply() announced "APPLY <id>" twice (27 ids in the 2026-07-14
+    # cold boot, e.g. PN384, PN79_V2_MD5_CHUNK). Any announcement-derived
+    # count read those as two patches. Announce only a decision we have not
+    # already announced verbatim; a genuinely CHANGED decision (same id
+    # re-evaluated across the legacy and spec phases with different
+    # applied/reason) still logs, because that is real information.
+    prior = _DECISIONS[prior_index] if prior_index is not None else None
+    if (prior is None
+            or prior.get("applied") != applied
+            or prior.get("reason") != reason):
+        log.info(
+            "[Genesis Dispatcher] %s %s — %s | %s",
+            "APPLY" if applied else "SKIP ", patch_id, title, reason[:120],
+        )
+
+    if prior_index is not None:
+        _DECISIONS[prior_index] = record
+        return
     _DECISIONS.append(record)
 
 
