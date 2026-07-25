@@ -8,6 +8,41 @@
 
 ## v7.74 — 2026-07-25 (nightly-0ba2aa35 pin re-derivation wave)
 
+### P39b warm-up hints — lazy resolution (BUG-129)
+
+P39b read `get_current_vllm_config()` inside `apply()`. Under the shipped
+entrypoint (`python3 -m vllm._genesis.patches.apply_all` then
+`exec vllm serve`) `apply()` runs in a standalone process with no engine,
+so that call ALWAYS raised and P39b fell back to `max_T=4096 / max_B=2` on
+every boot — logged at INFO as
+`[Genesis P39b] vllm_config fetch failed (...); defaults used`, so it never
+read as a defect.
+
+Materially wrong on this rig: `max_num_batched_tokens = mamba_block_size =
+4128 > 4096`, so the FLA KKT `A` pool is born undersized and GROWS on the
+first full chunk — a pool pointer swap, exactly the CUDA-graph invalidation
+P39b exists to prevent. `max_num_seqs=4` vs the `max_B=2` default likewise.
+
+Fix: `resolve_kkt_hints()` — lazy, cached, evaluated at the first kernel
+call (i.e. inside the serving process). Precedence: `GENESIS_FLA_KKT_MAX_T/_B`
+env > P73 `prealloc_budget.resolve_token_budget()` (which sees
+`GENESIS_PREALLOC_TOKEN_BUDGET=4160`) > live `scheduler_config.max_num_seqs`
+> defaults. Per the BUG-071 rule a *default* result is never cached, so an
+early call cannot poison later resolution. Apply-time "no config context" is
+now DEBUG (it is expected under this entrypoint), and a real resolution logs
+one INFO naming its source.
+
+Also re-synced the lane-1 copy with the lane-2 one: `wiring/legacy/
+patch_39_fla_kkt_buffer.py` had drifted and was missing the PN354
+`use_exp2` kwarg + `USE_EXP2` kernel-arg probe. Inert today (P39a's
+setattr does not survive `exec vllm serve`), but it would have raised
+`TypeError: unexpected keyword argument 'use_exp2'` at the first forward
+the moment P39a went live alongside PN354.
+
+Unit test: `tests/test_p39b_lazy_hints.py` (stdlib-only, runs without
+torch/vLLM). Live behaviour unverified until the next boot.
+
+
 Pin 0.23.1rc1.dev1474+g0ba2aa35a added to KNOWN_GOOD (lane-1 + sndr lists).
 vllm#48500 moved fla ops to third_party/flash_linear_attention/ — both
 resolvers gained a bidirectional path alias; P39a (both lanes) got the new

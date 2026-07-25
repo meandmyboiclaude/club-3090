@@ -36,7 +36,8 @@ Status: v7.3 implementation
 from __future__ import annotations
 
 import logging
-from typing import Any
+import os
+from typing import Any, Optional
 
 from sndr.engines.vllm.detection.guards import is_nvidia_cuda, is_sm_at_least
 # v11.1.0 P3.3: surface the FLA KKT persistent A pool through
@@ -54,6 +55,142 @@ from sndr.runtime.persistent_buffer_registry import (
 log = logging.getLogger("genesis.wiring.p39a_fla_kkt")
 
 _GENESIS_P39A_MARKER_ATTR = "_genesis_p39a_wrapped"
+
+# ─── P39b warm-up hints (LAZY, cached) ──────────────────────────────────────
+#
+# BUG-129 (2026-07-25): these used to be resolved ONCE inside `apply()`.
+# `apply()` runs under the compose entrypoint's
+#     python3 -m vllm._genesis.patches.apply_all
+# which is a standalone process with no engine in it, so
+# `get_current_vllm_config()` ALWAYS raises there ("Current vLLM config is
+# not set") and P39b silently fell back to max_T=4096 / max_B=2 on every
+# single boot. On this rig that is materially wrong: chunked prefill
+# dispatches chunks of `mamba_block_size` = `max_num_batched_tokens` = 4128
+# tokens, i.e. 32 MORE than the 4096 default, so the pool would be born
+# undersized and then GROW on the first real chunk — a pool pointer swap,
+# which is precisely the CUDA-graph invalidation P39b exists to prevent.
+#
+# Fix: resolve LAZILY at first kernel call (inside the serving process,
+# where a config context can exist) and cache. Precedence mirrors P73:
+#   1. GENESIS_FLA_KKT_MAX_T / _MAX_B  (explicit operator override)
+#   2. central P73 `prealloc_budget.resolve_token_budget()` for max_T —
+#      which itself consults GENESIS_PREALLOC_TOKEN_BUDGET, the domain env,
+#      then the live `scheduler_config.max_num_batched_tokens`
+#   3. live `scheduler_config.max_num_seqs` for max_B
+#   4. conservative defaults below
+#
+# BUG-071 lesson (see prealloc_budget.py "Priority 4"): a *default* result
+# is NEVER cached. Only a value that came from a real signal is pinned, so
+# an early call made before the engine exists cannot poison every later one.
+_DEFAULT_MAX_T = 4096
+_DEFAULT_MAX_B = 2
+_ENV_MAX_T = "GENESIS_FLA_KKT_MAX_T"
+_ENV_MAX_B = "GENESIS_FLA_KKT_MAX_B"
+
+# key -> (value, source). `source` is "" for an unresolved/default result,
+# which is deliberately not stored.
+_HINT_CACHE: dict[str, tuple[int, str]] = {}
+
+
+def _env_int(name: str) -> Optional[int]:
+    raw = os.environ.get(name, "")
+    if raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    return None
+
+
+def _probe_scheduler_config() -> Any:
+    """Return the live `scheduler_config`, or None when no config context.
+
+    Mirrors `prealloc_budget._probe_vllm_config`: dev1060+ raises from
+    `get_current_vllm_config()` outside the context, so prefer the
+    `_or_none` accessor where the build has it.
+    """
+    try:
+        try:
+            from vllm.config import get_current_vllm_config_or_none
+            cfg = get_current_vllm_config_or_none()
+        except ImportError:
+            from vllm.config import get_current_vllm_config
+            cfg = get_current_vllm_config()
+        if cfg is None:
+            return None
+        return getattr(cfg, "scheduler_config", None)
+    except Exception:
+        return None
+
+
+def _resolve_max_T() -> tuple[int, str]:
+    env = _env_int(_ENV_MAX_T)
+    if env is not None:
+        return env, _ENV_MAX_T
+    try:
+        from sndr.runtime.prealloc_budget import (
+            resolve_token_budget, get_cached,
+        )
+        value = int(resolve_token_budget(domain_env=_ENV_MAX_T))
+        # `get_cached()` is non-None only when P73 resolved from a REAL
+        # source (env / live scheduler_config). When it returns None the
+        # value we got back is P73's own uncached fallback — treat it as
+        # unresolved so we keep re-probing.
+        if get_cached() is not None and value > 0:
+            return value, "P73 prealloc_budget"
+    except Exception as e:  # noqa: BLE001
+        log.debug("[Genesis P39b] prealloc_budget probe failed: %s", e)
+    return _DEFAULT_MAX_T, ""
+
+
+def _resolve_max_B() -> tuple[int, str]:
+    env = _env_int(_ENV_MAX_B)
+    if env is not None:
+        return env, _ENV_MAX_B
+    sched = _probe_scheduler_config()
+    if sched is not None:
+        ms = getattr(sched, "max_num_seqs", None)
+        if ms:
+            return int(ms), "vllm scheduler_config.max_num_seqs"
+    return _DEFAULT_MAX_B, ""
+
+
+def resolve_kkt_hints() -> tuple[int, int]:
+    """Lazily resolve (max_T, max_B) for `FlaKktBufferManager.acquire`.
+
+    Safe to call on every kernel invocation: once a field resolves from a
+    real source it is a plain dict read — no env reads, no config probes
+    inside the hot path (dynamo-safe, same contract as P73).
+    """
+    out: list[int] = []
+    for field, resolver, default in (
+        ("max_T", _resolve_max_T, _DEFAULT_MAX_T),
+        ("max_B", _resolve_max_B, _DEFAULT_MAX_B),
+    ):
+        cached = _HINT_CACHE.get(field)
+        if cached is not None:
+            out.append(cached[0])
+            continue
+        value, source = resolver()
+        if source:
+            _HINT_CACHE[field] = (value, source)
+            log.info(
+                "[Genesis P39b] %s resolved → %d (via %s) — pool pre-sized "
+                "before first grow, pointer-stable for CUDA-graph capture",
+                field, value, source,
+            )
+        else:
+            # Unresolved: use the default for THIS call but do not pin it.
+            log.debug(
+                "[Genesis P39b] %s unresolved (no env / no vLLM config "
+                "context yet) → using default %d for this call, will "
+                "re-probe on the next one",
+                field, default,
+            )
+        out.append(value)
+    return out[0], out[1]
+
+
+def reset_hints_for_tests() -> None:
+    """TESTS ONLY — drop the lazy hint cache."""
+    _HINT_CACHE.clear()
 
 
 def ensure_pool_registered() -> None:
@@ -191,61 +328,28 @@ def apply() -> tuple[str, str]:
     except Exception as e:
         log.debug("[P39a] registry pool registration failed (proceeding): %s", e)
 
-    # P39b: resolve `max_num_batched_tokens` + `max_num_seqs` ONCE at
-    # apply time so the pool can be grown to its final size on the very
-    # first call (profiler-visible, pointer-stable — no CUDA-graph
-    # invalidation from later pool-swap on growth). This is the
-    # reserve-before-cudagraph pattern from upstream PR #40798,
-    # adapted to our class-based manager.
-    _MAX_T_HINT: list[int] = [4096]  # mutable box (closure-captured)
-    _MAX_B_HINT: list[int] = [2]     # mutable box
-    try:
-        from vllm.config import get_current_vllm_config
-        _cfg = get_current_vllm_config()
-        _scheduler_cfg = getattr(_cfg, "scheduler_config", None)
-        if _scheduler_cfg is not None:
-            _mb = getattr(_scheduler_cfg, "max_num_batched_tokens", None)
-            _ms = getattr(_scheduler_cfg, "max_num_seqs", None)
-            if _mb:
-                _MAX_T_HINT[0] = int(_mb)
-            if _ms:
-                _MAX_B_HINT[0] = int(_ms)
-            log.info(
-                "[Genesis P39b] resolved warmup hints max_T=%d max_B=%d "
-                "from current vllm_config (pool will grow to these sizes "
-                "on first call → no pointer-swap later)",
-                _MAX_T_HINT[0], _MAX_B_HINT[0],
-            )
-        else:
-            log.info(
-                "[Genesis P39b] vllm_config unavailable at apply time — "
-                "falling back to defaults (max_T=%d max_B=%d). Pool may "
-                "pointer-swap once on first large call.",
-                _MAX_T_HINT[0], _MAX_B_HINT[0],
-            )
-    except Exception as e:
-        # Non-fatal — pool will auto-grow lazily as before.
+    # P39b: warm the (max_T, max_B) hints now if — and only if — a real
+    # signal is already available. Under the shipped entrypoint
+    # (`python3 -m vllm._genesis.patches.apply_all` then `exec vllm serve`)
+    # apply() runs in a standalone process with no engine, so there is no
+    # vLLM config context here and this is EXPECTED, not an incident: the
+    # real resolution happens lazily at the first kernel call inside the
+    # serving process. Hence DEBUG, not INFO — see resolve_kkt_hints().
+    _t, _b = resolve_kkt_hints()
+    if _HINT_CACHE:
         log.info(
-            "[Genesis P39b] vllm_config fetch failed (%s); defaults used",
-            e,
+            "[Genesis P39b] warm-up hints available at apply time: "
+            "max_T=%d max_B=%d (%s)",
+            _t, _b,
+            ", ".join(f"{k}<-{v[1]}" for k, v in sorted(_HINT_CACHE.items())),
         )
-
-    # Env override — operators can force a specific max if they know
-    # their config better than the auto-detection.
-    import os
-    _env_t = os.environ.get("GENESIS_FLA_KKT_MAX_T", "")
-    if _env_t.isdigit() and int(_env_t) > 0:
-        _MAX_T_HINT[0] = int(_env_t)
-        log.info(
-            "[Genesis P39b] GENESIS_FLA_KKT_MAX_T env override → max_T=%d",
-            _MAX_T_HINT[0],
-        )
-    _env_b = os.environ.get("GENESIS_FLA_KKT_MAX_B", "")
-    if _env_b.isdigit() and int(_env_b) > 0:
-        _MAX_B_HINT[0] = int(_env_b)
-        log.info(
-            "[Genesis P39b] GENESIS_FLA_KKT_MAX_B env override → max_B=%d",
-            _MAX_B_HINT[0],
+    else:
+        log.debug(
+            "[Genesis P39b] no vLLM config context at apply time (normal for "
+            "the `apply_all` + `exec vllm serve` entrypoint) — hints will be "
+            "resolved lazily at the first kernel call; defaults meanwhile "
+            "are max_T=%d max_B=%d",
+            _t, _b,
         )
 
     # PN354 composition: lazily resolved "does the kernel declare
@@ -275,6 +379,8 @@ def apply() -> tuple[str, str]:
         call (typically at profile_run with small batch) — afterwards
         all calls reuse the same buffer pointer, eliminating any risk
         of CUDA-graph invalidation from pool pointer-swap on growth.
+        The hints are resolved LAZILY here (first call, cached) because
+        apply() runs in a process that has no vLLM config context.
         """
         import triton
         import torch
@@ -300,12 +406,13 @@ def apply() -> tuple[str, str]:
             else len(chunk_indices)
         )
 
-        # POOLED acquire — P39a core + P39b pre-sizing hints
+        # POOLED acquire — P39a core + P39b pre-sizing hints (lazy)
+        _max_t, _max_b = resolve_kkt_hints()
         A = FlaKktBufferManager.acquire(
             B=B, T=T, H=H, BT=BT,
             device=k.device, dtype=output_dtype,
-            max_T=_MAX_T_HINT[0],
-            max_B=_MAX_B_HINT[0],
+            max_T=_max_t,
+            max_B=_max_b,
         )
 
         # [Genesis PN354 composition fix v2 2026-06-10] the PN354
