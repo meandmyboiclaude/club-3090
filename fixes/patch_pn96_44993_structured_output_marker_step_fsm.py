@@ -71,6 +71,7 @@ other patcher touches these regions). Analysis + evidence:
 diagnostics/tq-lane/BUG-070-ANALYSIS.md. Fix gate:
 diagnostics/tq-lane/canary_grammar_mtp.py (pass = 0/12 `{{`).
 """
+import logging
 import pathlib
 import sys
 
@@ -245,6 +246,21 @@ def _apply(target: pathlib.Path, drift: str, drift_what: str,
     return APPLIED, f"{len(hunks)} hunk(s) written"
 
 
+def _shout(lines: list[str]) -> None:
+    """A skip here silently returns a user-visible defect. Make it unmissable.
+
+    Same shape as fixes/patch_pr48361_mamba_align_split.py: shout, then exit 0.
+    The entrypoint runs under `set -e`, and a dead engine is a worse outcome
+    than a json_schema response with a doubled first token.
+    """
+    bar = "=" * 72
+    print(bar, file=sys.stderr)
+    for ln in lines:
+        print(ln, file=sys.stderr)
+    print(bar, file=sys.stderr)
+    logging.getLogger("vllm.pn96").error(" | ".join(lines))
+
+
 def _summarise(results: list[tuple[str, str, str]], unfinished: bool) -> int:
     """One closing line that matches the per-file lines above it.
 
@@ -255,10 +271,14 @@ def _summarise(results: list[tuple[str, str, str]], unfinished: bool) -> int:
     per_file = "; ".join(f"{name} {st} ({why})" for name, st, why in results)
     kinds = {st for _n, st, _w in results}
     if unfinished:
-        print(f"{LOG} NOT APPLIED — {per_file}. BUG-070 (`{{{{` first-token "
-              f"duplication under json_schema x MTP, vllm#48228) is NOT "
-              f"covered by this patch on this boot.", file=sys.stderr)
-        return 1
+        _shout([
+            f"{LOG} NOT APPLIED — {per_file}",
+            "  BUG-070 (`{{` first-token duplication under json_schema x MTP,",
+            "  vllm#48228) is NOT covered by this patch on this boot. Requests",
+            "  without response_format are unaffected; serving is otherwise",
+            "  healthy. Re-derive the anchors from BUG-070-ANALYSIS.md.",
+        ])
+        return 0
     if kinds == {RETIRED}:
         print(f"{LOG} self-retired, NOTHING WRITTEN — upstream carries the fix "
               f"on this pin ({UPSTREAM_MERGE}); the marker-step FSM advance "
@@ -282,16 +302,24 @@ def _summarise(results: list[tuple[str, str, str]], unfinished: bool) -> int:
 def main() -> int:
     for t in (SO_TARGET, SCHED_TARGET):
         if not t.exists():
-            print(f"{LOG} FATAL: {t} not present", file=sys.stderr)
-            return 1
+            _shout([
+                f"{LOG} NOT APPLIED: {t} not present on this pin.",
+                "  Target path drifted; PN96 is inert this boot (BUG-070 `{{`",
+                "  duplication uncovered for json_schema requests).",
+            ])
+            return 0
     # Precondition sanity: this backport composes with the #44297 machinery
     # (trim_reasoning_for_advance) already native in the pin. FAIL-LOUD if a
     # future pin removes it — the fix depends on it.
     if "def trim_reasoning_for_advance" not in SO_TARGET.read_text():
-        print(f"{LOG} FATAL: trim_reasoning_for_advance missing "
-              f"(#44297 machinery gone) — PN96 depends on it; re-derive",
-              file=sys.stderr)
-        return 1
+        _shout([
+            f"{LOG} NOT APPLIED: trim_reasoning_for_advance missing "
+            f"(#44297 machinery gone).",
+            "  PN96's hunks depend on it — applying them without it would",
+            "  advance the FSM through the reasoning prefix, which is worse",
+            "  than the bug. Re-derive before relying on structured output.",
+        ])
+        return 0
     results: list[tuple[str, str, str]] = []
     status, why = _apply(SO_TARGET, SO_DRIFT, "new should_advance signature", [
         ("should-advance-sig", SO_SIG_OLD, SO_SIG_NEW),
