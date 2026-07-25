@@ -238,6 +238,17 @@ services:
       # H119_API_BODY=0 keeps the headers but strips the body field.
       - GENESIS_ENABLE_H119_ROUTE_API=${GENESIS_ENABLE_H119_ROUTE_API:-0}
       - H119_API_BODY=${H119_API_BODY:-1}
+      # [PN114-SEED 2026-07-26] The PN102 think-seed moved out of the prompt
+      # and into a forced OUTPUT span, so a post-prefill decision can choose
+      # it. DEFAULT OFF (it rewrites what the model reads). mirror = force
+      # exactly the seed PN102 would have rendered (the M2-proven no-op arm,
+      # for measuring that the mechanism is free); routed = pick N from the
+      # ROUTED budget, which is the actual escape from cap-only.
+      # The BANNER is a system turn, out of the model's voice, and is NOT
+      # moved by this — see fixes/patch_pn114_seed_span.py.
+      - GENESIS_ENABLE_PN114_SEED_SPAN=${GENESIS_ENABLE_PN114_SEED_SPAN:-0}
+      - GENESIS_PN114_SEED_MODE=${GENESIS_PN114_SEED_MODE:-mirror}
+      - GENESIS_PN114_SEED_MAX_N=${GENESIS_PN114_SEED_MAX_N:-64}
       - TRITON_CACHE_DIR=/root/.triton/cache
       # Genesis opt-ins
       # [BUG-071 CORRECTED 2026-07-14] GENESIS_PREALLOC_TOKEN_BUDGET=16384 REMOVED —
