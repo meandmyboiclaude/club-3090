@@ -1,0 +1,26 @@
+# Opt-in variant of cache-override.yaml that actually lets prefix caching hit.
+# Engage with: CACHE_OVERRIDE=cache-override-apc.yaml (see tcbench8021.yml).
+#
+# BUG-130: with mamba_cache_mode=align + turboquant_3bit_nc, vLLM raises the
+# attention block_size to 4128 tokens so the attention page matches the GDN
+# mamba page (vllm/platforms/interface.py:903). resolve_kv_cache_block_sizes()
+# then derives hash_block_size = gcd(4128, 4128) = 4128, and
+# get_request_block_hasher() only emits a hash per FULL block -> any request
+# under 4129 tokens produces zero block hashes and can never hit.
+#
+# prefix_match_unit sets hash_block_size independently of the physical block
+# size (vllm/config/cache.py:61). It must divide every group's block_size;
+# 4128 = 2^5 * 3 * 43, so 16 / 32 / 48 / 96 / 129 / 172 / 258 are all legal
+# (256 is NOT a divisor of 4128).
+#
+# Setting it < block_size also flips two upstream paths on:
+#   - HybridKVCacheCoordinator.enable_partial_hash_hits -> True
+#     (needs mamba block_size > hash_block_size), which drops cache-hit
+#     alignment from 4128 tokens to prefix_match_unit
+#   - Scheduler.mamba_partial_cache_hit -> True, adding the prompt-tail stop
+#     that registers the mamba partial entry
+#
+# UNVALIDATED: this has not been booted. Needs a boot + verify-full + a
+# prefix-cache hit probe before it goes anywhere near prod :8020.
+mamba_block_size: 4128
+prefix_match_unit: 258

@@ -83,7 +83,15 @@ services:
       # was: - /home/user/shared/needfit/pn119-probe-lens_only.npz:/pn119/probe.npz:ro
       - /home/user/shared/needfit/pn119-live:/pn119:ro
       - /home/user/shared/needfit/pn119-sink:/pn119-sink
-      - ./cache-override.yaml:/config/cache-override.yaml:ro
+      # [BUG-130 prefix-cache 2026-07-25] The engine forces attention block_size
+      # up to 4128 (platforms/interface.py:903, "attention page size >= mamba page
+      # size"), so hash_block_size resolves to 4128 too and NOTHING under 4129
+      # prompt tokens can ever produce a block hash -> prefix_cache_hits_total is
+      # structurally 0. Cure = a finer --prefix-match-unit (must divide 4128).
+      # Default keeps the byte-identical old file (no-op). To engage:
+      #   CACHE_OVERRIDE=cache-override-apc.yaml podman-compose ... up -d
+      # See ~/shared/DIAGNOSIS-prefix-cache-zero-hits-20260725.md
+      - ./${CACHE_OVERRIDE:-cache-override.yaml}:/config/cache-override.yaml:ro
     environment:
       # - CUDA_VISIBLE_DEVICES=0
       # [2026-07-14] unbuffered stdout — crash-loop tracebacks were lost in the 8K block buffer at exit
