@@ -80,9 +80,15 @@ UPSTREAM_DRIFT_MARKERS = [
 # Sub-patch-scoped evidence: upstream nightly 7923b48047be wraps
 # `_cu_2 = torch.zeros(...)` in `if not hasattr(self, "_cu_2"):`, which IS
 # P26's cu_2 optimization natively. Kept as a named constant so the fact is
-# not lost, and asserted against below — but it retires one sub-patch, not
-# the patch.
-CU2_ABSORBED_MARKER = 'if not hasattr(self, "_cu_2")'
+# not lost — but it retires one sub-patch, not the patch.
+#
+# NOTE THE NAME. The ledger extractor harvests any module-level *MARKER*
+# constant as an effect handle unless the name also says DRIFT or UPSTREAM.
+# This string is UPSTREAM's code, not something P26 writes, so scoring it as
+# a P26 marker would report P26 LIVE off a file it never touched — the exact
+# trap the ledger README calls "documentation constants scored as effect
+# handles". Do not rename it back into the MARKER namespace.
+CU2_ABSORBED_UPSTREAM_FORM = 'if not hasattr(self, "_cu_2")'
 
 
 # Anchor 1: line 566 of turboquant_attn.py — the fresh output tensor.
@@ -139,7 +145,7 @@ def _make_patcher() -> TextPatcher | None:
                 replacement=_NEW_OUTPUT,
                 required=True,
             ),
-            # NOT required: upstream absorbed this hunk (CU2_ABSORBED_MARKER)
+            # NOT required: upstream absorbed this hunk (CU2_ABSORBED_UPSTREAM_FORM)
             # while leaving the output pool alone. A soft skip here lets the
             # output hunk land; `required=True` used to abort the whole patch.
             # It can only ever apply when p26_output_alloc applied too — that
@@ -182,7 +188,7 @@ def apply() -> tuple[str, str]:
         else:
             detail += (
                 f"; cu_2 hunk soft-skipped — upstream already caches it "
-                f"({CU2_ABSORBED_MARKER!r} present), absorbed half"
+                f"({CU2_ABSORBED_UPSTREAM_FORM!r} present), absorbed half"
             )
         return "applied", detail
     if result == TextPatchResult.IDEMPOTENT:
