@@ -212,7 +212,13 @@ services:
       # own ceiling (binds only on runaways at ~1575 rtok/req measured).
       - GENESIS_ENABLE_H119_ROUTE_BUDGET=${GENESIS_ENABLE_H119_ROUTE_BUDGET:-0}
       - H119_DEEP_BUDGET=${H119_DEEP_BUDGET:-10240}
-      - H119_LEAN_BUDGET=${H119_LEAN_BUDGET:-800}
+      # [2026-07-26] fallback is 1600, not 800. 800 was derived from the v3fam
+      # arm's MEAN of 778 rtok, which that arm never respected as a cap; live
+      # thinking traffic is p10 794 / p50 1295 / p90 3095, so 800 truncates
+      # 61-87% of it and writes BUG-139's absorbing state into the boot. The
+      # unit drop-in already sets 1600; this makes the value safe if that
+      # drop-in is ever removed, instead of silently reverting to the bad one.
+      - H119_LEAN_BUDGET=${H119_LEAN_BUDGET:-1600}
       # [H119 route-API 2026-07-25] the OTHER half — hand the route to the
       # CALLER so the client can apply the FULL deep/lean treatment (banner AND
       # budget) out of band, which is how the original result was produced.
@@ -897,6 +903,24 @@ services:
         # the flag ON prints a boxed ERROR instead of a silent no-op.
         # Anchors on all three pins: python3 fixes/verify_h119_route_api_anchors.py
         python3 /fixes/patch_h119_route_api.py
+        # [PN114-SEED — 2026-07-26] The PN102 think-seed as a FORCED SPAN, so a
+        # POST-prefill decision (the H119 route) can still choose it. The seed
+        # is rendered inside <think> by the chat template, so forcing it as
+        # output is position- and voice-identical — proven by gate M2
+        # (fixes/test_pn114_seed_equivalence.py: 59/59 on the boot pin,
+        # identical ids at identical positions incl. the MTP acceptance
+        # matrix). The BANNER is a system turn, out of the model's voice, and
+        # is deliberately NOT moved. Cap-only has a low ceiling: the zero-risk
+        # oracle saving is ~11.5% and deep-side cap_hit is 0/31.
+        # LAST on purpose: all five anchors are text that pn114_forced_span,
+        # h119_lens_router and pn101_answer_rescue wrote earlier.
+        # DEFAULT OFF (GENESIS_ENABLE_PN114_SEED_SPAN=1 to arm;
+        # GENESIS_PN114_SEED_MODE=mirror|routed). All-or-nothing across
+        # holder + serving.py; a drifted anchor with the flag ON prints a
+        # boxed ERROR instead of a silent no-op.
+        # Anchors on both live pins: python3 fixes/verify_pn114_seed_anchors.py
+        python3 /fixes/pn114_seed_ids.py
+        python3 /fixes/patch_pn114_seed_span.py
         exec vllm serve "$@"
       - --
     command:
