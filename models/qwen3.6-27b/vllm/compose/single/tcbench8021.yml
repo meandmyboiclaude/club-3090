@@ -392,7 +392,18 @@ services:
       # k260 + P-pess + PN112 shadow for the router-precision lane.]
       # Performance
       - GENESIS_ENABLE_P40=1
-      - GENESIS_ENABLE_P82=1
+      # [2026-07-26] TURNED OFF. P82 is a BIASED speculative-decode acceptance
+      # rule (SGLang threshold_single OR-clause), labelled opt-in research in
+      # its own module, and it has NEVER passed its documented gate
+      # (genesis_quality_harness >=30/31 + a TPS sweep). It had never actually
+      # applied on any pin because its drift marker matched upstream's ORIGINAL
+      # kernel name, so the obsolete-check fired every time -- a re-anchor on
+      # 2026-07-26 made it live for the first time ever, mid-session, and a
+      # GPQA-100 was sampled under it before anyone noticed.
+      # It changes which draft tokens are ACCEPTED, i.e. the output
+      # distribution. Do not enable it for any measurement run.
+      # Re-enable for research with BOTH this and GENESIS_P82_ACK_UNVALIDATED=1.
+      - GENESIS_ENABLE_P82=${GENESIS_ENABLE_P82:-0}
       # [2026-07-14] PN50=1: kernel arange fixed (b23b704) + wrapper compile-safe
       # (is_compiling -> stock chain; eager keeps fused kernel). Parity green both modes.
       - GENESIS_ENABLE_PN50_GDN_FUSED_PROJ=1
