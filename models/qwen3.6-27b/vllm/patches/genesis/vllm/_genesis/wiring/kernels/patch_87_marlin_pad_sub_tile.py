@@ -324,6 +324,12 @@ def _make_patcher() -> TextPatcher | None:
             # Upstream-side markers if PR #40361 (or equivalent) merges:
             "_marlin_orig_n",
             "GPTQ_MARLIN_MIN_THREAD_N as _GENESIS",
+            # [2026-07-25] #45295's general mechanism, native since v0.24 and
+            # present in nightly-0ba2aa35 (pads K as well as N — subsumes P87;
+            # dispatcher registry marked lifecycle=retired 07-14 with the same
+            # evidence). Marker turns the partial-warning into a clean
+            # upstream-merged self-skip on new pins.
+            "marlin_padded_nk",
         ],
     )
 
