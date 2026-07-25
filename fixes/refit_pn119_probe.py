@@ -30,19 +30,40 @@ its observed spend is an UNCENSORED measurement of true need:
      dropped outright, and G3 is narrowed to match. Runs immediately after
      G1 — before G2, so the "lean cap-hit is positive evidence" exception
      can never resurrect a no-generation row.
-  G2 no self-censored labels: under PN119_MODE=enforce a lean-routed
-     request runs with the lean budget, so its observed spend is a FLOOR,
-     not a label. Such rows (mode=enforce, route=lean, explore=false) are
-     EXCLUDED — with one exception from the pack: a cap-hit on a
-     lean-routed request IS positive (deep) evidence, so those rows are
-     kept with y=1 (rtok censored, label known). Kept unconditionally:
-     mode=shadow rows (router acts on nothing — fully uncensored),
-     explore=true rows (PN119_EXPLORE gave them generous caps precisely so
-     their labels stay honest), and deep-routed rows (they received the
-     full budget).
-  G3 cap-hit => y=1 regardless of measured rtok (spend was truncated by the
-     cap, true need >= cap) — ONLY for rows that generated >= --min-generated.
-     A cap-hit at zero generated tokens is a max_tokens artefact, not spend.
+  G2 no self-censored labels — INTERVAL CENSORING, not deletion (BUG-139,
+     2026-07-25). Deleting censored rows is not neutral: measured on the
+     live sink it kept 8 of 31 rows and 100% of the survivors were
+     deep-routed, i.e. pure positive selection. Every row is now labelled
+     through interval_label():
+         not censored                       -> y = 1[rtok >= theta]
+         censored, (budget - SLACK) >= theta -> y = 1
+         censored otherwise                  -> y = None, weight 0,
+                                                counted g3_interval_unresolved
+     This is what closes the ABSORBING STATE. A lean-routed row truncated at
+     b < theta used to be indistinguishable from a row that genuinely needed
+     little (y=0 under shadow, y=1 under the old lean-cap-hit exception —
+     wrong in both directions), so the loop reinforced the decision that
+     created the row. It now contributes NOTHING instead of a fabricated
+     label.
+  G3 censoring detection. `cap_hit` sees only max_tokens, so a request
+     stopped by its THINKING budget logs cap_hit=False and looks like a
+     natural stop: measured 43 of 79 thinking rows sit at exactly
+     (a PN100 100-grid grant) - 5, and only 4 log cap_hit=True. The router
+     is adding `censored` / `budget_grant` / `budget_source` to the sink;
+     this reads them when present and DERIVES them when absent (older
+     rows), so the existing corpus is usable today:
+       * explicit `censored` from the sink wins;
+       * else `budget_grant` present  -> rtok >= budget_grant - SLACK;
+       * else cap_hit (and generated >= --min-generated) -> censored, and
+         the lower bound is rtok itself;
+       * else the grant is derived as the smallest plausible PN100 grant
+         >= rtok (the 100-grid from _continuous_budget, plus the tier
+         budgets and the floor) and the same rule applies.
+     SLACK = len(think_end_ids) + 8 = 13; the measured offset is exactly 5.
+     Grid derivation is deliberately conservative: a genuine natural stop
+     that happens to land within SLACK of a grid point is called censored
+     and (below theta) becomes UNRESOLVED — it loses a row, it never
+     invents a label.
   G4 dedup by req_id (preemption/retry can double-log), last finish wins.
   G5 structural: a row needs BOTH a score line (features exist in the
      .bin) and a finish line (label exists); orphans are dropped.
@@ -77,6 +98,51 @@ catching a bad candidate:
     captures whose same-item cosine against the tap is ~0.968. Training on
     a mixture is training on two different feature spaces — refused.
 
+DUAL-PROBE SHADOW PROMOTION (--promote-mode shadow, the default). A refit
+does not swap the live probe. It STAGES the candidate
+(<state>/candidate.npz + candidate.json) and stops; the engine picks it up
+via PN119_PROBE_CANDIDATE and scores EVERY request with it while routing on
+the incumbent alone. A later refit promotes only on evidence collected
+AFTER the candidate went live-shadow (candidate.json:first_seen_ts):
+
+  * a PAIRED DeLong test (fast Sun & Xu covariance) of candidate vs
+    incumbent AUC on those rows' resolved labels — one-sided p < --delong-alpha
+    AND auc_cand > auc_inc. Paired, because both probes scored the same
+    requests; unpaired would ignore the covariance that makes the test sharp;
+  * a DECISION-FLIP bound: |{rows where 1[cand>=T] != 1[inc>=T]}| / n must be
+    <= --max-flip-frac (0.20). More than that is not a better probe, it is a
+    DIFFERENT ROUTER, and it goes to a human;
+  * the calibration gate, again, on the shadow scores.
+The live probe is copied to probe.prev.npz before every swap and --rollback
+puts it back, so a promotion is reversible without a refit.
+--promote-mode direct is the pre-shadow behaviour (fit -> gates -> swap) and
+is only defensible while no candidate-scoring router exists.
+
+DRIFT REJECTION (gate_drift). Any of these rejects the candidate:
+PSI > 0.25 on any principal component; a KS test with p < 0.01 AND D > 0.15
+on any PC; a training prior outside [0.15, 0.55] (this one alone catches the
+2026-07-25 poisoning — prior 0.733); an unresolved-censoring rate > 0.4 (the
+corpus is mostly lower bounds and nothing can be learned from it); a stale
+or failing b3 numerics report; or an explore-integrity violation.
+
+EXPLORATION — implemented, NOT enabled. PN119_EXPLORE is 0.0 and must stay
+0.0 until the CONSUMER honours an explore budget. Turning it on first is
+strictly worse than leaving it off: an explore row would be an ordinary
+censored row wearing a trusted-label badge. explore_decision() implements
+the stratified epsilon (0.25 inside |score - T| < 0.10, 0.01 outside;
+effective ~0.065 on the live score distribution, ~200 boundary rows in two
+days against 17 for a uniform 0.03), the logged propensity p_explore, IPS
+weights clipped at 50, a token-bucket ceiling that makes the cost a hard
+number, and a 2% holdout on a DIFFERENT hash salt that is always
+theta-sufficient and is excluded from training with no override flag.
+
+ACCURACY MONITOR (--accuracy-monitor). `extra.resp_id` in the graded run
+JSONLs joins the sink's `req_id` with its last `-` segment stripped
+(measured: 339/339 across 12 runs). It alerts on deep-bucket accuracy
+regression. `correct` is NEVER a training target: AUC(score -> correct) is
+0.26-0.40, correctly BELOW 0.5, because the lens finds HARD items. The
+training target is uplift, not correctness.
+
 CURSOR. n_new used to be `len(rows) - eligible_at_last_swap` "because the
 sink is append-only". The first prune makes that negative forever: the
 refit skips, exits 0, and the timer stays green while the loop is dead.
@@ -104,8 +170,10 @@ import fnmatch
 import glob
 import hashlib
 import json
+import math
 import os
 import resource
+import shutil
 import sys
 import time
 from dataclasses import dataclass, field
@@ -117,7 +185,15 @@ from pn119_atomic import atomic_write_npz  # noqa: E402
 
 LAYERS = (42, 47, 51)
 D_MODEL = 5120
+# Two eras of sink rows exist. The 30720-dim one is [last, mean] per layer;
+# the LAST-ONLY router writes 15360. Nothing in a feats-*.bin says which, and
+# a reader that guesses wrong does not fail — it glues two rows into one and
+# joins them to the wrong labels. So: the window's `pn119_header` line is
+# authoritative, byte-count inference is the fallback, and this constant is
+# only the last resort (it is the era every window on disk today was written
+# in — verified by size/row-count).
 FEAT_DIM = len(LAYERS) * 2 * D_MODEL  # 30720
+KNOWN_FEAT_DIMS = (len(LAYERS) * D_MODEL, FEAT_DIM)  # 15360, 30720
 ROW_BYTES = FEAT_DIM * 2  # bf16
 NEEDFIT = os.path.expanduser("~/shared/needfit")
 RESULTS = os.path.expanduser("~/shared/folderX/qbench45/results")
@@ -127,6 +203,33 @@ RESULTS = os.path.expanduser("~/shared/folderX/qbench45/results")
 SINK_CAPTURE_SOURCE = "tap"
 
 EXIT_OK, EXIT_REJECT, EXIT_SKIP = 0, 2, 3
+
+# ── censoring (BUG-139) ───────────────────────────────────────────────────
+# SLACK = len(think_end_ids) + 8. The LIVE engine's `</think>` is ONE token
+# (248069), so the live value is 9 — and the running router publishes it in
+# each window's pn119_header (censor_slack), which is authoritative and wins
+# over this default. The measured budget-stop offset is exactly 5, comfortably
+# inside either value.
+THINK_END_IDS_N = 1
+CENSOR_SLACK = THINK_END_IDS_N + 8           # 9
+# PN100 grant shapes. _continuous_budget rounds to 100 and clamps to
+# [GENESIS_PN100_BUDGET_FLOOR, GENESIS_PN100_BUDGET_CEIL]; the tiered path
+# grants one of GENESIS_PN100_TIER_BUDGETS, which are NOT on the 100-grid.
+BUDGET_GRID = 100
+BUDGET_OFF_GRID_GRANTS = (128, 1024, 4096, 10240)
+
+# The accuracy monitor never feeds training. Asserted by the guard suite.
+ACCURACY_IS_MONITOR_ONLY = True
+
+# ── exploration (designed, DISABLED — see the module docstring) ────────────
+EXPLORE_BOUNDARY_HALFWIDTH = 0.10   # |score - T| < this == "at the boundary"
+EXPLORE_EPS_BOUNDARY = 0.25
+EXPLORE_EPS_TAIL = 0.01
+EXPLORE_IPS_CLIP = 50.0
+EXPLORE_SALT = "pn119-explore"
+HOLDOUT_SALT = "pn119-holdout"      # DIFFERENT salt: the holdout must not be
+HOLDOUT_FRAC = 0.02                 # a subset of (or disjoint-by-luck from)
+                                    # the explore stream.
 
 
 @dataclass
@@ -144,11 +247,24 @@ class Row:
     thinking: object       # True / False / None(unknown) / "legacy"
     ts: float
     end_off: int = 0       # byte offset just past this row's last meta line
+    # ── BUG-139 sink schema (router-written when present, derived when not)
+    feat_dim: int = FEAT_DIM       # this WINDOW's feature width (two eras)
+    slack: int = CENSOR_SLACK      # this window's censor slack (header-borne)
+    censored: object = None        # True / False / None(unknown -> derive)
+    budget_grant: int | None = None
+    budget_source: str | None = None
+    # ── dual-probe shadow scoring (router-written; see the docstring)
+    cand_score: float | None = None
+    cand_sha: str | None = None
+    # ── exploration bookkeeping (all None while PN119_EXPLORE=0.0)
+    p_explore: float | None = None
+    holdout: bool = False
+    score: float | None = None     # the INCUMBENT's live score for this row
     x: np.ndarray | None = field(default=None, repr=False)
 
 
 # ── feature I/O: memmap + exact bf16→f32 widen (no torch, no full read) ────
-def bf16_rows(path: str, idx) -> np.ndarray:
+def bf16_rows(path: str, idx, feat_dim: int = FEAT_DIM) -> np.ndarray:
     """Materialise ONLY the requested row indices from a bf16 .bin.
 
     bf16 -> f32 is an exact 16-bit left shift (same exponent/mantissa
@@ -156,29 +272,174 @@ def bf16_rows(path: str, idx) -> np.ndarray:
     of the file: the memmap only faults in the pages we index.
     """
     mm = np.memmap(path, dtype=np.uint16, mode="r")
-    n_rows = mm.size // FEAT_DIM
-    out = np.empty((len(idx), FEAT_DIM), dtype=np.float32)
+    n_rows = mm.size // feat_dim
+    out = np.empty((len(idx), feat_dim), dtype=np.float32)
     for k, i in enumerate(idx):
         if i >= n_rows:
             raise IndexError(f"{path}: row {i} beyond {n_rows}")
-        raw = np.asarray(mm[i * FEAT_DIM:(i + 1) * FEAT_DIM], dtype=np.uint32)
+        raw = np.asarray(mm[i * feat_dim:(i + 1) * feat_dim], dtype=np.uint32)
         out[k] = (raw << np.uint32(16)).view(np.float32)
     del mm
     return out
 
 
-def bin_row_count(path: str) -> int:
-    return os.path.getsize(path) // ROW_BYTES
+def bin_row_count(path: str, feat_dim: int = FEAT_DIM) -> int:
+    return os.path.getsize(path) // (feat_dim * 2)
+
+
+def window_feat_dim(bin_path: str, need_rows: int, header: dict | None):
+    """(feat_dim, how) for one sink window — header, then bytes, then None.
+
+    `need_rows` is max(row index) + 1, not a count of meta lines: a meta line
+    can outlive its feature write (a crash between the two appends), and a
+    dedup drops lines without dropping .bin rows.
+
+    A file written at 30720 is also evenly divisible at 15360, so "divides
+    evenly" is not enough — the candidate whose row count EQUALS need_rows is
+    the real one. A window consistent with neither is not guessed at: the
+    caller drops it. Reinterpreting a feature file is the one failure mode
+    that turns garbage into plausible numbers.
+    """
+    if header and header.get("feat_dim"):
+        return int(header["feat_dim"]), "header"
+    size = os.path.getsize(bin_path)
+    divides = [d for d in KNOWN_FEAT_DIMS if size % (d * 2) == 0]
+    exact = [d for d in divides if size // (d * 2) == need_rows]
+    if len(exact) == 1:
+        return exact[0], "bytes"
+    fits = [d for d in divides if size // (d * 2) >= need_rows]
+    if fits:
+        # Prefer the WIDEST that still holds every referenced row: a genuinely
+        # 15360-wide file cannot hold need_rows at 30720, so this can only pick
+        # the narrow one when the wide one is impossible.
+        return max(fits), "bytes"
+    return None, "ambiguous"
+
+
+# ── interval censoring (BUG-139) ──────────────────────────────────────────
+def derive_budget_grant(rtok: int, grid: int = BUDGET_GRID,
+                        off_grid=BUDGET_OFF_GRID_GRANTS) -> int:
+    """Smallest PN100 grant that could have produced this rtok.
+
+    PN100 hands out either `round(raw/100)*100` (the continuous path) or one
+    of the tier budgets, so the plausible grants above an observed spend are
+    the next 100-grid point and any tier budget >= rtok. The smallest of
+    those is the only one that could have TRUNCATED this row — a larger
+    grant would have left the row free to stop where it did.
+    """
+    rtok = max(int(rtok), 0)
+    cands = [((rtok + grid - 1) // grid) * grid]
+    cands += [int(g) for g in off_grid if g >= rtok]
+    return min(cands)
+
+
+def censoring_of(row_like, slack: int = CENSOR_SLACK, min_generated: int = 32):
+    """(censored, lower_bound, provenance) for one row.
+
+    `row_like` is a Row or a reservoir meta dict — anything with rtok /
+    cap_hit / generated / censored / budget_grant.
+
+    lower_bound is what the row PROVES about true need:
+      * uncensored          -> rtok (an exact measurement)
+      * censored w/ budget  -> budget - slack   (the pack's rule)
+      * censored w/o budget -> rtok             (a max_tokens cap-hit: all we
+                                                 know is that it wanted more)
+    """
+    def _get(k, default=None):
+        if isinstance(row_like, dict):
+            return row_like.get(k, default)
+        return getattr(row_like, k, default)
+
+    rtok = int(_get("rtok", 0) or 0)
+    generated = _get("generated")
+    cap_hit = bool(_get("cap_hit", False))
+    censored = _get("censored")
+    budget = _get("budget_grant")
+    budget = None if budget in (None, "", 0) else int(budget)
+
+    # max_tokens truncation is censoring too, and `censored` does not cover it:
+    # the router's flag means "the THINKING BUDGET stopped it". Both must be
+    # consulted or a completion-capped row reads as a natural stop.
+    capped = cap_hit and (generated is None or int(generated) >= min_generated)
+
+    if censored is not None:                       # the router said so
+        if censored:
+            lb = (budget - slack) if budget is not None else rtok
+            return True, int(lb), "sink"
+        return (True, rtok, "cap_hit") if capped else (False, rtok, "sink")
+    if budget is not None:                         # budget known, flag isn't
+        if rtok >= budget - slack:
+            return True, budget - slack, "budget"
+        return (True, rtok, "cap_hit") if capped else (False, rtok, "budget")
+    if capped:
+        return True, rtok, "cap_hit"               # max_tokens truncation
+    grant = derive_budget_grant(rtok)              # older rows: derive it
+    if rtok >= grant - slack:
+        return True, grant - slack, "grid"
+    return False, rtok, "uncensored"
+
+
+def interval_label(row_like, deep_thresh: int, slack: int = CENSOR_SLACK,
+                   min_generated: int = 32):
+    """(y, weight, bucket). y is None for an unresolved interval.
+
+    This is the whole BUG-139 fix. A censored row is a LOWER BOUND: it can
+    only ever resolve to y=1, and only when the bound already clears theta.
+    Below theta it resolves to nothing at all — never to y=0 (which is the
+    absorbing state: "lean routed it, it stopped early, therefore lean was
+    right") and never to y=1 (the old cap-hit rule, wrong the other way).
+    """
+    cens, lb, prov = censoring_of(row_like, slack, min_generated)
+    if not cens:
+        y = 1.0 if lb >= deep_thresh else 0.0
+        return y, 1.0, ("resolved_pos" if y else "resolved_neg"), prov
+    if lb >= deep_thresh:
+        return 1.0, 1.0, "censored_pos", prov
+    return None, 0.0, "interval_unresolved", prov
+
+
+def label_rows(row_likes, deep_thresh: int, counts: dict | None = None,
+               slack: int = CENSOR_SLACK, min_generated: int = 32):
+    """Vectorised interval labelling. Returns (y, w, keep_mask) as arrays.
+
+    y is 0.0 where unresolved; w is 0.0 there, and callers must select on w.
+    """
+    ys, ws, buckets, provs = [], [], [], []
+    for r in row_likes:
+        # The window's own header-declared slack wins: it is derived from the
+        # think_end_ids the engine actually ran with.
+        s = getattr(r, "slack", None) if not isinstance(r, dict) else r.get("slack")
+        y, w, b, p = interval_label(r, deep_thresh, int(s or slack), min_generated)
+        ys.append(0.0 if y is None else y)
+        ws.append(w)
+        buckets.append(b)
+        provs.append(p)
+    y = np.asarray(ys, dtype=float)
+    w = np.asarray(ws, dtype=float)
+    if counts is not None:
+        for b in ("resolved_pos", "resolved_neg", "censored_pos",
+                  "interval_unresolved"):
+            counts[f"g3_{b}"] = int(sum(1 for x in buckets if x == b))
+        for p in ("sink", "budget", "cap_hit", "grid", "uncensored"):
+            n = int(sum(1 for x in provs if x == p))
+            if n:
+                counts[f"censor_src_{p}"] = n
+        n = len(buckets)
+        counts["g3_unresolved_rate"] = round(
+            counts["g3_interval_unresolved"] / n, 4) if n else 0.0
+        counts["censored_rate"] = round(
+            sum(1 for x in provs if x != "uncensored") / n, 4) if n else 0.0
+    return y, w, np.asarray(buckets), np.asarray(provs)
 
 
 def materialise(rows: list[Row]) -> None:
     """Fill .x on the given rows, one memmap per sink window."""
-    by_file: dict[str, list[Row]] = {}
+    by_file: dict[tuple, list[Row]] = {}
     for r in rows:
         if r.x is None:
-            by_file.setdefault(r.feat_path, []).append(r)
-    for path, rs in by_file.items():
-        X = bf16_rows(path, [r.row_idx for r in rs])
+            by_file.setdefault((r.feat_path, r.feat_dim), []).append(r)
+    for (path, dim), rs in by_file.items():
+        X = bf16_rows(path, [r.row_idx for r in rs], dim)
         for k, r in enumerate(rs):
             r.x = X[k]
 
@@ -247,19 +508,35 @@ def load_sink(sink_dir: str, counts: dict, exclude_tags=(),
         if any(fnmatch.fnmatch(tag, pat) for pat in exclude_tags):
             counts["g7_excluded_tag"] = counts.get("g7_excluded_tag", 0) + 1
             continue
-        n_feat_rows = bin_row_count(feat_p)
         score_lines: dict[str, tuple[dict, int]] = {}
         finish_lines: dict[str, tuple[dict, int]] = {}
+        header: dict | None = None
         for text, off in _iter_meta_lines(meta_p):
             try:
                 m = json.loads(text)
             except json.JSONDecodeError:
                 counts["bad_json"] = counts.get("bad_json", 0) + 1
                 continue
+            if m.get("pn119_header"):
+                header = m
+                continue
             if m.get("finish"):
                 finish_lines[m["req_id"]] = (m, off)   # G4: last finish wins
             elif "row" in m:
                 score_lines[m["req_id"]] = (m, off)
+        need_rows = 1 + max((int(sm["row"]) for sm, _o in score_lines.values()),
+                            default=-1)
+        dim, how = window_feat_dim(feat_p, need_rows, header)
+        if dim is None:
+            counts["g9_feat_dim_ambiguous"] = counts.get("g9_feat_dim_ambiguous", 0) + 1
+            continue
+        counts[f"feat_dim_{dim}_via_{how}"] = counts.get(
+            f"feat_dim_{dim}_via_{how}", 0) + 1
+        w_slack = int((header or {}).get(
+            "censor_slack",
+            len((header or {}).get("think_end_ids") or []) + 8
+            if (header or {}).get("think_end_ids") else CENSOR_SLACK))
+        n_feat_rows = bin_row_count(feat_p, dim)
         for req_id, (sm, s_off) in score_lines.items():
             counts["scored"] = counts.get("scored", 0) + 1
             if req_id in marker_req_ids:
@@ -277,6 +554,11 @@ def load_sink(sink_dir: str, counts: dict, exclude_tags=(),
             generated = int(fm.get("generated", 0) or 0)
             rtok = fm.get("rtok")
             rtok = generated if rtok is None else int(rtok)
+            # BUG-139 schema: the router writes these on the finish line; the
+            # budget grant is also stamped on the score line (it is known at
+            # prefill), so accept it from either.
+            bg = fm.get("budget_grant", sm.get("budget_grant"))
+            cens = fm.get("censored", sm.get("censored"))
             rows.append(Row(
                 req_id=req_id,
                 tag=tag,
@@ -291,6 +573,21 @@ def load_sink(sink_dir: str, counts: dict, exclude_tags=(),
                 thinking=fm["thinking"] if "thinking" in fm else "legacy",
                 ts=float(fm.get("ts", 0.0)),
                 end_off=max(s_off, f_off),
+                feat_dim=dim, slack=w_slack,
+                censored=None if cens is None else bool(cens),
+                budget_grant=None if bg in (None, "") else int(bg),
+                budget_source=(str(fm.get("budget_source",
+                                          sm.get("budget_source", "")))
+                               or None),
+                cand_score=(None if sm.get("cand_score") is None
+                            else float(sm["cand_score"])),
+                cand_sha=(str(sm["cand_probe_sha"])
+                          if sm.get("cand_probe_sha") else None),
+                p_explore=(None if sm.get("p_explore") is None
+                           else float(sm["p_explore"])),
+                holdout=bool(sm.get("holdout", False)),
+                score=(None if sm.get("score") is None
+                       else float(sm["score"])),
             ))
     return rows, sizes
 
@@ -314,25 +611,42 @@ def apply_guards(rows: list[Row], legacy_thinking_ok: bool, min_generated: int,
         if r.generated < min_generated:
             counts["g6_no_generation"] = counts.get("g6_no_generation", 0) + 1
             continue
-        # G2 — self-censoring
-        if r.mode == "enforce" and r.route == "lean" and not r.explore:
-            if r.cap_hit:
-                counts["g2_lean_caphit_pos"] = counts.get("g2_lean_caphit_pos", 0) + 1
-                out.append(r)  # y=1 via G3
-            else:
-                counts["g2_censored_dropped"] = counts.get("g2_censored_dropped", 0) + 1
+        # G8 — the exploration holdout never trains, and there is no flag to
+        # override that. A holdout you can switch off is a holdout you will
+        # switch off the first time a gate is inconvenient.
+        if r.holdout:
+            counts["g8_holdout_excluded"] = counts.get("g8_holdout_excluded", 0) + 1
             continue
+        # G2 — self-censoring is now INTERVAL CENSORING (BUG-139), applied at
+        # label time by interval_label(), not by deletion here. Deleting the
+        # censored rows kept 8 of 31 live rows and every survivor was
+        # deep-routed; the loop was training on its own routing decisions
+        # through the selection, not through the labels.
+        if r.mode == "enforce" and r.route == "lean" and not r.explore:
+            counts["g2_selfcensored_kept"] = counts.get("g2_selfcensored_kept", 0) + 1
         out.append(r)
     counts["eligible"] = len(out)
     return out
 
 
-def label_for(rtok, cap_hit, generated, deep_thresh: int, min_generated: int) -> float:
-    """G3, narrowed: a cap-hit is deep evidence only if it generated enough
-    to have measured anything. `generated is None` = pre-G6 reservoir meta."""
-    if cap_hit and (generated is None or int(generated) >= min_generated):
-        return 1.0
-    return 1.0 if int(rtok) >= deep_thresh else 0.0
+def select_feat_dim(rows: list[Row], counts: dict, want: int | None = None):
+    """(dim, rows_in_that_dim). Two feature ERAS cannot share a training set.
+
+    Same argument as the tap-vs-HF capture refusal: 15360 last-only and 30720
+    last+mean are different spaces, and a probe fitted across both is fitted on
+    neither. When the router changes era mid-sink the older windows drop out —
+    counted and printed, never silently averaged in.
+    """
+    if not rows:
+        return (want or FEAT_DIM), rows
+    dim = want or max(rows, key=lambda r: r.ts).feat_dim
+    keep = [r for r in rows if r.feat_dim == dim]
+    dropped = len(rows) - len(keep)
+    counts["feat_dim"] = int(dim)
+    if dropped:
+        counts["g9_feat_dim_mismatch"] = dropped
+        counts["g9_feat_dims_seen"] = sorted({int(r.feat_dim) for r in rows})
+    return dim, keep
 
 
 # ── cursor: content-addressed, prune-proof ─────────────────────────────────
@@ -432,6 +746,263 @@ def spearman(a: np.ndarray, b: np.ndarray) -> float:
     return float((ra * rb).sum() / denom) if denom else float("nan")
 
 
+# ── statistics the gates need (no scipy in lens-venv) ─────────────────────
+def norm_sf(z: float) -> float:
+    """P(Z > z) for a standard normal, via erfc — no scipy."""
+    return 0.5 * math.erfc(float(z) / math.sqrt(2.0))
+
+
+def _midrank(x: np.ndarray) -> np.ndarray:
+    """Ranks with ties averaged (the T of Sun & Xu's fast DeLong)."""
+    J = np.argsort(x, kind="mergesort")
+    Z = np.asarray(x, dtype=float)[J]
+    n = len(x)
+    T = np.zeros(n, dtype=float)
+    i = 0
+    while i < n:
+        j = i
+        while j < n and Z[j] == Z[i]:
+            j += 1
+        T[i:j] = 0.5 * (i + j + 1)
+        i = j
+    out = np.empty(n, dtype=float)
+    out[J] = T
+    return out
+
+
+def delong_test(y: np.ndarray, s_a: np.ndarray, s_b: np.ndarray):
+    """PAIRED AUC comparison (fast DeLong). Returns (auc_a, auc_b, z, p_one).
+
+    Paired matters: both probes scored the SAME requests, so their AUC
+    estimates are strongly correlated. An unpaired comparison throws that
+    covariance away and needs several times the sample to see the same
+    difference. p_one is one-sided for H1: auc_a > auc_b.
+    """
+    y = np.asarray(y, dtype=float)
+    S = np.vstack([np.asarray(s_a, float), np.asarray(s_b, float)])
+    pos, neg = S[:, y == 1], S[:, y == 0]
+    m, n = pos.shape[1], neg.shape[1]
+    if m == 0 or n == 0:
+        return float("nan"), float("nan"), float("nan"), float("nan")
+    tx = np.vstack([_midrank(pos[k]) for k in range(2)])
+    ty = np.vstack([_midrank(neg[k]) for k in range(2)])
+    tz = np.vstack([_midrank(np.concatenate([pos[k], neg[k]]))
+                    for k in range(2)])
+    aucs = (tz[:, :m].sum(1) - m * (m + 1) / 2.0) / (m * n)
+    v01 = (tz[:, :m] - tx) / n
+    v10 = 1.0 - (tz[:, m:] - ty) / m
+    s01 = np.cov(v01) if m > 1 else np.zeros((2, 2))
+    s10 = np.cov(v10) if n > 1 else np.zeros((2, 2))
+    cov = np.asarray(s01, float) / m + np.asarray(s10, float) / n
+    L = np.array([1.0, -1.0])
+    var = float(L @ cov @ L)
+    d = float(aucs[0] - aucs[1])
+    if var <= 0:
+        # Identical scores (or a degenerate sample): no evidence either way.
+        return float(aucs[0]), float(aucs[1]), 0.0, 0.5
+    z = d / math.sqrt(var)
+    return float(aucs[0]), float(aucs[1]), float(z), float(norm_sf(z))
+
+
+def psi(ref: np.ndarray, new: np.ndarray, bins: int = 10) -> float:
+    """Population Stability Index of `new` against `ref` on ref's deciles."""
+    ref = np.asarray(ref, float)
+    new = np.asarray(new, float)
+    if len(ref) < bins or len(new) == 0:
+        return 0.0
+    edges = np.unique(np.quantile(ref, np.linspace(0, 1, bins + 1)))
+    if len(edges) < 3:
+        return 0.0
+    edges[0], edges[-1] = -np.inf, np.inf
+    p = np.histogram(ref, bins=edges)[0] / float(len(ref))
+    q = np.histogram(new, bins=edges)[0] / float(len(new))
+    eps = 1e-4
+    p, q = np.clip(p, eps, None), np.clip(q, eps, None)
+    return float(np.sum((q - p) * np.log(q / p)))
+
+
+def ks_2samp(a: np.ndarray, b: np.ndarray):
+    """Two-sample Kolmogorov-Smirnov (D, p) — asymptotic p, no scipy."""
+    a = np.sort(np.asarray(a, float))
+    b = np.sort(np.asarray(b, float))
+    n1, n2 = len(a), len(b)
+    if n1 == 0 or n2 == 0:
+        return 0.0, 1.0
+    allv = np.concatenate([a, b])
+    cdf1 = np.searchsorted(a, allv, side="right") / n1
+    cdf2 = np.searchsorted(b, allv, side="right") / n2
+    d = float(np.max(np.abs(cdf1 - cdf2)))
+    en = math.sqrt(n1 * n2 / float(n1 + n2))
+    lam = (en + 0.12 + 0.11 / en) * d
+    p = 2.0 * sum((-1) ** (j - 1) * math.exp(-2.0 * j * j * lam * lam)
+                  for j in range(1, 101))
+    return d, float(min(1.0, max(0.0, p)))
+
+
+# ── exploration policy (DESIGNED, DISABLED — PN119_EXPLORE stays 0.0) ─────
+def _u01(req_id: str, salt: str) -> float:
+    """Deterministic uniform(0,1) from a req_id under a named salt."""
+    h = hashlib.sha256(f"{salt}:{req_id}".encode()).digest()
+    return int.from_bytes(h[:8], "big") / float(1 << 64)
+
+
+def explore_eps(score: float, tdeep: float,
+                halfwidth: float = EXPLORE_BOUNDARY_HALFWIDTH,
+                eps_boundary: float = EXPLORE_EPS_BOUNDARY,
+                eps_tail: float = EXPLORE_EPS_TAIL) -> float:
+    """Stratified epsilon: spend the exploration where the decision is."""
+    return eps_boundary if abs(float(score) - float(tdeep)) < halfwidth else eps_tail
+
+
+def explore_decision(req_id: str, score: float, tdeep: float, bucket=None,
+                     **kw):
+    """(explore, p_explore). Deterministic per req_id — the sink row and the
+    consumer can never disagree about whether a request was an explore row.
+
+    p_explore is the PROPENSITY and must be logged: without it the explore
+    rows are a biased sample with no way to unbias them (see ips_weight).
+    A token bucket, when supplied, caps the cost: a request that would have
+    explored but finds the bucket empty is NOT an explore row, and its
+    propensity is 0 (it must then be dropped from the IPS estimate, not
+    reweighted).
+    """
+    eps = explore_eps(score, tdeep, **kw)
+    fires = _u01(req_id, EXPLORE_SALT) < eps
+    if fires and bucket is not None and not bucket.take():
+        return False, 0.0
+    return bool(fires), float(eps)
+
+
+def explore_effective_rate(scores, tdeep: float,
+                           halfwidth: float = EXPLORE_BOUNDARY_HALFWIDTH,
+                           eps_boundary: float = EXPLORE_EPS_BOUNDARY,
+                           eps_tail: float = EXPLORE_EPS_TAIL) -> float:
+    """What the stratified policy actually costs on a given score sample."""
+    s = np.asarray(scores, float)
+    if not len(s):
+        return float("nan")
+    near = float((np.abs(s - float(tdeep)) < halfwidth).mean())
+    return near * eps_boundary + (1.0 - near) * eps_tail
+
+
+def explore_halfwidth_for_rate(scores, tdeep: float, target: float,
+                               eps_boundary: float = EXPLORE_EPS_BOUNDARY,
+                               eps_tail: float = EXPLORE_EPS_TAIL) -> float:
+    """The boundary halfwidth that hits a target effective rate HERE.
+
+    The pack's 0.10 was sized against an assumed score spread. The live probe's
+    scores are far tighter than that (measured 2026-07-25: sd 0.117, and 62% of
+    all scored requests sit within 0.10 of PN119_TDEEP), so 0.10 is not a
+    boundary band, it is most of the traffic. Whoever turns exploration on must
+    size the halfwidth against the CURRENT score distribution, not a constant.
+    """
+    s = np.asarray(scores, float)
+    if not len(s) or eps_boundary <= eps_tail:
+        return float("nan")
+    near = (float(target) - eps_tail) / (eps_boundary - eps_tail)
+    if not (0.0 < near < 1.0):
+        return float("nan")
+    return float(np.quantile(np.abs(s - float(tdeep)), near))
+
+
+def explore_budget_for(deep_thresh: int, routed_budget: int | None,
+                       margin: int = 400) -> int:
+    """PN119_EXPLORE_BUDGET = max(theta + 400, routed_budget).
+
+    An explore row exists to produce an UNCENSORED label, which it can only
+    do if its budget can carry it past theta with room to stop naturally.
+    Never smaller than what the row would have been granted anyway.
+    """
+    return int(max(deep_thresh + margin, routed_budget or 0))
+
+
+def is_holdout(req_id: str, frac: float = HOLDOUT_FRAC) -> bool:
+    """2% holdout on a DIFFERENT salt from the explore stream, so the two are
+    independent rather than nested. Excluded from training by G8; there is
+    deliberately no flag to include it."""
+    return _u01(req_id, HOLDOUT_SALT) < frac
+
+
+def ips_weight(p_explore: float, clip: float = EXPLORE_IPS_CLIP) -> float:
+    """1/p, clipped. Unclipped IPS on eps_tail=0.01 gives single rows a
+    weight of 100 — one lucky draw would own the fit."""
+    p = float(p_explore or 0.0)
+    if p <= 0.0:
+        return 0.0
+    return float(min(1.0 / p, clip))
+
+
+class TokenBucket:
+    """Hard ceiling on explore spend: `rate` tokens/hour, `capacity` burst."""
+
+    def __init__(self, rate_per_hour: float, capacity: float, now: float = 0.0):
+        self.rate = float(rate_per_hour) / 3600.0
+        self.capacity = float(capacity)
+        self.tokens = float(capacity)
+        self.t = float(now)
+
+    def take(self, now: float | None = None, n: float = 1.0) -> bool:
+        now = self.t if now is None else float(now)
+        self.tokens = min(self.capacity, self.tokens + (now - self.t) * self.rate)
+        self.t = now
+        if self.tokens >= n:
+            self.tokens -= n
+            return True
+        return False
+
+
+def explore_enabled(env=None) -> bool:
+    """Exploration is OFF unless BOTH the rate is positive AND the consumer
+    has declared that it honours PN119_EXPLORE_BUDGET.
+
+    Without the second half an explore row is an ordinary censored row with a
+    trusted-label badge on it — strictly worse than no exploration at all,
+    because the refit believes it.
+    """
+    env = os.environ if env is None else env
+    try:
+        rate = float(env.get("PN119_EXPLORE", "0") or 0.0)
+    except ValueError:
+        return False
+    honoured = str(env.get("PN119_EXPLORE_BUDGET_HONOURED", "0")).strip() in (
+        "1", "true", "True", "yes")
+    return rate > 0.0 and honoured
+
+
+def explore_integrity(rows, deep_thresh: int, slack: int = CENSOR_SLACK):
+    """Violations that make explore rows untrustworthy. Empty == clean.
+
+    An explore row must (a) carry its logged propensity and (b) have been
+    granted a theta-sufficient budget. A censored explore row below theta is
+    the exact failure mode the whole design exists to prevent.
+    """
+    bad_prop = bad_budget = censored_short = 0
+    n = 0
+    for r in rows:
+        if not getattr(r, "explore", False):
+            continue
+        n += 1
+        p = getattr(r, "p_explore", None)
+        if p is None or not (0.0 < float(p) <= 1.0):
+            bad_prop += 1
+        bg = getattr(r, "budget_grant", None)
+        if bg is not None and int(bg) < explore_budget_for(deep_thresh, None):
+            bad_budget += 1
+        cens, lb, _p = censoring_of(r, slack)
+        if cens and lb < deep_thresh:
+            censored_short += 1
+    out = {}
+    if n:
+        out["explore_rows"] = n
+    if bad_prop:
+        out["explore_missing_propensity"] = bad_prop
+    if bad_budget:
+        out["explore_budget_below_theta"] = bad_budget
+    if censored_short:
+        out["explore_censored_below_theta"] = censored_short
+    return out
+
+
 # ── gates ──────────────────────────────────────────────────────────────────
 def temporal_split(ts: np.ndarray, holdout_frac: float):
     """Indices (fit, holdout) with the most recent holdout_frac by TIME.
@@ -523,6 +1094,130 @@ def gate_calibration(train_scores, cand_res, inc_res, tdeep, min_deep_frac,
     return fails
 
 
+def b3_report_state(path: str, max_age_h: float, now: float):
+    """(ok, note) for the b3 numerics report — the probe's arithmetic check.
+
+    A refit that runs while b3 is failing (or has not run since the last
+    engine change) is a refit whose feature pipeline is unverified. Missing
+    counts as failing: "no evidence" is not "no problem".
+    """
+    if not os.path.isfile(path):
+        return False, f"b3 report missing ({path})"
+    try:
+        with open(path, encoding="utf-8") as f:
+            rep = json.load(f) or {}
+    except (OSError, json.JSONDecodeError) as e:
+        return False, f"b3 report unreadable ({e})"
+    age_h = (now - float(rep.get("ts", 0.0) or 0.0)) / 3600.0
+    if not bool(rep.get("pass", False)):
+        return False, f"b3 report says pass=false (age {age_h:.1f}h)"
+    if age_h > max_age_h:
+        return False, f"b3 report is stale ({age_h:.1f}h > {max_age_h}h)"
+    return True, f"b3 pass, age {age_h:.1f}h"
+
+
+def gate_drift(P_ref, P_new, prior, unresolved_rate, b3_ok, b3_note,
+               explore_bad: dict, report: dict, max_psi=0.25, ks_p=0.01,
+               ks_d=0.15, prior_lo=0.15, prior_hi=0.55, max_unresolved=0.40,
+               min_side=50):
+    """Reject a candidate whose INPUTS have moved, not just its outputs.
+
+    P_ref / P_new are PC projections (rows x pcs) of the reference (older)
+    and recent halves of the training set. Every other gate here scores the
+    candidate on the same distribution it was fitted on, so a corpus that has
+    shifted underneath the loop passes them all — which is precisely what the
+    2026-07-25 poisoning did.
+    """
+    fails = []
+    P_ref = np.asarray(P_ref, float)
+    P_new = np.asarray(P_new, float)
+    # Below min_side, PSI is measuring empty bins: with 10 reference deciles
+    # and 8 new rows most bins are empty and the clipped log-ratio invents a
+    # PSI of several units. A drift gate that fires on sample size is a drift
+    # gate that gets switched off.
+    if (P_ref.ndim == 2 and P_new.ndim == 2
+            and min(len(P_ref), len(P_new)) >= min_side):
+        psis, ks_stats = [], []
+        for c in range(P_ref.shape[1]):
+            psis.append(psi(P_ref[:, c], P_new[:, c]))
+            ks_stats.append(ks_2samp(P_ref[:, c], P_new[:, c]))
+        report["psi_max"] = round(float(np.max(psis)), 4)
+        report["psi_argmax_pc"] = int(np.argmax(psis))
+        worst = int(np.argmax([d for d, _p in ks_stats]))
+        report["ks_d_max"] = round(float(ks_stats[worst][0]), 4)
+        report["ks_p_at_dmax"] = float(f"{ks_stats[worst][1]:.3e}")
+        if report["psi_max"] > max_psi:
+            fails.append(f"feature drift: PSI {report['psi_max']:.3f} > {max_psi} "
+                         f"on PC{report['psi_argmax_pc']}")
+        for c, (d, p) in enumerate(ks_stats):
+            if p < ks_p and d > ks_d:
+                fails.append(f"feature drift: KS on PC{c} D={d:.3f} p={p:.2e} "
+                             f"(reject at p<{ks_p} & D>{ks_d})")
+                break
+    else:
+        report["psi_max"] = None
+        report["drift_note"] = (
+            f"feature drift not evaluable (fit={len(P_ref)} recent={len(P_new)}, "
+            f"need >={min_side} a side)")
+    report["train_prior"] = None if prior is None else round(float(prior), 4)
+    if prior is not None and not (prior_lo <= float(prior) <= prior_hi):
+        fails.append(f"training prior {float(prior):.4f} outside "
+                     f"[{prior_lo}, {prior_hi}] — the label distribution is not "
+                     f"the traffic's")
+    report["unresolved_rate"] = (None if unresolved_rate is None
+                                 else round(float(unresolved_rate), 4))
+    if unresolved_rate is not None and float(unresolved_rate) > max_unresolved:
+        fails.append(f"interval-unresolved rate {float(unresolved_rate):.4f} > "
+                     f"{max_unresolved} — most of the corpus is a lower bound")
+    report["b3_ok"] = bool(b3_ok)
+    report["b3_note"] = b3_note
+    if not b3_ok:
+        fails.append(f"b3 numerics gate: {b3_note}")
+    if explore_bad:
+        report["explore_integrity"] = explore_bad
+        bad = {k: v for k, v in explore_bad.items() if k != "explore_rows"}
+        if bad:
+            fails.append(f"explore integrity violated: {json.dumps(bad)}")
+    return fails
+
+
+def gate_shadow_promotion(y, w, s_cand, s_inc, tdeep, alpha, max_flip_frac,
+                          min_n, report: dict):
+    """Promote the candidate only if it BEAT the incumbent out of sample.
+
+    Every argument is measured on rows the candidate scored in shadow AFTER
+    it went live — the candidate never routed any of them, so this is a true
+    out-of-sample comparison on the traffic that matters, not a re-scoring of
+    the corpus it was fitted on.
+    """
+    keep = np.asarray(w, float) > 0
+    y = np.asarray(y, float)[keep]
+    a = np.asarray(s_cand, float)[keep]
+    b = np.asarray(s_inc, float)[keep]
+    report["shadow_n"] = int(len(y))
+    if len(y) < min_n:
+        report["shadow_note"] = f"only {len(y)} resolved shadow rows (< {min_n})"
+        return [f"not enough post-shadow evidence: {len(y)} resolved rows < {min_n}"]
+    if y.min() == y.max():
+        report["shadow_note"] = f"single-class shadow window (prior {y.mean():.3f})"
+        return ["shadow window is single-class — AUC undefined"]
+    auc_a, auc_b, z, p = delong_test(y, a, b)
+    report.update(shadow_auc_cand=round(auc_a, 4), shadow_auc_inc=round(auc_b, 4),
+                  delong_z=round(z, 4), delong_p_one_sided=float(f"{p:.3e}"))
+    flip = float((((a >= tdeep).astype(int) != (b >= tdeep).astype(int))).mean())
+    report["decision_flip_frac"] = round(flip, 4)
+    fails = []
+    if flip > max_flip_frac:
+        fails.append(f"decision-flip fraction {flip:.4f} > {max_flip_frac}: this "
+                     f"is a DIFFERENT router, not a better probe — needs a human")
+    if not (auc_a > auc_b):
+        fails.append(f"candidate AUC {auc_a:.4f} does not beat incumbent {auc_b:.4f}")
+    elif p >= alpha:
+        fails.append(f"candidate AUC {auc_a:.4f} vs {auc_b:.4f} is not significant "
+                     f"(paired DeLong one-sided p={p:.3g} >= {alpha})")
+    return fails
+
+
 # ── seed ───────────────────────────────────────────────────────────────────
 def seed_capture_source(path: str) -> str:
     """Classify a seed capture: 'tap' (live in-engine tap, same features the
@@ -554,9 +1249,23 @@ def seed_capture_source(path: str) -> str:
     return "unknown"
 
 
-def load_seed(deep_thresh: int, features: str, champion: str):
+class FeatureSpaceMismatch(RuntimeError):
+    """The seed and the sink are not in the same feature space."""
+
+
+def load_seed(deep_thresh: int, features: str, champion: str,
+              slack: int = CENSOR_SLACK, counts: dict | None = None,
+              feat_dim: int | None = None):
     """Seed set (v1 continuity anchor), captured through the SAME tap the
-    sink is written from — see seed_capture_source."""
+    sink is written from — see seed_capture_source.
+
+    The seed gets the SAME interval labels as the sink. Its `budget` column
+    is the CLIENT's (None on the auto arm), so PN100's grant is unknown and
+    the grid derivation is the only censoring signal available — which is
+    exactly the sink's situation for pre-schema rows. Labelling the seed by
+    a different rule than the traffic would put a systematic offset between
+    the fit side and the holdout side of every gate.
+    """
     import torch                                # noqa: PLC0415 — bf16 needs it
     from safetensors.torch import load_file     # noqa: PLC0415
     st = load_file(features)                    # bf16 — numpy cannot hold it
@@ -564,17 +1273,32 @@ def load_seed(deep_thresh: int, features: str, champion: str):
     with open(champion, encoding="utf-8") as f:
         for line in f:
             rec = json.loads(line)
-            champ[rec["item_id"]] = rec.get("reasoning_tokens") or 0
+            champ[rec["item_id"]] = {
+                "rtok": rec.get("reasoning_tokens") or 0,
+                "generated": rec.get("completion_tokens"),
+                "cap_hit": not bool(rec.get("think_closed", True)),
+                "budget_grant": rec.get("budget"),
+                "censored": None,
+            }
     ids = [i for i in sorted(champ) if i in st]
     X = np.stack([st[i].to(torch.float32).flatten().numpy() for i in ids])
-    y = np.array([1.0 if champ[i] >= deep_thresh else 0.0 for i in ids])
-    return ids, X, y
+    if feat_dim is not None and X.shape[1] != int(feat_dim):
+        raise FeatureSpaceMismatch(
+            f"seed capture {os.path.basename(features)} is {X.shape[1]}-dim "
+            f"({st[ids[0]].shape[0]} blocks) but the sink's live windows are "
+            f"{feat_dim}-dim. These are different feature spaces (last+mean vs "
+            f"last-only), not different scalings — re-capture the seed through "
+            f"the current tap, or pass --no-seed.")
+    y, w, _b, _p = label_rows([champ[i] for i in ids], deep_thresh,
+                              counts if counts is not None else None, slack)
+    return ids, X, y, w
 
 
 # ── reservoir ──────────────────────────────────────────────────────────────
 def update_reservoir(state_dir: str, rows: list[Row], cap: int,
                      rng: np.random.Generator, counts: dict,
-                     persist: bool = True, seen_cap: int = 200_000):
+                     persist: bool = True, seen_cap: int = 200_000,
+                     feat_dim: int = FEAT_DIM):
     """Bounded raw-feature reservoir (pack: ~2000 requests) so old sink files
     can be pruned without losing PCA-refresh data. Classic reservoir
     sampling over the stream of eligible rows, persisted atomically.
@@ -589,14 +1313,23 @@ def update_reservoir(state_dir: str, rows: list[Row], cap: int,
         losers are never faulted in.
     """
     res_path = os.path.join(state_dir, "reservoir.npz")
+    R_X, R_meta, seen_total, seen_ids = [], [], 0, []
     if os.path.isfile(res_path):
         z = np.load(res_path, allow_pickle=True)
-        R_X = list(z["X"])
-        R_meta = [json.loads(s) for s in z["meta"]]
-        seen_total = int(z["seen_total"])
-        seen_ids = [str(s) for s in z["seen_req_ids"]] if "seen_req_ids" in z else []
-    else:
-        R_X, R_meta, seen_total, seen_ids = [], [], 0, []
+        X0 = np.asarray(z["X"])
+        held_dim = (int(z["feat_dim"]) if "feat_dim" in z
+                    else (int(X0.shape[1]) if X0.ndim == 2 and X0.shape[1] else feat_dim))
+        if held_dim != feat_dim:
+            # The stored features are from the other feature ERA. They cannot
+            # be stacked with the new ones and they cannot be converted, so the
+            # reservoir starts over rather than pretending.
+            counts["reservoir_reset_feat_dim"] = held_dim
+        else:
+            R_X = list(X0)
+            R_meta = [json.loads(s) for s in z["meta"]]
+            seen_total = int(z["seen_total"])
+            seen_ids = ([str(s) for s in z["seen_req_ids"]]
+                        if "seen_req_ids" in z else [])
     seen = set(seen_ids)
     seen.update(m["req_id"] for m in R_meta)
     new = [r for r in rows if r.req_id not in seen]
@@ -620,7 +1353,15 @@ def update_reservoir(state_dir: str, rows: list[Row], cap: int,
         R_X[slot] = r.x.astype(np.float16)
         R_meta[slot] = {"req_id": r.req_id, "rtok": r.rtok, "cap_hit": r.cap_hit,
                         "generated": r.generated, "mode": r.mode, "route": r.route,
-                        "explore": r.explore, "ts": r.ts, "tag": r.tag}
+                        "explore": r.explore, "ts": r.ts, "tag": r.tag,
+                        # BUG-139: the reservoir outlives the sink windows, so
+                        # the censoring evidence has to travel WITH the row.
+                        # A meta dict written before this carries none, and
+                        # censoring_of() falls back to the grid derivation.
+                        "censored": r.censored, "budget_grant": r.budget_grant,
+                        "budget_source": r.budget_source,
+                        "score": r.score, "cand_score": r.cand_score,
+                        "cand_sha": r.cand_sha, "p_explore": r.p_explore}
     # A row can win a slot that a not-yet-filled append reserved only in the
     # append branch, which fills it immediately; nothing may stay None.
     keep = [k for k in range(len(R_X)) if R_X[k] is not None and R_meta[k] is not None]
@@ -633,27 +1374,215 @@ def update_reservoir(state_dir: str, rows: list[Row], cap: int,
     counts["reservoir_seen_ids"] = len(seen_out)
     if persist:
         atomic_write_npz(res_path, {
-            "X": np.stack(R_X) if R_X else np.zeros((0, FEAT_DIM), dtype=np.float16),
+            "X": np.stack(R_X) if R_X else np.zeros((0, feat_dim), dtype=np.float16),
             "meta": np.array([json.dumps(m) for m in R_meta]),
             "seen_total": np.array(seen_total),
             "seen_req_ids": np.array(seen_out),
+            "feat_dim": np.array(feat_dim),
         })
     return R_X, R_meta
+
+
+# ── accuracy monitor (join-only; NEVER a training target) ─────────────────
+def join_key(req_id: str) -> str:
+    """Sink req_id -> graded-run extra.resp_id (drop the last `-` segment)."""
+    return str(req_id).rsplit("-", 1)[0]
+
+
+def load_graded(results_dir: str, pattern: str = "*.jsonl") -> dict:
+    """{resp_id: {"correct", "item_id", "run_id", "reasoning_tokens"}}."""
+    out: dict = {}
+    for p in sorted(glob.glob(os.path.join(results_dir, pattern))):
+        try:
+            with open(p, encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        m = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    rid = (m.get("extra") or {}).get("resp_id")
+                    if not rid:
+                        continue
+                    out[str(rid)] = {
+                        "correct": bool(m.get("correct", False)),
+                        "item_id": m.get("item_id"),
+                        "run_id": m.get("run_id"),
+                        "reasoning_tokens": m.get("reasoning_tokens"),
+                    }
+        except OSError:
+            continue
+    return out
+
+
+def accuracy_monitor(rows, results_dir: str, tdeep: float, state_dir: str,
+                     report: dict, alert_drop: float = 0.10, min_n: int = 20,
+                     persist: bool = True) -> list[str]:
+    """Deep-bucket accuracy regression ALERTS. Returns alert strings.
+
+    This is free: the graded runs already exist and `extra.resp_id` joins the
+    sink's req_id with its last `-` segment stripped (measured 339/339 over
+    12 runs). It is a MONITOR, never a gate on training and never a label:
+    AUC(score -> correct) sits at 0.26-0.40 — correctly BELOW 0.5, because
+    the lens finds HARD items, not wrong ones. Training on `correct` would
+    teach the probe to route the easy questions deep.
+    """
+    graded = load_graded(results_dir)
+    pairs = [(r, graded[join_key(r.req_id)]) for r in rows
+             if join_key(r.req_id) in graded and r.score is not None]
+    report["acc_join_n"] = len(pairs)
+    report["acc_graded_n"] = len(graded)
+    if not pairs:
+        report["acc_note"] = "no sink row joins a graded run"
+        return []
+    sc = np.array([float(r.score) for r, _g in pairs])
+    ok = np.array([1.0 if g["correct"] else 0.0 for _r, g in pairs])
+    deep = sc >= float(tdeep)
+    report["acc_auc_score_vs_correct"] = round(auc(sc, ok), 4)
+    report["acc_overall"] = round(float(ok.mean()), 4)
+    report["acc_deep_n"] = int(deep.sum())
+    report["acc_lean_n"] = int((~deep).sum())
+    report["acc_deep"] = (round(float(ok[deep].mean()), 4)
+                          if deep.any() else None)
+    report["acc_lean"] = (round(float(ok[~deep].mean()), 4)
+                          if (~deep).any() else None)
+    base_p = os.path.join(state_dir, "accuracy-baseline.json")
+    base = {}
+    if os.path.isfile(base_p):
+        try:
+            with open(base_p, encoding="utf-8") as f:
+                base = json.load(f) or {}
+        except (OSError, json.JSONDecodeError):
+            base = {}
+    alerts = []
+    prev = base.get("acc_deep")
+    if (prev is not None and report["acc_deep"] is not None
+            and report["acc_deep_n"] >= min_n
+            and report["acc_deep"] < float(prev) - alert_drop):
+        alerts.append(f"deep-bucket accuracy {report['acc_deep']:.3f} is "
+                      f"{float(prev) - report['acc_deep']:.3f} below the "
+                      f"baseline {float(prev):.3f} (n={report['acc_deep_n']})")
+    report["acc_baseline"] = prev
+    if persist and report["acc_deep"] is not None and report["acc_deep_n"] >= min_n:
+        if prev is None or report["acc_deep"] > float(prev):
+            with open(base_p, "w", encoding="utf-8") as f:
+                json.dump({"acc_deep": report["acc_deep"],
+                           "acc_deep_n": report["acc_deep_n"],
+                           "ts": time.time()}, f)
+    return alerts
+
+
+# ── dual-probe candidate state ────────────────────────────────────────────
+def candidate_path(state_dir: str) -> str:
+    return os.path.join(state_dir, "candidate.npz")
+
+
+def load_candidate(state_dir: str) -> dict | None:
+    p = os.path.join(state_dir, "candidate.json")
+    if not os.path.isfile(p):
+        return None
+    try:
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def npz_sha16(path: str) -> str:
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()[:16]
+
+
+def stage_candidate(state_dir: str, payload: dict, note: str = "") -> dict:
+    """Write candidate.npz + candidate.json. The engine is expected to load
+    it via PN119_PROBE_CANDIDATE and SCORE with it — never route on it."""
+    cp = candidate_path(state_dir)
+    atomic_write_npz(cp, payload)
+    rec = {"sha256_16": npz_sha16(cp), "path": cp, "staged_ts": time.time(),
+           "first_seen_ts": None, "note": note}
+    with open(os.path.join(state_dir, "candidate.json"), "w",
+              encoding="utf-8") as f:
+        json.dump(rec, f, indent=1)
+    return rec
+
+
+def note_candidate_live(state_dir: str, rec: dict, rows) -> dict:
+    """Stamp first_seen_ts the first time the sink shows the router actually
+    scoring with this candidate. Until that happens there is no shadow
+    evidence and promotion cannot even be evaluated."""
+    if rec.get("first_seen_ts"):
+        return rec
+    ts = [r.ts for r in rows
+          if r.cand_score is not None and r.cand_sha == rec.get("sha256_16")]
+    if not ts:
+        return rec
+    rec["first_seen_ts"] = float(min(ts))
+    with open(os.path.join(state_dir, "candidate.json"), "w",
+              encoding="utf-8") as f:
+        json.dump(rec, f, indent=1)
+    return rec
+
+
+def promote_candidate(out: str, cand_npz: str, prev: str) -> str:
+    """live -> probe.prev.npz, candidate -> live. Both atomic; the previous
+    probe survives so a promotion can be undone without a refit."""
+    if os.path.isfile(out):
+        shutil.copy2(out, prev + ".tmp")
+        os.replace(prev + ".tmp", prev)
+    z = np.load(cand_npz, allow_pickle=True)
+    atomic_write_npz(out, {k: z[k] for k in z.files})
+    return npz_sha16(out)
+
+
+def rollback_probe(out: str, prev: str) -> str:
+    """Swap BACK. The current live probe becomes the new .prev, so a rollback
+    is itself reversible (a bad rollback is as likely as a bad promotion)."""
+    if not os.path.isfile(prev):
+        raise FileNotFoundError(prev)
+    z = np.load(prev, allow_pickle=True)
+    payload = {k: z[k] for k in z.files}
+    if os.path.isfile(out):
+        shutil.copy2(out, prev + ".tmp")
+    atomic_write_npz(out, payload)
+    if os.path.isfile(prev + ".tmp"):
+        os.replace(prev + ".tmp", prev)
+    return npz_sha16(out)
 
 
 def _nan(v):
     return float("nan") if v is None else float(v)
 
 
-def load_incumbent(path: str):
+def incumbent_feat_dim(path: str) -> int | None:
     if not os.path.isfile(path):
         return None
     try:
         z = np.load(path, allow_pickle=True)
-        return (np.asarray(z["mu"]), np.asarray(z["sd"]),
-                np.asarray(z["Vt10"]), np.asarray(z["w"]))
-    except (OSError, KeyError, ValueError):
+        return int(np.asarray(z["mu"]).shape[0])
+    except (OSError, KeyError, ValueError, IndexError):
         return None
+
+
+def load_incumbent(path: str, feat_dim: int | None = None):
+    """(probe, note). A probe in another feature space is NOT the incumbent.
+
+    The live probe is a folded (mu, sd, Vt, w) in a fixed feature width. Scoring
+    30720-dim sink rows with a 15360-dim probe is not a degraded comparison, it
+    is a shape error — and until this returned None it was an uncaught
+    ValueError in the middle of the gate block.
+    """
+    if not os.path.isfile(path):
+        return None, "no incumbent probe on disk"
+    try:
+        z = np.load(path, allow_pickle=True)
+        mu = np.asarray(z["mu"])
+        if feat_dim is not None and mu.shape[0] != int(feat_dim):
+            return None, (f"incumbent probe is {mu.shape[0]}-dim but the sink is "
+                          f"{feat_dim}-dim — different feature spaces, so the "
+                          f"stability and calibration comparisons ABSTAIN")
+        return (mu, np.asarray(z["sd"]), np.asarray(z["Vt10"]),
+                np.asarray(z["w"])), "ok"
+    except (OSError, KeyError, ValueError) as e:
+        return None, f"incumbent probe unreadable ({e})"
 
 
 def main() -> int:
@@ -712,6 +1641,52 @@ def main() -> int:
     ap.add_argument("--legacy-thinking-ok", action="store_true",
                     help="accept pre-flag sink rows as thinking-enabled (G1); only "
                          "valid while the sink is known 100%% shadow thinking traffic")
+    # ── BUG-139 interval censoring
+    ap.add_argument("--allow-feat-dim-change", action="store_true",
+                    help="permit swapping in a probe whose feature width "
+                         "differs from the live one (a real migration)")
+    ap.add_argument("--feat-dim", type=int, default=None,
+                    help="pin the sink feature width (15360 last-only / 30720 "
+                         "last+mean); default = the newest window's")
+    ap.add_argument("--censor-slack", type=int, default=CENSOR_SLACK,
+                    help="rtok >= budget - SLACK => the row was budget-truncated "
+                         "(len(think_end_ids)+8; the measured offset is 5)")
+    ap.add_argument("--max-unresolved-frac", type=float, default=0.40,
+                    help="drift gate: reject when more than this fraction of the "
+                         "corpus is an unresolved censored interval")
+    # ── dual-probe shadow promotion
+    ap.add_argument("--promote-mode", choices=("shadow", "direct"),
+                    default="shadow",
+                    help="shadow (default): stage the candidate for "
+                         "PN119_PROBE_CANDIDATE and promote only on paired "
+                         "out-of-sample evidence. direct: fit->gates->swap "
+                         "(pre-shadow behaviour; needs an explicit reason)")
+    ap.add_argument("--delong-alpha", type=float, default=0.05,
+                    help="one-sided paired DeLong significance for promotion")
+    ap.add_argument("--max-flip-frac", type=float, default=0.20,
+                    help="more than this fraction of routing decisions flipped "
+                         "makes it a different router — promotion needs a human")
+    ap.add_argument("--min-shadow-n", type=int, default=200,
+                    help="resolved post-shadow rows required before the "
+                         "promotion test is even attempted")
+    ap.add_argument("--rollback", action="store_true",
+                    help="restore probe.prev.npz over the live probe and exit")
+    # ── drift gates
+    ap.add_argument("--max-psi", type=float, default=0.25)
+    ap.add_argument("--ks-p", type=float, default=0.01)
+    ap.add_argument("--ks-d", type=float, default=0.15)
+    ap.add_argument("--prior-lo", type=float, default=0.15)
+    ap.add_argument("--prior-hi", type=float, default=0.55)
+    ap.add_argument("--b3-report", default=f"{NEEDFIT}/pn119-b3-numerics-report.json")
+    ap.add_argument("--b3-max-age-h", type=float, default=24.0)
+    ap.add_argument("--skip-drift-gate", action="store_true",
+                    help="report drift but do not reject on it (bootstrap only)")
+    # ── accuracy monitor (never a training target)
+    ap.add_argument("--results-dir", default=RESULTS,
+                    help="graded run JSONLs for the accuracy monitor join")
+    ap.add_argument("--acc-alert-drop", type=float, default=0.10)
+    ap.add_argument("--accuracy-monitor", action="store_true",
+                    help="run ONLY the accuracy monitor join and exit")
     ap.add_argument("--force", action="store_true", help="ignore --min-new")
     ap.add_argument("--dry-run", action="store_true",
                     help="fit + gates + report, but do NOT swap or update state")
@@ -733,6 +1708,20 @@ def main() -> int:
                 except OSError:
                     pass
 
+    prev_p = os.path.join(os.path.dirname(os.path.abspath(args.out)),
+                          "probe.prev.npz")
+    if args.rollback:
+        try:
+            sha = rollback_probe(args.out, prev_p)
+        except FileNotFoundError:
+            print(f"[refit] ROLLBACK IMPOSSIBLE: no {prev_p} — the live probe "
+                  f"has never been promoted over another one.")
+            return EXIT_REJECT
+        print(f"[refit] ROLLED BACK {args.out} <- {prev_p} sha256[:16]={sha} "
+              f"(the probe it replaced is now the new .prev, so this is "
+              f"itself reversible)")
+        return EXIT_OK
+
     marker_ids, marker_tags = load_markers(args.sink)
     counts["marker_req_ids"] = len(marker_ids)
     counts["marker_tags_seen"] = len(marker_tags)   # provenance, NOT exclusions
@@ -740,7 +1729,77 @@ def main() -> int:
     t_parse = time.time()
     raw, file_sizes = load_sink(args.sink, counts, exclude_tags, marker_ids)
     counts["parse_s"] = round(time.time() - t_parse, 2)
+
+    if args.accuracy_monitor:
+        # Monitor-only mode: the join is free and needs none of the training
+        # machinery. `correct` never leaves this branch.
+        acc: dict = {}
+        alerts = accuracy_monitor(raw, args.results_dir, args.live_tdeep,
+                                  args.state, acc, args.acc_alert_drop,
+                                  persist=not args.dry_run)
+        for a in alerts:
+            print(f"[refit] ACCURACY ALERT {a}")
+        print(f"[refit] accuracy-monitor {json.dumps(acc)}")
+        return EXIT_REJECT if alerts else EXIT_OK
+
     rows = apply_guards(raw, args.legacy_thinking_ok, args.min_generated, counts)
+    feat_dim, rows = select_feat_dim(rows, counts, args.feat_dim)
+    if counts.get("g9_feat_dim_mismatch"):
+        print(f"[refit] WARN: the sink spans {counts['g9_feat_dims_seen']} "
+              f"feature widths; training on the newest ({feat_dim}) and "
+              f"dropping {counts['g9_feat_dim_mismatch']} older rows. A probe "
+              f"fitted across both eras is fitted on neither.")
+    _live_dim = incumbent_feat_dim(args.out)
+    if _live_dim is not None and _live_dim != feat_dim:
+        print(f"[refit] WARN: live probe is {_live_dim}-dim, the sink's newest "
+              f"windows are {feat_dim}-dim. Gates that compare against the "
+              f"incumbent will ABSTAIN and no swap is possible until the two "
+              f"agree (--allow-feat-dim-change to force).")
+
+    # ── dual-probe promotion. A registered candidate OWNS the loop until it
+    # is promoted or rejected: fitting a second candidate while the first is
+    # still collecting shadow evidence would throw that evidence away.
+    cand_rec = load_candidate(args.state)
+    if cand_rec and args.promote_mode == "shadow":
+        cand_rec = note_candidate_live(args.state, cand_rec, rows)
+        first = cand_rec.get("first_seen_ts")
+        shadow = [r for r in rows
+                  if r.cand_score is not None
+                  and r.cand_sha == cand_rec.get("sha256_16")
+                  and r.score is not None
+                  and (first is None or r.ts >= float(first))]
+        pg: dict = {"candidate_sha": cand_rec.get("sha256_16"),
+                    "candidate_staged_ts": cand_rec.get("staged_ts"),
+                    "candidate_first_seen_ts": first}
+        y_s, w_s, _b, _p = label_rows(shadow, args.deep_thresh, pg,
+                                      args.censor_slack, args.min_generated)
+        fails = gate_shadow_promotion(
+            y_s, w_s, [r.cand_score for r in shadow], [r.score for r in shadow],
+            args.live_tdeep, args.delong_alpha, args.max_flip_frac,
+            args.min_shadow_n, pg)
+        if fails and pg.get("shadow_n", 0) < args.min_shadow_n:
+            print(f"[refit] HOLD: candidate {cand_rec.get('sha256_16')} is in "
+                  f"shadow, {pg.get('shadow_n', 0)} resolved rows so far "
+                  f"(need {args.min_shadow_n}). {json.dumps(pg)}")
+            return EXIT_SKIP
+        if fails:
+            print(f"[refit] PROMOTION REFUSED ({'; '.join(fails)}) — live probe "
+                  f"untouched, candidate left in shadow.\n[refit] {json.dumps(pg)}")
+            return EXIT_REJECT
+        if args.dry_run:
+            print(f"[refit] DRY-RUN: would promote {cand_rec.get('sha256_16')} "
+                  f"{json.dumps(pg)}")
+            return EXIT_OK
+        sha = promote_candidate(args.out, cand_rec["path"], prev_p)
+        os.replace(os.path.join(args.state, "candidate.json"),
+                   os.path.join(args.state,
+                                f"promoted-{time.strftime('%Y%m%d-%H%M%S')}.json"))
+        print(f"[refit] PROMOTED {args.out} sha256[:16]={sha} "
+              f"auc {pg['shadow_auc_cand']} vs {pg['shadow_auc_inc']} "
+              f"(paired DeLong p={pg['delong_p_one_sided']}, n={pg['shadow_n']}, "
+              f"flips={pg['decision_flip_frac']}); previous probe kept at "
+              f"{prev_p}\n[refit] {json.dumps(pg)}")
+        return EXIT_OK
 
     # min-new accounting — content-addressed cursor, so a prune cannot make
     # this negative (which used to skip the refit forever while exiting 0).
@@ -771,27 +1830,57 @@ def main() -> int:
 
     rng = np.random.default_rng(int(t0))
     R_X, R_meta = update_reservoir(args.state, rows, args.reservoir, rng, counts,
-                                   persist=not args.dry_run)
+                                   persist=not args.dry_run, feat_dim=feat_dim)
     X_res = (np.stack(R_X).astype(np.float32) if R_X
-             else np.zeros((0, FEAT_DIM), np.float32))
-    y_res = np.array([label_for(m["rtok"], m["cap_hit"], m.get("generated"),
-                                args.deep_thresh, args.min_generated)
-                      for m in R_meta])
+             else np.zeros((0, feat_dim), np.float32))
+    # BUG-139: interval labels. Weight 0 == "this row proves nothing at
+    # theta", and those rows are DROPPED from the fit rather than being
+    # given the label the router's own decision implies.
+    y_res, w_res, _b_res, _p_res = label_rows(R_meta, args.deep_thresh, counts,
+                                              args.censor_slack,
+                                              args.min_generated)
     ts_res = np.array([float(m.get("ts", 0.0)) for m in R_meta])
 
-    seed_ids, X_seed, y_seed = load_seed(args.deep_thresh, args.seed_features,
-                                         args.seed_champion)
+    seed_counts: dict = {}
+    try:
+        seed_ids, X_seed, y_seed, w_seed = load_seed(
+            args.deep_thresh, args.seed_features, args.seed_champion,
+            args.censor_slack, seed_counts, feat_dim)
+    except FeatureSpaceMismatch as e:
+        if not args.no_seed:
+            print(f"[refit] REFUSED: {e}")
+            return EXIT_REJECT
+        # --no-seed already said "do not train on it". The seed is still
+        # loaded for the v1 anchor LINE, and that line is worth less than the
+        # run: drop the anchor, keep going, say so.
+        print(f"[refit] WARN: {e}\n[refit] WARN: --no-seed given, so the run "
+              f"continues WITHOUT the v1 anchor line.")
+        counts["seed_dropped_feat_dim"] = True
+        seed_ids, y_seed, w_seed = [], np.zeros(0), np.zeros(0)
+        X_seed = np.zeros((0, feat_dim), np.float32)
+    counts["seed_unresolved"] = seed_counts.get("g3_interval_unresolved", 0)
 
     if args.no_seed:
-        X_train, y_train, ts_train = X_res, y_res, ts_res
+        X_train, y_train, w_train, ts_train = X_res, y_res, w_res, ts_res
         train_ids = [m["req_id"] for m in R_meta]
     else:
         X_train = np.vstack([X_seed, X_res]) if len(X_res) else X_seed
         y_train = np.concatenate([y_seed, y_res])
+        w_train = np.concatenate([w_seed, w_res])
         # The seed predates every sink row: ts=0 pins it to the FIT side of
         # the temporal split, so the holdout is always live traffic.
         ts_train = np.concatenate([np.zeros(len(y_seed)), ts_res])
         train_ids = seed_ids + [m["req_id"] for m in R_meta]
+
+    resolved = np.asarray(w_train, float) > 0
+    counts["train_rows_offered"] = int(len(y_train))
+    counts["train_rows_unresolved"] = int((~resolved).sum())
+    unresolved_rate = (float((~resolved).mean()) if len(y_train) else 0.0)
+    counts["train_unresolved_rate"] = round(unresolved_rate, 4)
+    X_train = X_train[resolved]
+    y_train = y_train[resolved]
+    ts_train = ts_train[resolved]
+    train_ids = [i for i, k in zip(train_ids, resolved) if k]
 
     n_pos, n_neg = int(y_train.sum()), int((1 - y_train).sum())
     counts.update(train_rows=len(y_train), train_pos=n_pos, train_neg=n_neg,
@@ -812,13 +1901,17 @@ def main() -> int:
         loo = json.load(f)
     loo_map = dict(zip(loo["ids"], loo["scores"]))
     overlap = [i for i in seed_ids if i in loo_map]
-    seed_scores = score_with(mu, sd, Vt, w, X_seed)
-    seed_idx = {i: k for k, i in enumerate(seed_ids)}
-    rho_anchor = spearman(np.array([seed_scores[seed_idx[i]] for i in overlap]),
-                          np.array([loo_map[i] for i in overlap]))
+    if overlap:
+        seed_scores = score_with(mu, sd, Vt, w, X_seed)
+        seed_idx = {i: k for k, i in enumerate(seed_ids)}
+        rho_anchor = spearman(
+            np.array([seed_scores[seed_idx[i]] for i in overlap]),
+            np.array([loo_map[i] for i in overlap]))
+    else:
+        rho_anchor = float("nan")     # no seed in this feature space
     counts["rho_vs_loo_anchor"] = round(rho_anchor, 4)
     counts["rho_overlap_n"] = len(overlap)
-    anchor_alert = rho_anchor < args.anchor_rho_alert
+    anchor_alert = bool(overlap) and rho_anchor < args.anchor_rho_alert
 
     prior = float(y_train.mean())
     suggested_tdeep = float(np.quantile(train_scores, 1.0 - prior))
@@ -829,7 +1922,8 @@ def main() -> int:
     gate_fail = gate_out_of_sample(X_train, y_train, ts_train, args.lam, args.pcs,
                                    args.holdout_frac, args.min_holdout,
                                    args.min_auc, gates)
-    inc = load_incumbent(args.out)
+    inc, inc_note = load_incumbent(args.out, feat_dim)
+    gates["incumbent"] = inc_note
     cand_res = inc_res = None
     if len(X_res):
         recent = np.argsort(ts_res, kind="mergesort")[-args.stability_n:]
@@ -841,6 +1935,28 @@ def main() -> int:
     gate_fail += gate_calibration(train_scores, cand_res, inc_res, args.live_tdeep,
                                   args.min_deep_frac, args.max_deep_frac,
                                   args.max_median_shift, gates)
+
+    # ── drift: are the INPUTS still the traffic this probe is for? Compared
+    # across the same temporal cut the AUC gate uses, in the candidate's own
+    # PC basis (drift that the basis cannot see cannot affect the score).
+    fit_i, hold_i = temporal_split(ts_train, args.holdout_frac)
+    P_all = ((X_train - mu) / sd) @ Vt.T
+    b3_ok, b3_note = b3_report_state(args.b3_report, args.b3_max_age_h, t0)
+    drift_fail = gate_drift(
+        P_all[fit_i], P_all[hold_i], prior, unresolved_rate, b3_ok, b3_note,
+        explore_integrity(rows, args.deep_thresh, args.censor_slack), gates,
+        args.max_psi, args.ks_p, args.ks_d, args.prior_lo, args.prior_hi,
+        args.max_unresolved_frac)
+    if args.skip_drift_gate:
+        gates["drift_failed_but_ignored"] = drift_fail
+    else:
+        gate_fail += drift_fail
+
+    # Accuracy monitor: ALERTS only, and computed from `correct`, which is
+    # never a label. Runs on the raw sink so thinking-off rows still count.
+    acc_alerts = accuracy_monitor(raw, args.results_dir, args.live_tdeep,
+                                  args.state, gates, args.acc_alert_drop,
+                                  persist=not args.dry_run)
     counts["gates"] = gates
 
     payload = {
@@ -864,6 +1980,9 @@ def main() -> int:
         "refit_deep_frac": _nan(gates.get("deep_frac_at_live_tdeep")),
         "refit_train_prior": prior,
         "refit_suggested_tdeep": suggested_tdeep,
+        "refit_unresolved_rate": unresolved_rate,
+        "refit_censor_slack": args.censor_slack,
+        "refit_psi_max": _nan(gates.get("psi_max")),
     }
 
     counts["peak_rss_mb"] = round(
@@ -881,6 +2000,9 @@ def main() -> int:
         print(f"[refit] ALERT anchor rho vs router_loo_scores.json "
               f"{rho_anchor:.4f} < {args.anchor_rho_alert} — the candidate has "
               f"walked away from the v1 seed ordering. Not a gate; look at it.")
+    for a in acc_alerts:
+        print(f"[refit] ACCURACY ALERT {a} — `correct` is a MONITOR, never a "
+              f"label (AUC(score->correct) is below 0.5 by design).")
 
     if gate_fail:
         rej = os.path.join(args.state, f"rejected-{time.strftime('%Y%m%d-%H%M%S')}.npz")
@@ -893,9 +2015,49 @@ def main() -> int:
         return EXIT_REJECT
 
     if args.dry_run:
-        print(f"[refit] DRY-RUN ok — would swap {args.out}\n[refit] {json.dumps(report)}")
+        verb = "stage as candidate" if args.promote_mode == "shadow" else "swap"
+        print(f"[refit] DRY-RUN ok — would {verb} {args.out}\n"
+              f"[refit] {json.dumps(report)}")
         return EXIT_OK
 
+    # A candidate the ENGINE cannot load is not a candidate. The router folds
+    # the probe against its own FEAT_DIM, so a width change has to be a
+    # deliberate, announced migration — not a side effect of which sink windows
+    # happened to be on disk this run.
+    live_dim = incumbent_feat_dim(args.out)
+    if (live_dim is not None and live_dim != feat_dim
+            and not args.allow_feat_dim_change):
+        print(f"[refit] REFUSED: the live probe is {live_dim}-dim and this "
+              f"candidate is {feat_dim}-dim (the sink's newest windows). "
+              f"Swapping it in would hand the router a probe in a feature "
+              f"space it does not compute. Re-capture the seed and let the "
+              f"sink refill in the new width, or pass "
+              f"--allow-feat-dim-change if this IS the migration.\n"
+              f"[refit] {json.dumps(report)}")
+        return EXIT_REJECT
+
+    if args.promote_mode == "shadow":
+        # The candidate NEVER routes. It is staged for PN119_PROBE_CANDIDATE,
+        # scores every request alongside the incumbent, and is promoted by a
+        # later run on evidence it could not have influenced.
+        rec = stage_candidate(args.state, payload,
+                              note=f"auc_oos={gates.get('oos_auc')}")
+        with open(cursor_p, "w", encoding="utf-8") as f:
+            json.dump({"schema": 2,
+                       "last_ts_seen": max([r.ts for r in rows],
+                                           default=cursor["last_ts_seen"]),
+                       "files": file_sizes, "ts": t0,
+                       "sha256_16": rec["sha256_16"],
+                       "n_new_consumed": n_new}, f)
+        print(f"[refit] STAGED candidate sha256[:16]={rec['sha256_16']} at "
+              f"{candidate_path(args.state)} — set PN119_PROBE_CANDIDATE to it; "
+              f"the LIVE probe is untouched and promotion needs "
+              f">={args.min_shadow_n} resolved shadow rows plus a paired DeLong "
+              f"win.\n[refit] {json.dumps(report)}")
+        return EXIT_OK
+
+    if os.path.isfile(args.out):
+        shutil.copy2(args.out, prev_p)
     atomic_write_npz(args.out, payload)
     with open(args.out, "rb") as f:
         sha = hashlib.sha256(f.read()).hexdigest()[:16]
