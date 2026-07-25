@@ -177,15 +177,58 @@ def sink_files(d: str):
 
 
 def _strip_ts(meta_bytes: bytes) -> list[dict]:
-    """ts is wall-clock and differs run to run; everything else must match."""
+    """The REQUEST-PATH events, normalised for comparison.
+
+    ts is wall-clock and differs run to run. The boot header line
+    ({"pn119_header": 1, ...}, added 2026-07-25 with the health surface) is
+    not a request-path event at all — it is written once at sink open, before
+    any traffic, so that a sink file with no rows is still attributable to a
+    boot. Every count in this file is about request events, so the header is
+    dropped here and pinned on its own in B0.
+    """
     out = []
     for line in meta_bytes.decode("utf-8").splitlines():
         if not line.strip():
             continue
         m = json.loads(line)
+        if m.get("pn119_header"):
+            continue
         m.pop("ts", None)
         out.append(m)
     return out
+
+
+def _header_lines(meta_bytes: bytes) -> list[dict]:
+    return [json.loads(l) for l in meta_bytes.decode("utf-8").splitlines()
+            if l.strip() and json.loads(l).get("pn119_header")]
+
+
+# ── B0: the boot header line ───────────────────────────────────────────────
+def b0_header(new_mod):
+    """The sink file must identify its boot before the first request.
+
+    Twenty of the forty sink files from 2026-07-25 are 0 bytes, and nothing
+    distinguishes "the tap never fired" from "no traffic arrived" from "the
+    router died on boot" in any of them. The header closes that, which only
+    works if it is on disk IMMEDIATELY — a buffered header would be lost by
+    exactly the crash-looping boots that produced those empty files.
+    """
+    with tempfile.TemporaryDirectory(dir=NEEDFIT) as d:
+        r, _run = new_router(new_mod, PN119_MODE="enforce", PN119_SINK=d,
+                             PN119_TDEEP="0.495", PN119_SINK_BUF_ROWS=1000,
+                             PN119_SINK_BUF_SECS=600)
+        _f, m = sink_files(d)
+        heads = _header_lines(m)
+        check("B0 header is on disk before any request (not buffered)",
+              len(heads) == 1, f"{len(heads)} header lines, {len(m)}B")
+        if heads:
+            h = heads[0]
+            check("B0 header carries the boot identity",
+                  h.get("boot_id") == r.boot_id and h.get("pid") == os.getpid()
+                  and h.get("mode") == "enforce" and "tdeep" in h,
+                  json.dumps(h)[:120])
+        check("B0 header is not a request event", _strip_ts(m) == [])
+        r._sink_close()
 
 
 # ── B1: byte-identical to the unbuffered HEAD module ───────────────────────
@@ -205,6 +248,13 @@ def b1_byte_identical(new_mod, old_mod):
             drive(rn, run_n, n_ok=7, n_miss=3, seed=1)
             drive(ro, run_o, n_ok=7, n_miss=3, seed=1)
             rn._sink_close()
+            # The reference module is whatever is at HEAD, and HEAD has been
+            # buffered since the buffering commit landed — so it must be
+            # drained too or the comparison reads a partially-flushed file and
+            # a different number of bytes on every run. (Without this the check
+            # was silently red from the moment buffering was committed: it was
+            # comparing a drained buffer against a racing one.)
+            ro._sink_close()
             fn, mn = sink_files(dn)
             fo, mo = sink_files(do)
             check(f"B1 {label}: feats bytes identical to HEAD",
@@ -225,9 +275,10 @@ def b2_shutdown_flush(new_mod):
               r in new_mod._SINKS)
         drive(r, run, n_ok=3, seed=2)
         f_pre, m_pre = sink_files(d)
-        check("B2 nothing on disk before shutdown (buffer really is RAM)",
-              len(f_pre) == 0 and len(m_pre) == 0,
-              f"feats={len(f_pre)}B meta={len(m_pre)}B")
+        check("B2 no request event on disk before shutdown (buffer is RAM)",
+              len(f_pre) == 0 and _strip_ts(m_pre) == [],
+              f"feats={len(f_pre)}B meta_events={len(_strip_ts(m_pre))} "
+              f"(+{len(_header_lines(m_pre))} header)")
         buffered = len(r._sbuf_meta)
         new_mod._flush_all_sinks()          # exactly what atexit runs
         f, m = sink_files(d)
@@ -276,7 +327,11 @@ def b4_partial_parses(new_mod):
         drive(r, run, n_ok=5, n_miss=4, seed=3)      # 5+4 interleaved
         r._sink_flush()                              # partial: 18 of 1000
         counts: dict = {}
-        rows = load_sink(d, counts)
+        # load_sink's return shape is owned by the refit lane and has already
+        # changed once (list[Row] -> (rows, sizes)); accept both rather than
+        # crash the whole file — B6/B7 sit behind this call.
+        res = load_sink(d, counts)
+        rows = res[0] if isinstance(res, tuple) else res
         check("B4 load_sink parses the partially-filled flush",
               len(rows) == 5 and sorted(x.req_id for x in rows) ==
               [f"ok{i}" for i in range(5)],
@@ -304,9 +359,11 @@ def b4_partial_parses(new_mod):
         for x in scored:
             k = x["row"]
             row = torch.from_numpy(feats[k].copy()).view(torch.bfloat16).float()
-            ok = ok and abs(float(
-                torch.dot(r.w[:-1], r.vt @ ((row - r.mu) / r.sd)) + r.w[-1])
-                - x["score"]) < 2e-2
+            # The probe is folded to (v, b) at load — mu/sd/Vt10/w stop being
+            # resident, so the staged form this used to re-derive no longer
+            # exists on the router.
+            ok = ok and abs(float(torch.dot(r.pv.float().cpu(), row)) + r.pb
+                            - x["score"]) < 2e-2
         check("B4 row k of feats-*.bin re-scores to meta line k's score",
               ok, "bf16 round-trip within 2e-2")
         r._sink_close()
@@ -374,6 +431,8 @@ def main() -> int:
         old_mod = _load("pn119_router_head", head)
     new_mod = _load("pn119_router_new", os.path.join(HERE, "pn119_router.py"))
 
+    print("== B0 boot header line ==")
+    b0_header(new_mod)
     print("== B1 on-disk bytes identical to the unbuffered router ==")
     b1_byte_identical(new_mod, old_mod)
     print("== B2 shutdown / atexit flush ==")

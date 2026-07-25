@@ -1,0 +1,162 @@
+{"req_id": "chatcmpl-aaf49ad61fd531fc-8bdf4ee4", "row": 0, "score": 0.2540646195411682, "route": "lean", "prompt_tok": 255, "ts": 1784997676.3334053}
+{"req_id": "chatcmpl-aaf49ad61fd531fc-8bdf4ee4", "finish": true, "score": 0.2540646195411682, "generated": 6, "ts": 1784997676.96743}
+{"req_id": "chatcmpl-978d7c35fdc0bec9-b67c25e8", "row": 1, "score": 0.16097387671470642, "route": "lean", "prompt_tok": 127, "ts": 1784997677.0296545}
+{"req_id": "chatcmpl-978d7c35fdc0bec9-b67c25e8", "finish": true, "score": 0.16097387671470642, "generated": 321, "ts": 1784997680.8624003}
+{"req_id": "chatcmpl-b27519020fb29101-b3c0fec4", "row": 2, "score": 0.44168514013290405, "route": "lean", "prompt_tok": 355, "ts": 1784997680.9962718}
+{"req_id": "chatcmpl-b27519020fb29101-b3c0fec4", "finish": true, "score": 0.44168514013290405, "generated": 948, "ts": 1784997692.5287094}
+{"req_id": "chatcmpl-99b3c22a7d5d28e9-a83c96db", "row": 3, "score": 0.2457617223262787, "route": "lean", "prompt_tok": 250, "ts": 1784997692.6284099}
+{"req_id": "chatcmpl-99b3c22a7d5d28e9-a83c96db", "finish": true, "score": 0.2457617223262787, "generated": 6, "ts": 1784997692.7439325}
+{"req_id": "chatcmpl-bb889aa5a36ba7bb-a6b7424f", "row": 4, "score": 0.17982876300811768, "route": "lean", "prompt_tok": 121, "ts": 1784997692.8020668}
+{"req_id": "chatcmpl-bb889aa5a36ba7bb-a6b7424f", "finish": true, "score": 0.17982876300811768, "generated": 319, "ts": 1784997697.0403373}
+{"req_id": "chatcmpl-91fa40a6e8560c28-a822a1bd", "row": 5, "score": 0.3127886652946472, "route": "lean", "prompt_tok": 96, "ts": 1784997697.0912013}
+{"req_id": "chatcmpl-91fa40a6e8560c28-a822a1bd", "finish": true, "score": 0.3127886652946472, "generated": 17, "ts": 1784997697.341103}
+{"req_id": "chatcmpl-a41af4e150c1ae12-b2fc573c", "row": 6, "score": 0.26386725902557373, "route": "lean", "prompt_tok": 246, "ts": 1784997697.4395318}
+{"req_id": "chatcmpl-a41af4e150c1ae12-b2fc573c", "finish": true, "score": 0.26386725902557373, "generated": 6, "ts": 1784997697.5549178}
+{"req_id": "chatcmpl-88c0a56345a96b2b-99453673", "row": 7, "score": 0.20078888535499573, "route": "lean", "prompt_tok": 117, "ts": 1784997697.6129096}
+{"req_id": "chatcmpl-88c0a56345a96b2b-99453673", "finish": true, "score": 0.20078888535499573, "generated": 318, "ts": 1784997700.8141668}
+{"req_id": "chatcmpl-8206aac72eeac366-ac9c8035", "row": 8, "score": 0.37603405117988586, "route": "lean", "prompt_tok": 345, "ts": 1784997700.942824}
+{"req_id": "chatcmpl-8206aac72eeac366-ac9c8035", "finish": true, "score": 0.37603405117988586, "generated": 843, "ts": 1784997710.2795298}
+{"req_id": "chatcmpl-a2ec228a4ceff9b2-8a2f13fc", "row": 9, "score": 0.2574072480201721, "route": "lean", "prompt_tok": 255, "ts": 1784997710.3794417}
+{"req_id": "chatcmpl-a2ec228a4ceff9b2-8a2f13fc", "finish": true, "score": 0.2574072480201721, "generated": 6, "ts": 1784997710.4955807}
+{"req_id": "chatcmpl-99f98b7f274a9a12-ae8c4e8d", "row": 10, "score": 0.169902503490448, "route": "lean", "prompt_tok": 127, "ts": 1784997710.553623}
+{"req_id": "chatcmpl-99f98b7f274a9a12-ae8c4e8d", "finish": true, "score": 0.169902503490448, "generated": 318, "ts": 1784997714.556678}
+{"req_id": "chatcmpl-a543e036fbc81c35-8fc45957", "row": 11, "score": 0.40645456314086914, "route": "lean", "prompt_tok": 354, "ts": 1784997714.6886847}
+{"req_id": "chatcmpl-a543e036fbc81c35-8fc45957", "finish": true, "score": 0.40645456314086914, "generated": 1093, "ts": 1784997728.0176315}
+{"req_id": "chatcmpl-93436e563186db36-9c094377", "row": 12, "score": 0.24929340183734894, "route": "lean", "prompt_tok": 250, "ts": 1784997728.1163867}
+{"req_id": "chatcmpl-93436e563186db36-9c094377", "finish": true, "score": 0.24929340183734894, "generated": 6, "ts": 1784997728.2317967}
+{"req_id": "chatcmpl-a0faf4012c3062b5-97b2ded2", "row": 13, "score": 0.18437135219573975, "route": "lean", "prompt_tok": 121, "ts": 1784997728.289233}
+{"req_id": "chatcmpl-a0faf4012c3062b5-97b2ded2", "finish": true, "score": 0.18437135219573975, "generated": 320, "ts": 1784997732.6721988}
+{"req_id": "chatcmpl-be9ec56ebcb59a51-adfcfb9b", "row": 14, "score": 0.24273350834846497, "route": "lean", "prompt_tok": 46, "ts": 1784997732.7172785}
+{"req_id": "chatcmpl-be9ec56ebcb59a51-adfcfb9b", "finish": true, "score": 0.24273350834846497, "generated": 14, "ts": 1784997733.002466}
+{"req_id": "chatcmpl-ad5b74a32b72f042-b713c5b7", "row": 15, "score": 0.2647240459918976, "route": "lean", "prompt_tok": 246, "ts": 1784997733.0996754}
+{"req_id": "chatcmpl-ad5b74a32b72f042-b713c5b7", "finish": true, "score": 0.2647240459918976, "generated": 6, "ts": 1784997733.2150862}
+{"req_id": "chatcmpl-8ac4a1b538300bb0-97387673", "row": 16, "score": 0.1990058720111847, "route": "lean", "prompt_tok": 117, "ts": 1784997733.2727373}
+{"req_id": "chatcmpl-8ac4a1b538300bb0-97387673", "finish": true, "score": 0.1990058720111847, "generated": 319, "ts": 1784997736.7614877}
+{"req_id": "chatcmpl-8fe264e857140f03-848cf0ed", "row": 17, "score": 0.3662962317466736, "route": "lean", "prompt_tok": 343, "ts": 1784997736.8908527}
+{"req_id": "chatcmpl-8fe264e857140f03-848cf0ed", "finish": true, "score": 0.3662962317466736, "generated": 1435, "ts": 1784997753.2012713}
+{"req_id": "chatcmpl-8b40944dc1f1f03f-b72b08c8", "row": 18, "score": 0.2550984025001526, "route": "lean", "prompt_tok": 256, "ts": 1784997753.3000202}
+{"req_id": "chatcmpl-8b40944dc1f1f03f-b72b08c8", "finish": true, "score": 0.2550984025001526, "generated": 6, "ts": 1784997753.4156203}
+{"req_id": "chatcmpl-94d6798b669362ce-99c80fb1", "row": 19, "score": 0.23992261290550232, "route": "lean", "prompt_tok": 198, "ts": 1784997753.500922}
+{"req_id": "chatcmpl-94d6798b669362ce-99c80fb1", "finish": true, "score": 0.23992261290550232, "generated": 23, "ts": 1784997753.7596295}
+{"req_id": "chatcmpl-a0cccbf04ee9f889-9ddf61c3", "row": 20, "score": 0.4049682319164276, "route": "lean", "prompt_tok": 2316, "ts": 1784997768.1403306}
+{"req_id": "chatcmpl-a0cccbf04ee9f889-9ddf61c3", "finish": true, "score": 0.4049682319164276, "generated": 6, "ts": 1784997768.26991}
+{"req_id": "chatcmpl-8600363ee8ee73d7-81fd3903", "row": 21, "score": 0.41636162996292114, "route": "lean", "prompt_tok": 3437, "ts": 1784997769.4435704}
+{"req_id": "chatcmpl-8600363ee8ee73d7-81fd3903", "finish": true, "score": 0.41636162996292114, "generated": 621, "ts": 1784997776.8642793}
+{"req_id": "chatcmpl-a51be5c5a1d79012-9e5254ce", "row": 22, "score": 0.41636162996292114, "route": "lean", "prompt_tok": 3437, "ts": 1784997778.0437245}
+{"req_id": "chatcmpl-9c6a7aa3cb662ca5-9646e3ed", "row": 23, "score": 0.42567408084869385, "route": "lean", "prompt_tok": 2386, "ts": 1784997779.6915684}
+{"req_id": "chatcmpl-ae97e9fac99b20de-afe3066a", "row": 24, "score": 0.4286326766014099, "route": "lean", "prompt_tok": 2386, "ts": 1784997781.0499046}
+{"req_id": "chatcmpl-af71c8bc67d1c078-ba2dec7f", "row": 25, "score": 0.4257424473762512, "route": "lean", "prompt_tok": 2366, "ts": 1784997781.0503101}
+{"req_id": "chatcmpl-9c6a7aa3cb662ca5-9646e3ed", "finish": true, "score": 0.42567408084869385, "generated": 6, "ts": 1784997781.1718886}
+{"req_id": "chatcmpl-af71c8bc67d1c078-ba2dec7f", "finish": true, "score": 0.4257424473762512, "generated": 6, "ts": 1784997781.2162974}
+{"req_id": "chatcmpl-ae97e9fac99b20de-afe3066a", "finish": true, "score": 0.4286326766014099, "generated": 6, "ts": 1784997781.2163491}
+{"req_id": "chatcmpl-a65fc6381fedb87d-906c4503", "row": 26, "score": 0.4384160041809082, "route": "lean", "prompt_tok": 4016, "ts": 1784997782.624205}
+{"req_id": "chatcmpl-bcca9bdd62291662-8d26eff2", "row": 27, "score": 0.4381047189235687, "route": "lean", "prompt_tok": 4016, "ts": 1784997784.0909045}
+{"req_id": "chatcmpl-bd636842f9a3786f-b89c9761", "row": 28, "score": 0.4483180046081543, "route": "lean", "prompt_tok": 3974, "ts": 1784997785.4989924}
+{"req_id": "chatcmpl-a51be5c5a1d79012-9e5254ce", "finish": true, "score": 0.41636162996292114, "generated": 610, "ts": 1784997794.29588}
+{"req_id": "chatcmpl-93acc6d596d405f9-8b8cdbc9", "row": 29, "score": 0.4178336262702942, "route": "lean", "prompt_tok": 2355, "ts": 1784997795.1659534}
+{"req_id": "chatcmpl-93acc6d596d405f9-8b8cdbc9", "finish": true, "score": 0.4178336262702942, "generated": 6, "ts": 1784997795.3464222}
+{"req_id": "chatcmpl-b5121b6573a809b8-b441d486", "row": 30, "score": 0.4405670166015625, "route": "lean", "prompt_tok": 3780, "ts": 1784997796.7175658}
+{"req_id": "chatcmpl-a65fc6381fedb87d-906c4503", "finish": true, "score": 0.4384160041809082, "generated": 3142, "ts": 1784997838.1507576}
+{"req_id": "chatcmpl-b6281c4faa5eee81-aa946751", "row": 31, "score": 0.4201643466949463, "route": "lean", "prompt_tok": 2347, "ts": 1784997839.031524}
+{"req_id": "chatcmpl-b6281c4faa5eee81-aa946751", "finish": true, "score": 0.4201643466949463, "generated": 6, "ts": 1784997839.231683}
+{"req_id": "chatcmpl-9494edb50bb7a032-89c9632c", "row": 32, "score": 0.43985676765441895, "route": "lean", "prompt_tok": 3639, "ts": 1784997840.5667694}
+{"req_id": "chatcmpl-bcca9bdd62291662-8d26eff2", "finish": true, "score": 0.4381047189235687, "generated": 4382, "ts": 1784997858.7565463}
+{"req_id": "chatcmpl-852c66ff3ad478b9-98aa6f1d", "row": 33, "score": 0.4213990867137909, "route": "lean", "prompt_tok": 2397, "ts": 1784997859.6546402}
+{"req_id": "chatcmpl-852c66ff3ad478b9-98aa6f1d", "finish": true, "score": 0.4213990867137909, "generated": 6, "ts": 1784997859.8546066}
+{"req_id": "chatcmpl-a1f576029a014891-8beef25d", "row": 34, "score": 0.44200241565704346, "route": "lean", "prompt_tok": 3715, "ts": 1784997861.2140486}
+{"req_id": "chatcmpl-bd636842f9a3786f-b89c9761", "finish": true, "score": 0.4483180046081543, "generated": 5292, "ts": 1784997877.4493568}
+{"req_id": "chatcmpl-9dafccc90ce99f70-b08aa725", "row": 35, "score": 0.4245603680610657, "route": "lean", "prompt_tok": 2474, "ts": 1784997878.3726797}
+{"req_id": "chatcmpl-9dafccc90ce99f70-b08aa725", "finish": true, "score": 0.4245603680610657, "generated": 6, "ts": 1784997878.568746}
+{"req_id": "chatcmpl-8985a081b011d3f5-9e4bdc46", "row": 36, "score": 0.441579133272171, "route": "lean", "prompt_tok": 3821, "ts": 1784997879.962185}
+{"req_id": "chatcmpl-b5121b6573a809b8-b441d486", "finish": true, "score": 0.4405670166015625, "generated": 5665, "ts": 1784997899.5894463}
+{"req_id": "chatcmpl-9494edb50bb7a032-89c9632c", "finish": true, "score": 0.43985676765441895, "generated": 3703, "ts": 1784997907.8573782}
+{"req_id": "chatcmpl-a1f576029a014891-8beef25d", "finish": true, "score": 0.44200241565704346, "generated": 3118, "ts": 1784997911.4632666}
+{"req_id": "chatcmpl-8985a081b011d3f5-9e4bdc46", "finish": true, "score": 0.441579133272171, "generated": 4231, "ts": 1784997936.6166143}
+{"req_id": "chatcmpl-a1da3f70d1943f12-904dce45", "row": 37, "score": 0.4242100417613983, "route": "lean", "prompt_tok": 2474, "ts": 1784997937.4675846}
+{"req_id": "chatcmpl-aa0d60e497a6fda1-b12e90dc", "row": 38, "score": 0.43143510818481445, "route": "lean", "prompt_tok": 2379, "ts": 1784997938.9093773}
+{"req_id": "chatcmpl-bd32a02f045d72c6-84a88a86", "row": 39, "score": 0.4282524287700653, "route": "lean", "prompt_tok": 2405, "ts": 1784997939.9944358}
+{"req_id": "chatcmpl-a400bde76f203ffb-89e4d9db", "row": 40, "score": 0.42478635907173157, "route": "lean", "prompt_tok": 2354, "ts": 1784997939.9948246}
+{"req_id": "chatcmpl-a1da3f70d1943f12-904dce45", "finish": true, "score": 0.4242100417613983, "generated": 7, "ts": 1784997940.0635083}
+{"req_id": "chatcmpl-aa0d60e497a6fda1-b12e90dc", "finish": true, "score": 0.43143510818481445, "generated": 7, "ts": 1784997940.1048326}
+{"req_id": "chatcmpl-966593e4352746c4-85e78632", "row": 41, "score": 0.44157150387763977, "route": "lean", "prompt_tok": 3821, "ts": 1784997941.4466374}
+{"req_id": "chatcmpl-a400bde76f203ffb-89e4d9db", "finish": true, "score": 0.42478635907173157, "generated": 6, "ts": 1784997941.4797192}
+{"req_id": "chatcmpl-bd32a02f045d72c6-84a88a86", "finish": true, "score": 0.4282524287700653, "generated": 6, "ts": 1784997941.4797964}
+{"req_id": "chatcmpl-86f088d8cc7de93e-8cf29b7c", "row": 42, "score": 0.4386245906352997, "route": "lean", "prompt_tok": 3755, "ts": 1784997942.7939343}
+{"req_id": "chatcmpl-be5f3f88265c0cb3-953ea29f", "row": 43, "score": 0.4513685703277588, "route": "lean", "prompt_tok": 3855, "ts": 1784997944.265792}
+{"req_id": "chatcmpl-bc88539ec634e38f-9477809a", "row": 44, "score": 0.43219512701034546, "route": "lean", "prompt_tok": 3706, "ts": 1784997945.5104227}
+{"req_id": "chatcmpl-966593e4352746c4-85e78632", "finish": true, "score": 0.44157150387763977, "generated": 1929, "ts": 1784997976.2913623}
+{"req_id": "chatcmpl-8d7f74e57e943026-b7d5fb5b", "row": 45, "score": 0.4278663992881775, "route": "lean", "prompt_tok": 2401, "ts": 1784997977.184808}
+{"req_id": "chatcmpl-8d7f74e57e943026-b7d5fb5b", "finish": true, "score": 0.4278663992881775, "generated": 6, "ts": 1784997977.375073}
+{"req_id": "chatcmpl-ab4d7560dd5ec619-a2cde63c", "row": 46, "score": 0.44464918971061707, "route": "lean", "prompt_tok": 3891, "ts": 1784997978.7973402}
+{"req_id": "chatcmpl-bc88539ec634e38f-9477809a", "finish": true, "score": 0.43219512701034546, "generated": 3509, "ts": 1784998004.6470478}
+{"req_id": "chatcmpl-920fbc63cc0a6db7-aeeb3781", "row": 47, "score": 0.42783719301223755, "route": "lean", "prompt_tok": 2401, "ts": 1784998005.55603}
+{"req_id": "chatcmpl-920fbc63cc0a6db7-aeeb3781", "finish": true, "score": 0.42783719301223755, "generated": 6, "ts": 1784998005.75433}
+{"req_id": "chatcmpl-9632943eaf6f790e-b14f1c6b", "row": 48, "score": 0.44477713108062744, "route": "lean", "prompt_tok": 3891, "ts": 1784998007.184893}
+{"req_id": "chatcmpl-ab4d7560dd5ec619-a2cde63c", "finish": true, "score": 0.44464918971061707, "generated": 1974, "ts": 1784998012.8339868}
+{"req_id": "chatcmpl-a11e1eed20751afd-a38f7a86", "row": 49, "score": 0.4246394634246826, "route": "lean", "prompt_tok": 2372, "ts": 1784998013.726882}
+{"req_id": "chatcmpl-a11e1eed20751afd-a38f7a86", "finish": true, "score": 0.4246394634246826, "generated": 6, "ts": 1784998013.9269087}
+{"req_id": "chatcmpl-af5c573d6fa183cf-99f1a332", "row": 50, "score": 0.4417073130607605, "route": "lean", "prompt_tok": 3732, "ts": 1784998015.3037431}
+{"req_id": "chatcmpl-86f088d8cc7de93e-8cf29b7c", "finish": true, "score": 0.4386245906352997, "generated": 5179, "ts": 1784998034.1785727}
+{"req_id": "chatcmpl-9aa61164732846e7-827400f9", "row": 51, "score": 0.4248858690261841, "route": "lean", "prompt_tok": 2436, "ts": 1784998035.0907464}
+{"req_id": "chatcmpl-9aa61164732846e7-827400f9", "finish": true, "score": 0.4248858690261841, "generated": 6, "ts": 1784998035.2900577}
+{"req_id": "chatcmpl-b698820fcd83e45a-94afd5fd", "row": 52, "score": 0.4460310637950897, "route": "lean", "prompt_tok": 3861, "ts": 1784998036.7099469}
+{"req_id": "chatcmpl-be5f3f88265c0cb3-953ea29f", "finish": true, "score": 0.4513685703277588, "generated": 5454, "ts": 1784998040.309484}
+{"req_id": "chatcmpl-af5c573d6fa183cf-99f1a332", "finish": true, "score": 0.4417073130607605, "generated": 1919, "ts": 1784998048.2694063}
+{"req_id": "chatcmpl-9632943eaf6f790e-b14f1c6b", "finish": true, "score": 0.44477713108062744, "generated": 5912, "ts": 1784998092.6325674}
+{"req_id": "chatcmpl-b698820fcd83e45a-94afd5fd", "finish": true, "score": 0.4460310637950897, "generated": 5302, "ts": 1784998103.9806006}
+{"req_id": "chatcmpl-ad83522d3c652a58-9baefa05", "row": 53, "score": 0.4224051237106323, "route": "lean", "prompt_tok": 2418, "ts": 1784998104.8144355}
+{"req_id": "chatcmpl-a24340cd68803374-bbc0bf2c", "row": 54, "score": 0.42858606576919556, "route": "lean", "prompt_tok": 2409, "ts": 1784998106.2507267}
+{"req_id": "chatcmpl-96adda7920afa580-a2612871", "row": 55, "score": 0.4304113984107971, "route": "lean", "prompt_tok": 2402, "ts": 1784998107.3602798}
+{"req_id": "chatcmpl-91aaf4c1c9f42b91-bb5e6b07", "row": 56, "score": 0.42767399549484253, "route": "lean", "prompt_tok": 2402, "ts": 1784998107.360683}
+{"req_id": "chatcmpl-a24340cd68803374-bbc0bf2c", "finish": true, "score": 0.42858606576919556, "generated": 6, "ts": 1784998107.4745927}
+{"req_id": "chatcmpl-ad83522d3c652a58-9baefa05", "finish": true, "score": 0.4224051237106323, "generated": 7, "ts": 1784998107.4746535}
+{"req_id": "chatcmpl-96adda7920afa580-a2612871", "finish": true, "score": 0.4304113984107971, "generated": 6, "ts": 1784998107.5128453}
+{"req_id": "chatcmpl-91aaf4c1c9f42b91-bb5e6b07", "finish": true, "score": 0.42767399549484253, "generated": 6, "ts": 1784998107.512927}
+{"req_id": "chatcmpl-9489bdd980e48811-8f60baaf", "row": 57, "score": 0.4481974244117737, "route": "lean", "prompt_tok": 3787, "ts": 1784998108.9267485}
+{"req_id": "chatcmpl-996f4f45cd3ef99c-8fd438bd", "row": 58, "score": 0.4481472969055176, "route": "lean", "prompt_tok": 3767, "ts": 1784998110.3839126}
+{"req_id": "chatcmpl-9d6d6af2f9b2bf94-bae08846", "row": 59, "score": 0.4527878761291504, "route": "lean", "prompt_tok": 3871, "ts": 1784998111.8512723}
+{"req_id": "chatcmpl-90b5425f425e7063-807937e6", "row": 60, "score": 0.4528912603855133, "route": "lean", "prompt_tok": 3871, "ts": 1784998112.920951}
+{"req_id": "chatcmpl-996f4f45cd3ef99c-8fd438bd", "finish": true, "score": 0.4481472969055176, "generated": 2842, "ts": 1784998155.0647948}
+{"req_id": "chatcmpl-87140a708ed913b6-bb8221c3", "row": 61, "score": 0.4198935627937317, "route": "lean", "prompt_tok": 2375, "ts": 1784998155.9557576}
+{"req_id": "chatcmpl-87140a708ed913b6-bb8221c3", "finish": true, "score": 0.4198935627937317, "generated": 6, "ts": 1784998156.151853}
+{"req_id": "chatcmpl-9e8c1173d823f904-b2046fc7", "row": 62, "score": 0.4376360774040222, "route": "lean", "prompt_tok": 3758, "ts": 1784998157.528955}
+{"req_id": "chatcmpl-9489bdd980e48811-8f60baaf", "finish": true, "score": 0.4481974244117737, "generated": 3617, "ts": 1784998173.8280191}
+{"req_id": "chatcmpl-bedb25fdc73d317b-82e25e91", "row": 63, "score": 0.4109378755092621, "route": "lean", "prompt_tok": 2287, "ts": 1784998174.6872382}
+{"req_id": "chatcmpl-bedb25fdc73d317b-82e25e91", "finish": true, "score": 0.4109378755092621, "generated": 6, "ts": 1784998174.8841288}
+{"req_id": "chatcmpl-ad147658ad934031-9ed71428", "row": 64, "score": 0.42515885829925537, "route": "lean", "prompt_tok": 4047, "ts": 1784998176.3726566}
+{"req_id": "chatcmpl-90b5425f425e7063-807937e6", "finish": true, "score": 0.4528912603855133, "generated": 4331, "ts": 1784998187.6449122}
+{"req_id": "chatcmpl-85cc8c2725a3ceae-9a5b78cd", "row": 65, "score": 0.40424880385398865, "route": "lean", "prompt_tok": 2338, "ts": 1784998188.518462}
+{"req_id": "chatcmpl-85cc8c2725a3ceae-9a5b78cd", "finish": true, "score": 0.40424880385398865, "generated": 6, "ts": 1784998188.7157552}
+{"req_id": "chatcmpl-8a197cad493946de-97794aaf", "row": 66, "score": 0.4247434437274933, "route": "lean", "prompt_tok": 4165, "ts": 1784998190.3532846}
+{"req_id": "chatcmpl-9d6d6af2f9b2bf94-bae08846", "finish": true, "score": 0.4527878761291504, "generated": 4957, "ts": 1784998196.5584738}
+{"req_id": "chatcmpl-ab2116c9dbe9845d-83a29a0b", "row": 67, "score": 0.41368192434310913, "route": "lean", "prompt_tok": 2409, "ts": 1784998197.4720597}
+{"req_id": "chatcmpl-ab2116c9dbe9845d-83a29a0b", "finish": true, "score": 0.41368192434310913, "generated": 6, "ts": 1784998197.6579607}
+{"req_id": "chatcmpl-b7a11246719960d1-9fc0c797", "row": 68, "score": 0.43796226382255554, "route": "lean", "prompt_tok": 4234, "ts": 1784998199.2942874}
+{"req_id": "chatcmpl-ad147658ad934031-9ed71428", "finish": true, "score": 0.42515885829925537, "generated": 2715, "ts": 1784998227.9127042}
+{"req_id": "chatcmpl-8a197cad493946de-97794aaf", "finish": true, "score": 0.4247434437274933, "generated": 3053, "ts": 1784998243.9009268}
+{"req_id": "chatcmpl-b7a11246719960d1-9fc0c797", "finish": true, "score": 0.43796226382255554, "generated": 2803, "ts": 1784998244.688991}
+{"req_id": "chatcmpl-9e8c1173d823f904-b2046fc7", "finish": true, "score": 0.4376360774040222, "generated": 5227, "ts": 1784998246.953697}
+{"req_id": "chatcmpl-9974a55ad55eb518-98895b95", "row": 69, "score": 0.41404324769973755, "route": "lean", "prompt_tok": 2438, "ts": 1784998247.7978528}
+{"req_id": "chatcmpl-b7b31cd8cec4063d-8c60b576", "row": 70, "score": 0.4187471568584442, "route": "lean", "prompt_tok": 2421, "ts": 1784998249.2367244}
+{"req_id": "chatcmpl-94d4a018116a35ba-92714912", "row": 71, "score": 0.4148114025592804, "route": "lean", "prompt_tok": 2396, "ts": 1784998250.377487}
+{"req_id": "chatcmpl-ad1e1e625b1884eb-be2e27ba", "row": 72, "score": 0.4237416982650757, "route": "lean", "prompt_tok": 2477, "ts": 1784998250.3779173}
+{"req_id": "chatcmpl-9974a55ad55eb518-98895b95", "finish": true, "score": 0.41404324769973755, "generated": 6, "ts": 1784998250.4481604}
+{"req_id": "chatcmpl-b7b31cd8cec4063d-8c60b576", "finish": true, "score": 0.4187471568584442, "generated": 6, "ts": 1784998250.489724}
+{"req_id": "chatcmpl-ad1e1e625b1884eb-be2e27ba", "finish": true, "score": 0.4237416982650757, "generated": 6, "ts": 1784998251.9764893}
+{"req_id": "chatcmpl-94d4a018116a35ba-92714912", "finish": true, "score": 0.4148114025592804, "generated": 7, "ts": 1784998251.9765606}
+{"req_id": "chatcmpl-a445a105011c1b1c-9ad1c62f", "row": 73, "score": 0.43676865100860596, "route": "lean", "prompt_tok": 4255, "ts": 1784998253.3960066}
+{"req_id": "chatcmpl-9e9f604e7ac24ef8-ad742d9e", "row": 74, "score": 0.4421270787715912, "route": "lean", "prompt_tok": 4197, "ts": 1784998254.914654}
+{"req_id": "chatcmpl-a67112b4559ed674-bf6b9b16", "row": 75, "score": 0.4509057104587555, "route": "lean", "prompt_tok": 4191, "ts": 1784998256.4197001}
+{"req_id": "chatcmpl-84b0eed99ba47b94-9ce4d1a5", "row": 76, "score": 0.4554375410079956, "route": "lean", "prompt_tok": 4264, "ts": 1784998256.64784}
+{"req_id": "chatcmpl-a445a105011c1b1c-9ad1c62f", "finish": true, "score": 0.43676865100860596, "generated": 2434, "ts": 1784998295.5623286}
+{"req_id": "chatcmpl-b7e691b71457d224-a48c9497", "row": 77, "score": 0.4072180986404419, "route": "lean", "prompt_tok": 2380, "ts": 1784998296.4540217}
+{"req_id": "chatcmpl-b7e691b71457d224-a48c9497", "finish": true, "score": 0.4072180986404419, "generated": 6, "ts": 1784998296.650886}
+{"req_id": "chatcmpl-bbdc8164bccd6846-94a2fd4f", "row": 78, "score": 0.4344712793827057, "route": "lean", "prompt_tok": 3800, "ts": 1784998298.0389621}
+{"req_id": "chatcmpl-9e9f604e7ac24ef8-ad742d9e", "finish": true, "score": 0.4421270787715912, "generated": 2465, "ts": 1784998299.7757497}
+{"req_id": "chatcmpl-b2a597ba7cdac202-90ffc8b3", "row": 79, "score": 0.41087114810943604, "route": "lean", "prompt_tok": 2312, "ts": 1784998300.641623}
+{"req_id": "chatcmpl-b2a597ba7cdac202-90ffc8b3", "finish": true, "score": 0.41087114810943604, "generated": 7, "ts": 1784998300.8357368}
+{"req_id": "chatcmpl-8b599c3da4158887-863e01a8", "row": 80, "score": 0.4212675094604492, "route": "lean", "prompt_tok": 4154, "ts": 1784998302.455492}
+{"req_id": "chatcmpl-84b0eed99ba47b94-9ce4d1a5", "finish": true, "score": 0.4554375410079956, "generated": 2788, "ts": 1784998305.5633378}
+{"req_id": "chatcmpl-a67112b4559ed674-bf6b9b16", "finish": true, "score": 0.4509057104587555, "generated": 3832, "ts": 1784998319.285606}
+{"req_id": "chatcmpl-bbdc8164bccd6846-94a2fd4f", "finish": true, "score": 0.4344712793827057, "generated": 1809, "ts": 1784998326.954617}
+{"req_id": "chatcmpl-8b599c3da4158887-863e01a8", "finish": true, "score": 0.4212675094604492, "generated": 2580, "ts": 1784998337.9761055}

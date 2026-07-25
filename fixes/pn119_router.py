@@ -108,6 +108,43 @@ router hot-reloads it on (mtime,size) change — PN119_RELOAD_S throttle,
 no restart. PN119_EXPLORE=<frac> flags a deterministic ~frac of requests
 for generous caps in enforce mode so labels stay uncensored (EXPLORE set).
 
+HEALTH SURFACE (PN119_HEALTH, added 2026-07-25 — read this before touching it)
+------------------------------------------------------------------------------
+Every failure this module has actually had was SILENT. Five boots on
+2026-07-25 ran degenerate — two pinned at 100% deep, three at 0% deep — and
+none of them was noticed for hours; they were found by reading the sink
+offline the next evening. The consumer's day-long no-op (it deferred to PN100
+on 100% of requests) presented as a perfectly healthy boot with every counter
+incrementing. STATS was already a good counter dict; the gap was that nothing
+outside this process could read it.
+
+So the router now publishes `health.json` (PN119_HEALTH, default
+<PN119_SINK>/health.json) containing the counters, derived rates, probe and
+consumer identity, and — the actual product — a list of ALARMS with a
+designed trigger condition each (see `_ALARM_*` constants and `pn119_alarms`).
+Three properties are load-bearing:
+  * It is written ATOMICALLY (temp + os.replace), so a reader never sees a
+    torn file and never needs a lock.
+  * It is written FROM THE EXISTING SINK FLUSHER THREAD, which already wakes
+    every PN119_SINK_BUF_SECS. The request path gains nothing at all — not a
+    syscall, not a timestamp, not a branch. Timestamps that would otherwise
+    cost the request path (first/last scored) are DERIVED by the flusher from
+    watching the counters move, and are therefore quantised to buf_secs.
+  * A failure to write it can never touch a request: the writer is guarded
+    and self-disables after repeated failure, exactly like the sink.
+The sink also gets a HEADER LINE at open ({"pn119_header": 1, boot_id, pid,
+mode, ...}). Until now a 0-byte meta-*.jsonl was ambiguous between "the tap
+never fired", "no traffic arrived" and "the router never started"; a
+header-only file now means unambiguously "the router started and nothing was
+ever scored". refit_pn119_probe.load_sink ignores the line (it keys on "row"
+and "finish"), and skips such files anyway on the 0-byte feats pair.
+
+`fixes/pn119_doctor.py` (installed as `~/bin/pn119-doctor`, symlink) renders
+health.json, adds the alarms only a reader can raise (file missing, stale,
+from a previous boot) and exits non-zero when any alarm is live. It is stdlib
+only and imports nothing from this module: it has to run on a box with no
+torch, and it must never be the reason a diagnosis cannot be made.
+
 Never raises into serving: every entry point is fully guarded.
 """
 from __future__ import annotations
@@ -117,10 +154,13 @@ import collections
 import hashlib
 import json
 import logging
+import math
 import os
+import socket
 import sys
 import threading
 import time
+import uuid
 import weakref
 
 import torch
@@ -192,6 +232,507 @@ def stats_line() -> str:
     return " ".join(f"{k}={v}" for k, v in sorted(STATS.items()))
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# HEALTH SURFACE + ALARMS
+# ═══════════════════════════════════════════════════════════════════════════
+# Everything below is PURE (no torch, no router instance, no I/O) so that it
+# can be replayed over historical sink data on a CPU-only box —
+# fixes/test_pn119_alarms.py does exactly that against the 2026-07-25 boots,
+# including the five degenerate ones. An alarm whose trigger cannot be
+# re-derived offline from recorded data is an alarm nobody can trust.
+
+HEALTH_SCHEMA = "pn119.health/1"
+
+# ── the intended operating band ────────────────────────────────────────────
+# The lens probe was trained and the deep/lean split was sized for roughly a
+# quarter to a third of traffic taking the deep path (PN119-BUILD-PACK: the
+# 25-to-v5 / 75-to-v3 result). A live shadow boot at tdeep=0.495 measured
+# 31/100 deep, dead centre. The band is therefore a DESIGN band, not a
+# measurement tolerance: leaving it means the score distribution has moved
+# relative to the threshold, and the saving the router exists to produce is
+# either not being taken (too much deep) or is being taken at the accuracy
+# line's expense (too much lean).
+_ALARM_BAND_LO = 0.25
+_ALARM_BAND_HI = 0.35
+
+# DEEP_FRAC_OUT_OF_BAND uses a 95% Wilson interval rather than the point
+# estimate, so a boot is only accused of drifting once the data can carry the
+# accusation. This is what keeps a fresh boot quiet: at n=4 with 0 deep the
+# interval is [0.00, 0.49] and overlaps the band, so nothing fires; at n=61
+# with 8 deep it is [0.07, 0.22], entirely below 0.25, and it fires. The
+# floor below is belt-and-braces for pathological tiny-n cases.
+_ALARM_Z = 1.96
+_ALARM_BAND_MIN_N = 20
+
+# DEEP_FRAC_DEGENERATE is the stronger, blunter claim: EVERY scored request
+# went the same way. That is not a calibration question, it is the signature
+# of a broken probe / threshold / feature vector, and it is what four of the
+# five 2026-07-25 degenerate boots looked like (the fifth was 12-for-12 deep).
+# Minimum sample 12: at the band's own lean-side rate (~0.70) the chance of 12
+# consecutive lean routes on a HEALTHY router is 0.70^12 = 1.4%, and such a
+# false positive self-clears on the very next deep request. The cost of the
+# other error — missing it — was measured at one working day. 12 also happens
+# to be the smallest degenerate boot in the history, which is not a
+# coincidence: a threshold that cannot catch the smallest real instance of the
+# failure it is named after is decoration.
+_ALARM_DEGENERATE_MIN_N = 12
+
+# CONSUMER_* need "meaningful traffic" before they can distinguish "never
+# applied" from "not applied yet". 20 decisions is ~2 minutes of bench traffic
+# and is far beyond the longest legitimate warm-up (a request is decided
+# within its own prefill).
+_ALARM_CONSUMER_MIN_N = 20
+
+# FALLBACK_STORM. Every historical boot ran at a 0% unscoreable rate (prefix
+# caching is off — BUG-131), so any sustained double-digit fallback rate is a
+# regime change, not noise. It matters because the fallback route is "deep":
+# a storm means the router is quietly buying the champion's cost for every
+# request while reporting itself alive.
+_ALARM_FALLBACK_RATE = 0.20
+_ALARM_FALLBACK_MIN_N = 25
+
+# UNROUTABLE_TRAFFIC counts requests the router never reached a decision for
+# at all (no req state, no prompt length, or a consumer that had to invent one
+# via route_for()). Unlike a fallback this is structural — the router is
+# attached to a request lifecycle it does not understand. 1% is deliberately
+# tight: the expected value is exactly zero, and the only reason not to fire
+# at the first occurrence is that a single racing request during shutdown is
+# not worth waking anyone for.
+_ALARM_UNROUTABLE_RATE = 0.01
+_ALARM_UNROUTABLE_MIN_N = 25
+
+# INDEX_DESYNC. h119_index_desync means the batch slot changed hands between
+# marking and resolving and the consumer REFUSED to rewrite it — the guard
+# working. It is nonetheless an alarm at the first occurrence, because the
+# guard is new and its rate is the only evidence for whether batch-index
+# identity holds at all. h119_index_out_of_batch is benign in ones and twos
+# (a row mid-move resolves on a later step) but a row that never returns sits
+# at the provisional DEEP budget forever, so a sustained rate is real.
+_ALARM_OUT_OF_BATCH_RATE = 0.05
+_ALARM_OUT_OF_BATCH_MIN_N = 25
+
+# TAP_NEVER_FIRED grace. A router that has observed nothing is either idle or
+# blind, and from inside the engine those look identical (this is precisely
+# why the 0-byte meta files were ambiguous). Two triggers: an immediate one
+# when the CONSUMER saw batch rows the tap never saw — which is proof, not
+# inference, since h119_on_batch_add runs off sync_batch and cannot be
+# reached by a request the engine did not admit — and a grace-timed one at 10
+# minutes for boots where the consumer is off. The timed form can fire on a
+# genuinely idle box; that is the correct trade, it self-clears on the first
+# request and it says "nothing has been routed for 10 minutes", which is true
+# and worth knowing on a bench container that was booted to serve.
+_ALARM_TAP_GRACE_S = 600.0
+
+# Severity: "critical" = the router is not doing its job (or is doing it to
+# the wrong requests); "warn" = it is working but outside its design point.
+# pn119-doctor exits 2 on any critical, 1 on warnings only.
+_ALARM_SEVERITY = {
+    "ROUTER_ABSENT": "critical",
+    "TAP_NEVER_FIRED": "critical",
+    "DEEP_FRAC_DEGENERATE": "critical",
+    "DEEP_FRAC_OUT_OF_BAND": "warn",
+    "CONSUMER_NOT_WIRED": "critical",
+    "CONSUMER_NEVER_APPLIED": "critical",
+    "PROBE_CANARY_FAIL": "critical",
+    "FALLBACK_STORM": "warn",
+    "UNROUTABLE_TRAFFIC": "warn",
+    "MODE_INVALID": "critical",
+    "INDEX_DESYNC": "critical",
+}
+ALARM_IDS = tuple(_ALARM_SEVERITY)
+
+
+def _wilson(k: int, n: int, z: float = _ALARM_Z) -> tuple[float, float]:
+    """95% Wilson score interval for k successes in n trials.
+
+    Closed form on purpose: the flusher recomputes this every buf_secs and an
+    exact binomial tail would be a sum over n terms of arbitrary-precision
+    integers, which is not something to run every two seconds forever. Wilson
+    also behaves at k=0 and k=n, where the normal approximation collapses to a
+    zero-width interval and would fire on every fresh boot.
+    """
+    if n <= 0:
+        return (0.0, 1.0)
+    p = k / n
+    d = 1.0 + z * z / n
+    centre = (p + z * z / (2 * n)) / d
+    margin = (z / d) * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))
+    return (max(0.0, centre - margin), min(1.0, centre + margin))
+
+
+def _rate(num: float, den: float) -> float:
+    return (num / den) if den else 0.0
+
+
+def make_snapshot(*, stats, boot_id="", pid=0, hostname="", started=0.0,
+                  now=None, mode="shadow", mode_requested="",
+                  router_present=True, router_enabled=True, tdeep=0.0,
+                  fallback_route=ROUTE_DEEP, fallback_requested="",
+                  explore_rate=0.0, probe=None, sink=None, consumer=None,
+                  first_scored_ts=None, last_scored_ts=None,
+                  last_decision_ts=None, extra=None) -> dict:
+    """Build the health document. Pure: dict in, dict out.
+
+    Kept separate from the router instance so the alarm logic can be exercised
+    against recorded history (and so an alarm's trigger can be argued about
+    without booting a 27B model).
+    """
+    now = time.time() if now is None else now
+    st = dict(stats or {})
+    scored = int(st.get("scored", 0))
+    deep = int(st.get("scored_deep", 0))
+    lean = int(st.get("scored_lean", 0))
+    unscoreable = int(st.get("unscoreable", 0))
+    decisions = scored + unscoreable
+    # Requests that reached NO probe decision. route_for_miss and
+    # h119_route_missing are the consumer inventing a route; skip_* are the
+    # observer failing to attach to a request at all.
+    unroutable = (int(st.get("route_for_miss", 0))
+                  + int(st.get("h119_route_missing", 0))
+                  + int(st.get("h119_route_missing_kept_pn100", 0))
+                  + int(st.get("skip_no_req_state", 0))
+                  + int(st.get("skip_no_prompt_len", 0)))
+    # Independent witness that the engine admitted requests at all: these all
+    # bump from h119_on_batch_add, which the aux tap cannot influence.
+    batch_adds = sum(int(st.get(k, 0)) for k in (
+        "h119_provisional_added", "h119_caller_explicit", "h119_pn100_override",
+        "h119_tier0_respected", "h119_pn100_entry_missing", "h119_no_router",
+        "h119_router_not_enforce"))
+    cons = dict(consumer or {})
+    cons.setdefault("flag_env", False)
+    cons.setdefault("checked", False)
+    cons.setdefault("on", False)
+    cons.update({
+        "pn100_override": int(st.get("h119_pn100_override", 0)),
+        "provisional_added": int(st.get("h119_provisional_added", 0)),
+        "caller_explicit": int(st.get("h119_caller_explicit", 0)),
+        "tier0_respected": int(st.get("h119_tier0_respected", 0)),
+        "routed_deep": int(st.get("h119_routed_deep", 0)),
+        "routed_lean": int(st.get("h119_routed_lean", 0)),
+        "route_missing": int(st.get("h119_route_missing", 0)),
+        "route_missing_kept_pn100": int(
+            st.get("h119_route_missing_kept_pn100", 0)),
+        "index_desync": int(st.get("h119_index_desync", 0)),
+        "index_out_of_batch": int(st.get("h119_index_out_of_batch", 0)),
+        "no_router": int(st.get("h119_no_router", 0)),
+        "router_not_enforce": int(st.get("h119_router_not_enforce", 0)),
+        "batch_adds": batch_adds,
+        "applied": (int(st.get("h119_pn100_override", 0))
+                    + int(st.get("h119_provisional_added", 0))),
+    })
+    snap = {
+        "schema": HEALTH_SCHEMA,
+        "boot_id": boot_id,
+        "pid": int(pid),
+        "hostname": hostname,
+        "ts": now,
+        "ts_iso": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now)) + "Z",
+        "started": started,
+        "uptime_s": max(now - started, 0.0) if started else 0.0,
+        "router": {
+            "present": bool(router_present),
+            "enabled": bool(router_enabled),
+            "mode": mode,
+            "mode_requested": mode_requested or mode,
+            "tdeep": tdeep,
+            "fallback_route": fallback_route,
+            "fallback_requested": fallback_requested or fallback_route,
+            "explore_rate": explore_rate,
+        },
+        "probe": dict(probe or {}),
+        "sink": dict(sink or {}),
+        "consumer": cons,
+        "traffic": {
+            "scored": scored,
+            "deep": deep,
+            "lean": lean,
+            "unscoreable": unscoreable,
+            "decisions": decisions,
+            "unroutable": unroutable,
+            "batch_adds": batch_adds,
+            "first_scored_ts": first_scored_ts,
+            "last_scored_ts": last_scored_ts,
+            "last_decision_ts": last_decision_ts,
+            "idle_s": (max(now - last_decision_ts, 0.0)
+                       if last_decision_ts else None),
+        },
+        "rates": {
+            # Over SCORED requests only: a fallback is not a route the probe
+            # chose, and folding it in would let a fallback storm masquerade
+            # as a healthy deep fraction.
+            "deep_frac": _rate(deep, scored),
+            "deep_frac_n": scored,
+            # Everything that got a default instead of a decision.
+            "fallback_rate": _rate(unscoreable + unroutable, decisions),
+            # The narrower "the probe refused to score this" rate.
+            "unscoreable_rate": _rate(unscoreable, decisions),
+            "unroutable_rate": _rate(unroutable, decisions),
+        },
+        "stats": {k: int(v) for k, v in sorted(st.items())},
+    }
+    if extra:
+        snap.update(extra)
+    snap["alarms"] = pn119_alarms(snap)
+    snap["alarm_ids"] = [a["id"] for a in snap["alarms"]]
+    snap["ok"] = not snap["alarms"]
+    return snap
+
+
+def _alarm(out, aid, detail, **fields):
+    out.append({"id": aid, "severity": _ALARM_SEVERITY.get(aid, "warn"),
+                "detail": detail, **fields})
+
+
+def pn119_alarms(snap: dict) -> list[dict]:
+    """The product. Every alarm below exists because of a specific way this
+    router has failed, or can fail, while looking healthy from outside.
+
+    Pure and total: it must never raise (it runs inside the flusher), so an
+    unexpected snapshot shape degrades to "fewer alarms", never to an
+    exception that takes the health file down with it.
+    """
+    out: list[dict] = []
+    try:
+        r = snap.get("router") or {}
+        t = snap.get("traffic") or {}
+        rt = snap.get("rates") or {}
+        c = snap.get("consumer") or {}
+        p = snap.get("probe") or {}
+        st = snap.get("stats") or {}
+        scored = int(t.get("scored", 0))
+        deep = int(t.get("deep", 0))
+        decisions = int(t.get("decisions", 0))
+        uptime = float(snap.get("uptime_s", 0.0) or 0.0)
+
+        # ── ROUTER_ABSENT ──────────────────────────────────────────────────
+        # The router was asked for and is not there. In-process this means the
+        # module global ROUTER is not this instance — i.e. maybe_create never
+        # completed, or a second instance took the slot, either of which makes
+        # `_consumer_active()` false forever and the consumer a no-op.
+        # pn119-doctor raises the same id for the reader-side version of the
+        # same fact: the flag is on and there is no health surface at all.
+        if r.get("enabled") and not r.get("present"):
+            _alarm(out, "ROUTER_ABSENT",
+                   "router enabled but no live instance is registered "
+                   "(ROUTER is None or another instance owns the global) — "
+                   "the enforce consumer can never act")
+
+        # ── MODE_INVALID ───────────────────────────────────────────────────
+        # PN119_MODE="enforced" is not a hypothetical: everything downstream
+        # tests `mode != "enforce"`, so a typo degrades to shadow and the boot
+        # scores, logs and sinks exactly like a working enforce boot. Same
+        # class for a coerced fallback route. The router already corrects both
+        # and logs an ERROR — but a discarded log is how this survived once
+        # already, so the coercion is also a standing alarm.
+        want_mode = str(r.get("mode_requested", "") or "")
+        if want_mode.strip().lower() != str(r.get("mode", "")).lower():
+            _alarm(out, "MODE_INVALID",
+                   f"PN119_MODE={want_mode!r} was coerced to "
+                   f"{r.get('mode')!r} — nothing downstream will enforce")
+        want_fb = str(r.get("fallback_requested", "") or "")
+        if want_fb.strip().lower() != str(r.get("fallback_route", "")).lower():
+            _alarm(out, "MODE_INVALID",
+                   f"PN119_FALLBACK_ROUTE={want_fb!r} was coerced to "
+                   f"{r.get('fallback_route')!r}")
+        tdeep = r.get("tdeep")
+        if tdeep is None or not math.isfinite(float(tdeep)):
+            _alarm(out, "MODE_INVALID",
+                   f"tdeep={tdeep!r} is not a finite threshold — every "
+                   "comparison against it is False, i.e. everything routes lean")
+
+        # ── PROBE_CANARY_FAIL ──────────────────────────────────────────────
+        # The probe is the only thing standing between "a routing decision"
+        # and "a constant". _load_probe proves the fold against the staged
+        # form on every load and refuses a disagreement; this surfaces the
+        # cases where that refusal happened at RELOAD time, because then the
+        # router keeps serving the OLD weights indefinitely while the refit
+        # timer believes it shipped new ones — no error, no restart, just a
+        # probe that silently stopped tracking the traffic it was refit on.
+        # The npz vanishing is the same class: the next reload cannot happen.
+        if int(st.get("probe_reload_failed", 0)) > 0:
+            _alarm(out, "PROBE_CANARY_FAIL",
+                   f"{st.get('probe_reload_failed')} probe hot-reload(s) were "
+                   "REFUSED — serving stale weights while the refit timer "
+                   "thinks the swap landed",
+                   count=int(st.get("probe_reload_failed", 0)))
+        if p and p.get("readable") is False:
+            _alarm(out, "PROBE_CANARY_FAIL",
+                   f"probe file {p.get('path')!r} is no longer readable — the "
+                   "loaded weights are now the only copy")
+        resid = p.get("fold_resid")
+        if resid is not None and (not math.isfinite(float(resid))
+                                  or float(resid) > 1e-6):
+            _alarm(out, "PROBE_CANARY_FAIL",
+                   f"probe fold residual {resid!r} exceeds 1e-6 — a fold error "
+                   "shifts every score by a constant, which is indistinguishable "
+                   "from a threshold that needs recalibrating")
+
+        # ── TAP_NEVER_FIRED ────────────────────────────────────────────────
+        # The aux-hidden-state tap is set up at load and is never confirmed
+        # again. If set_aux_hidden_state_layers stops taking effect (a model
+        # refactor, an unpatched unpack site, a runner variant), observe() is
+        # called with aux=None and returns — no counter, no log, no sink row.
+        # From outside that is byte-identical to an idle box, which is why
+        # twenty-odd 0-byte sink files exist and none of them told anyone
+        # anything.
+        observations = (scored + int(t.get("unscoreable", 0))
+                        + int(st.get("skip_no_req_state", 0))
+                        + int(st.get("skip_no_prompt_len", 0)))
+        batch_adds = int(t.get("batch_adds", 0))
+        if observations == 0 and batch_adds > 0:
+            _alarm(out, "TAP_NEVER_FIRED",
+                   f"the consumer saw {batch_adds} batch row(s) and the tap "
+                   "observed 0 prefills — traffic is arriving and the aux "
+                   "hidden states are not",
+                   batch_adds=batch_adds)
+        elif observations == 0 and uptime > _ALARM_TAP_GRACE_S:
+            _alarm(out, "TAP_NEVER_FIRED",
+                   f"nothing observed in {uptime / 60.0:.1f} min of uptime — "
+                   "either no traffic reached the engine or the tap is not "
+                   "firing; both are worth knowing on a serving container",
+                   uptime_s=round(uptime, 1))
+
+        # ── DEEP_FRAC_DEGENERATE ───────────────────────────────────────────
+        # Every scored request went the same way. This is the exact shape of
+        # all five 2026-07-25 degenerate boots (12/12 and 24/24 deep;
+        # 0/81, 0/81 and 0/61 deep) and of the NaN-score failure mode the
+        # sd>=1e-4 gate now refuses at load — NaN >= tdeep is False, so a
+        # degenerate probe routes 100% lean at full accuracy cost.
+        if scored >= _ALARM_DEGENERATE_MIN_N and deep in (0, scored):
+            side = "deep" if deep else "lean"
+            _alarm(out, "DEEP_FRAC_DEGENERATE",
+                   f"all {scored} scored requests routed {side} — the probe, "
+                   "the threshold or the feature vector is broken, not "
+                   "mis-calibrated",
+                   n=scored, deep=deep, deep_frac=_rate(deep, scored))
+        elif scored >= _ALARM_BAND_MIN_N:
+            # ── DEEP_FRAC_OUT_OF_BAND ──────────────────────────────────────
+            # Not degenerate, but the 95% interval sits entirely outside the
+            # 25-35% design band, so the split the router was shipped to make
+            # is not the split it is making. Reported as a warning: this is
+            # the one alarm that can legitimately be answered with "retune
+            # tdeep" rather than "something is broken".
+            lo, hi = _wilson(deep, scored)
+            if hi < _ALARM_BAND_LO or lo > _ALARM_BAND_HI:
+                _alarm(out, "DEEP_FRAC_OUT_OF_BAND",
+                       f"deep fraction {_rate(deep, scored):.3f} "
+                       f"(95% CI {lo:.3f}-{hi:.3f}, n={scored}) is outside the "
+                       f"{_ALARM_BAND_LO:.2f}-{_ALARM_BAND_HI:.2f} design band",
+                       n=scored, deep=deep, ci=[round(lo, 4), round(hi, 4)],
+                       deep_frac=_rate(deep, scored))
+
+        # ── CONSUMER_NOT_WIRED / CONSUMER_NEVER_APPLIED ────────────────────
+        # These two split the "the flag is on and nothing happens" space in
+        # half, because the two halves have completely different fixes.
+        if c.get("flag_env"):
+            if int(c.get("no_router", 0)) or int(c.get("router_not_enforce", 0)):
+                # The consumer ran and bailed on its own preconditions.
+                _alarm(out, "CONSUMER_NOT_WIRED",
+                       "consumer flag is on but it declined: "
+                       f"no_router={c.get('no_router')} "
+                       f"router_not_enforce={c.get('router_not_enforce')} "
+                       "(shadow mode acts on nothing — enforce is required)")
+            elif decisions >= _ALARM_CONSUMER_MIN_N and not c.get("checked"):
+                # h119_on_batch_add was never called at all across meaningful
+                # traffic => site F is not installed in this image. The boot
+                # log will still have printed every patch site it "installed".
+                _alarm(out, "CONSUMER_NOT_WIRED",
+                       f"consumer flag is on and h119_on_batch_add never ran "
+                       f"across {decisions} decisions — the sync_batch patch "
+                       "site is not live in this image",
+                       decisions=decisions)
+            elif decisions >= _ALARM_CONSUMER_MIN_N and c.get("batch_adds", 0) == 0:
+                _alarm(out, "CONSUMER_NOT_WIRED",
+                       f"consumer saw 0 batch rows across {decisions} routed "
+                       "decisions — it is attached to a holder that never "
+                       "syncs, or to the wrong process",
+                       decisions=decisions)
+            elif (decisions >= _ALARM_CONSUMER_MIN_N
+                  and int(c.get("applied", 0)) == 0):
+                # THE 2026-07-25 DAY-LONG BUG, exactly. Every site installed,
+                # every counter moving, GPQA-30 byte-identical to control: the
+                # consumer deferred to PN100's budget on 100% of requests
+                # (h119_caller_explicit) because it could not tell PN100's
+                # grant from a caller's. Neither override nor provisional ever
+                # incremented — that pair being 0 under real traffic is the
+                # signature, and it is the reason this file exists.
+                _alarm(out, "CONSUMER_NEVER_APPLIED",
+                       "consumer flag is on and it has taken over NOTHING: "
+                       f"h119_pn100_override=0 h119_provisional_added=0 over "
+                       f"{decisions} decisions "
+                       f"(caller_explicit={c.get('caller_explicit')}, "
+                       f"tier0_respected={c.get('tier0_respected')}) — the "
+                       "route is being computed and thrown away",
+                       decisions=decisions,
+                       caller_explicit=int(c.get("caller_explicit", 0)),
+                       tier0_respected=int(c.get("tier0_respected", 0)))
+
+        # ── FALLBACK_STORM ─────────────────────────────────────────────────
+        # Unscoreable requests take the fallback route, which is "deep" by
+        # design (fail-safe on accuracy). That makes a storm the most
+        # expensive quiet failure available: the router pays the champion's
+        # cost for everyone and still reports itself alive and scoring.
+        if (decisions >= _ALARM_FALLBACK_MIN_N
+                and float(rt.get("fallback_rate", 0.0)) > _ALARM_FALLBACK_RATE):
+            reasons = {k: v for k, v in st.items()
+                       if k.startswith("unscoreable_")}
+            _alarm(out, "FALLBACK_STORM",
+                   f"{rt.get('fallback_rate', 0.0):.1%} of {decisions} decisions "
+                   f"took the {r.get('fallback_route')} fallback instead of a "
+                   f"score (>{_ALARM_FALLBACK_RATE:.0%}) — reasons: "
+                   f"{reasons or 'none recorded'}",
+                   decisions=decisions,
+                   fallback_rate=float(rt.get("fallback_rate", 0.0)),
+                   reasons=reasons)
+
+        # ── UNROUTABLE_TRAFFIC ─────────────────────────────────────────────
+        # Requests the router never reached a decision for: no request state,
+        # no prompt length, or a consumer forced to invent a route via
+        # route_for(). Structural rather than statistical — the expected count
+        # is zero, so the threshold is only there to tolerate a request racing
+        # a shutdown.
+        if (decisions >= _ALARM_UNROUTABLE_MIN_N
+                and float(rt.get("unroutable_rate", 0.0)) > _ALARM_UNROUTABLE_RATE):
+            _alarm(out, "UNROUTABLE_TRAFFIC",
+                   f"{t.get('unroutable')} of {decisions} requests reached no "
+                   "routing decision at all (route_for misses / missing req "
+                   "state / missing prompt length) — the router is attached to "
+                   "a request lifecycle it does not fully see",
+                   unroutable=int(t.get("unroutable", 0)), decisions=decisions,
+                   rate=float(rt.get("unroutable_rate", 0.0)))
+
+        # ── INDEX_DESYNC ───────────────────────────────────────────────────
+        # _state is keyed by BATCH INDEX and indices are recycled. A desync
+        # means slot i belonged to a different request between mark and
+        # resolve; the identity guard caught it and refused, which is the only
+        # reason the wrong request did not get capped. Alarm on the FIRST
+        # occurrence: applying one request's route to another's budget is
+        # invisible in every output collected, so the guard's hit count is the
+        # entire evidence base for whether the assumption holds.
+        desync = int(c.get("index_desync", 0))
+        if desync > 0:
+            _alarm(out, "INDEX_DESYNC",
+                   f"{desync} batch slot(s) changed hands between mark and "
+                   "resolve — the identity guard refused to rewrite them; "
+                   "without it these would have capped the wrong request",
+                   count=desync)
+        oob = int(c.get("index_out_of_batch", 0))
+        resolved = (int(c.get("routed_deep", 0)) + int(c.get("routed_lean", 0))
+                    + oob)
+        if (resolved >= _ALARM_OUT_OF_BATCH_MIN_N
+                and _rate(oob, resolved) > _ALARM_OUT_OF_BATCH_RATE):
+            _alarm(out, "INDEX_DESYNC",
+                   f"{oob}/{resolved} provisional rows resolved outside the "
+                   "current batch — a row that never returns sits at the "
+                   "provisional DEEP budget for its whole life",
+                   out_of_batch=oob, resolved=resolved,
+                   rate=_rate(oob, resolved))
+    except Exception as e:  # noqa: BLE001 — a health check must never raise
+        out.append({"id": "ALARM_ENGINE_ERROR", "severity": "warn",
+                    "detail": f"{type(e).__name__}: {e}"})
+    return out
+
+
 # The live worker-side router instance (set by maybe_create). The enforce
 # consumer needs it for two things it cannot get from the holder alone: the
 # mode (never act while the router is in shadow) and runner.input_batch, which
@@ -260,6 +801,13 @@ class PN119Router:
             inst = cls(runner, npz_path)
             global ROUTER
             ROUTER = inst
+            # Re-publish now that the instance owns the global: health_snapshot
+            # reports router.present as "ROUTER is me", and the write inside
+            # __init__ necessarily ran before this assignment.
+            # force: the counters have not moved since the write in __init__,
+            # and the publish-on-change guard would otherwise skip this one —
+            # leaving a health file that says router.present=False.
+            inst._health_write(force=True)
             # Belt and braces for the discarded-logs class above: if this
             # logger still cannot emit INFO, attach a stderr handler rather than
             # run blind. A router nobody can observe is how two degenerate boots
@@ -275,10 +823,12 @@ class PN119Router:
                             "logging config did not reach %s", logger.name)
             logger.info(
                 "[PN119] router active: mode=%s tdeep=%.3f probe=%s aux layers=%s "
-                "sink=%s fallback_route=%s prefix_memo=%s(unit=%d max=%d)",
+                "sink=%s fallback_route=%s prefix_memo=%s(unit=%d max=%d) "
+                "boot_id=%s health=%s",
                 inst.mode, inst.tdeep, os.path.basename(npz_path), LAYERS,
                 inst.sink_dir or "-", inst.fallback_route,
                 "on" if inst.memo_on else "off", inst.memo_unit, inst.memo_max,
+                inst.boot_id, inst.health_path or "-",
             )
             return inst
         except Exception as e:  # noqa: BLE001 — never brick model load
@@ -288,6 +838,18 @@ class PN119Router:
     def __init__(self, runner, npz_path: str):
         global _FALLBACK_ROUTE
         self.runner = runner
+        # Boot identity. A sink file, a health file and a log line all have to
+        # be attributable to ONE router instance: the 2026-07-25 forensics
+        # failed mainly because forty sink files from a dozen boots could only
+        # be told apart by their filename timestamps, and a health.json left
+        # behind by a dead boot reads exactly like a live one.
+        self.boot_id = uuid.uuid4().hex
+        self.started = time.time()
+        try:
+            self.hostname = socket.gethostname()   # = the container id
+        except OSError:
+            self.hostname = ""
+        self.mode_requested = _env("PN119_MODE", "shadow")
         self.mode = _env("PN119_MODE", "shadow").lower() or "shadow"
         if self.mode not in ("shadow", "enforce"):
             # Everything downstream tests `mode != "enforce"`, so a typo like
@@ -298,8 +860,17 @@ class PN119Router:
                          "falling back to shadow; NOTHING will be enforced",
                          self.mode)
             self.mode = "shadow"
-        self.tdeep = float(_env("PN119_TDEEP", "0.5") or 0.5)
+        try:
+            self.tdeep = float(_env("PN119_TDEEP", "0.5") or 0.5)
+        except ValueError:
+            # A non-numeric threshold used to take the whole router down at
+            # load (maybe_create turns the raise into "disabled"). Degrading to
+            # the default and alarming keeps the boot serving AND visible.
+            logger.error("[PN119] PN119_TDEEP=%r is not a number — using 0.5",
+                         _env("PN119_TDEEP"))
+            self.tdeep = 0.5
         # Route for requests we cannot score (see module docstring §2).
+        self.fallback_requested = _env("PN119_FALLBACK_ROUTE", ROUTE_DEEP)
         fb = _env("PN119_FALLBACK_ROUTE", ROUTE_DEEP).lower() or ROUTE_DEEP
         if fb not in ROUTE_CHOICES:
             logger.warning("[PN119] PN119_FALLBACK_ROUTE=%r invalid — using %s",
@@ -334,6 +905,9 @@ class PN119Router:
         self._next_reload_check = time.time() + self._reload_every
         self._probe_sig = self._stat_sig(npz_path)
         self._failed_sig = None
+        # Health: the fold self-check residual of the weights actually in use.
+        self._probe_fold_resid = None
+        self._probe_loads = 0
         self.pv, self.pb = self._load_probe(npz_path)
         # v2 label plumbing: think-region markers of the SERVED model's
         # tokenizer (defaults = thinkingcap-gptq-pro-v2 / Qwen3.6 template:
@@ -388,6 +962,35 @@ class PN119Router:
         except ValueError:
             logger.warning("[PN119] bad PN119_SINK_BUF_* — using defaults")
             self._buf_rows, self._buf_secs, self._buf_max = 64, 2.0, 512
+        # ── health surface (module docstring §HEALTH SURFACE) ───────────────
+        # Defaults into the sink dir, which is already a rw mount everywhere
+        # the router runs — so the health file appears at the next boot with
+        # no compose change. PN119_HEALTH overrides.
+        self.health_path = _env("PN119_HEALTH") or (
+            os.path.join(self.sink_dir, "health.json") if self.sink_dir else "")
+        self._health_fails = 0
+        # Publish-on-change plus a heartbeat. The flusher ticks every
+        # buf_secs (2 s), and rewriting a ~3 KB document 43,200 times a day on
+        # an idle boot is pure write amplification for no added information.
+        # The heartbeat must stay well inside pn119-doctor's staleness floor
+        # (30 s) so that "not written recently" keeps meaning "the writer
+        # stopped", not "nothing happened".
+        try:
+            self._health_every = max(
+                float(_env("PN119_HEALTH_EVERY_S", "10") or 10.0), 1.0)
+        except ValueError:
+            self._health_every = 10.0
+        self._h_next_beat = 0.0
+        self._h_prev_fp = None
+        # Derived timestamps. The request path must not pay for these, so the
+        # flusher infers them by watching the counters move: accurate to one
+        # PN119_SINK_BUF_SECS tick, which is 2 s by default and is two orders
+        # finer than anything anyone asks this file.
+        self._h_first_scored_ts = None
+        self._h_last_scored_ts = None
+        self._h_last_decision_ts = None
+        self._h_prev_scored = 0
+        self._h_prev_decisions = 0
         if self.sink_dir:
             try:
                 os.makedirs(self.sink_dir, exist_ok=True)
@@ -397,15 +1000,28 @@ class PN119Router:
                 self._sink_meta = open(
                     os.path.join(self.sink_dir, f"meta-{tag}.jsonl"), "a",
                     encoding="utf-8")
+                self._sink_header()
                 self._sink_start()
                 _SINKS.add(self)
                 logger.info("[PN119] sink buffered: buf_rows=%d buf_secs=%.2f "
-                            "buf_max=%d thread=%s", self._buf_rows,
+                            "buf_max=%d thread=%s health=%s", self._buf_rows,
                             self._buf_secs, self._buf_max,
-                            self._sink_thread is not None)
+                            self._sink_thread is not None,
+                            self.health_path or "-")
             except OSError as e:
                 logger.warning("[PN119] sink unavailable (%s) — logging only", e)
                 self._sink_feat = self._sink_meta = None
+        if self.health_path and self._sink_thread is None:
+            # Health without a sink (or with the synchronous sink escape).
+            # Deliberately reuses the SAME thread rather than adding one: the
+            # loop already exists, and a second timer thread in the worker
+            # process is a cost with no matching benefit.
+            self._sink_start()
+            _SINKS.add(self)
+        # Publish once immediately, so `health.json` exists from boot rather
+        # than from the first flush — "no file" and "file with no traffic" are
+        # different diagnoses and the doctor must be able to tell them apart.
+        self._health_write()
 
     # ── probe loading + hot-reload ──────────────────────────────────────────
     def _load_probe(self, path: str):
@@ -480,6 +1096,12 @@ class PN119Router:
                 f"probe fold disagrees with the staged form: {got} vs {ref}")
 
         v = torch.from_numpy(np.ascontiguousarray(v64, dtype=np.float32)).to(dev)
+        # Health surface: the residual of the check above, on the weights that
+        # are actually about to serve. Published rather than only logged —
+        # every INFO this module emitted about its own health was discarded
+        # for a whole afternoon, which is the entire reason health.json exists.
+        self._probe_fold_resid = abs(ref - got)
+        self._probe_loads += 1
         logger.info("[PN119] probe folded: %d B on device (was %d B), "
                     "fold check |d|=%.3e", v.numel() * 4,
                     (mu.size + sd.size + vt.size + w.size) * 4, abs(ref - got))
@@ -510,6 +1132,10 @@ class PN119Router:
             new = self._load_probe(self._probe_path)
         except Exception as e:  # noqa: BLE001 — never break serving on a bad swap
             self._failed_sig = sig
+            # Counted, not just logged: a refused swap leaves the router
+            # serving weights the refit loop believes it replaced, forever and
+            # silently. PROBE_CANARY_FAIL reads this counter.
+            _bump("probe_reload_failed")
             logger.warning("[PN119] probe hot-reload FAILED (%s) — keeping current weights", e)
             return
         self.pv, self.pb = new
@@ -709,20 +1335,56 @@ class PN119Router:
         """(Re)arm the flusher for the CURRENT process."""
         self._sink_pid = os.getpid()
         self._sink_stop = False
-        if self._buf_rows <= 0:
+        if self._buf_rows <= 0 and not self.health_path:
             self._sink_thread = None    # PN119_SINK_BUF_ROWS=0 => sync escape
             return
+        # With the sync escape AND a health path, the thread still runs: it is
+        # the health publisher, and _sink_flush on two empty buffers is two
+        # uncontended lock acquisitions. Health is not worth a SECOND thread,
+        # but it is worth this one.
         self._sink_thread = threading.Thread(
             target=self._sink_loop, name="pn119-sink", daemon=True)
         self._sink_thread.start()
+
+    def _sink_header(self) -> None:
+        """First meta line of every sink file: who wrote it.
+
+        Written DIRECTLY (not through the buffer) so it is on disk before the
+        first request, and so a file that ends up with exactly one line is
+        unambiguous. Before this, a 0-byte meta-*.jsonl could mean the tap
+        never fired, no traffic arrived, or the router never started — twenty
+        of the forty files in the 2026-07-25 sink are 0 bytes and none of them
+        can be attributed to a boot after the fact. refit_pn119_probe's
+        load_sink ignores the line: it keys score rows on "row" and label rows
+        on "finish", and skips the whole pair when feats-*.bin is empty.
+        """
+        try:
+            if self._sink_meta is None:
+                return
+            self._sink_meta.write(json.dumps({
+                "pn119_header": 1, "boot_id": self.boot_id, "pid": os.getpid(),
+                "hostname": self.hostname, "ts": self.started,
+                "mode": self.mode, "tdeep": self.tdeep,
+                "probe": os.path.basename(self._probe_path),
+                "fallback_route": self.fallback_route,
+                "explore_rate": self.explore_rate,
+                "consumer_flag": _truthy(_env(_CONSUMER_FLAG, "0")),
+            }) + "\n")
+            self._sink_meta.flush()
+        except Exception as e:  # noqa: BLE001 — a header is never worth a boot
+            logger.warning("[PN119] sink header failed (%s)", e)
 
     def _sink_loop(self) -> None:
         while not self._sink_stop:
             self._sink_wake.wait(self._buf_secs)
             self._sink_wake.clear()
-            if self._sink_meta is None:
-                return                  # sink disabled or closed
-            self._sink_flush()
+            if self._sink_meta is not None:
+                self._sink_flush()
+            elif not self.health_path:
+                return                  # sink closed and nothing else to do
+            # Health rides this tick: the thread is already awake and the
+            # request path stays untouched. See §HEALTH SURFACE.
+            self._health_write()
 
     def _sink_append(self, feat: bytes | None, line: str) -> None:
         """Queue one sink event.  Never raises; never touches the disk unless
@@ -798,6 +1460,112 @@ class PN119Router:
             except Exception:  # noqa: BLE001
                 pass
         self._sink_feat = self._sink_meta = None
+        # Final publish: a health file left behind by a CLEAN shutdown says so,
+        # so the doctor can distinguish "the container was stopped" from "the
+        # worker died mid-step", which look identical through a stale file.
+        self._health_write(shutdown=True, force=True)
+
+    # ── health surface: published from the flusher, never from a request ────
+    def health_snapshot(self, *, present=None, shutdown=False) -> dict:
+        """Everything a reader needs to judge this boot, as a plain dict."""
+        probe = {
+            "path": self._probe_path,
+            "basename": os.path.basename(self._probe_path),
+            "loads": self._probe_loads,
+            "fold_resid": self._probe_fold_resid,
+            "readable": os.path.isfile(self._probe_path),
+        }
+        sig = self._probe_sig
+        if sig:
+            probe["mtime_ns"], probe["size"] = sig
+        cs = dict(_consumer_state)
+        cs.pop("warned", None)
+        consumer = {
+            "flag_env": _truthy(_env(_CONSUMER_FLAG, "0")),
+            "checked": bool(_consumer_state.get("checked")),
+            "on": bool(_consumer_state.get("on")),
+            "deep_budget": _consumer_state.get("deep"),
+            "lean_budget": _consumer_state.get("lean"),
+            "override_pn100": bool(_consumer_state.get("override_pn100")),
+            "warned": int(_consumer_state.get("warned", 0)),
+        }
+        return make_snapshot(
+            stats=STATS, boot_id=self.boot_id, pid=os.getpid(),
+            hostname=self.hostname, started=self.started,
+            mode=self.mode, mode_requested=self.mode_requested,
+            router_present=(ROUTER is self) if present is None else present,
+            router_enabled=_truthy(_env("GENESIS_ENABLE_PN119_ROUTER")),
+            tdeep=self.tdeep, fallback_route=self.fallback_route,
+            fallback_requested=self.fallback_requested,
+            explore_rate=self.explore_rate, probe=probe, consumer=consumer,
+            first_scored_ts=self._h_first_scored_ts,
+            last_scored_ts=self._h_last_scored_ts,
+            last_decision_ts=self._h_last_decision_ts,
+            sink={
+                "dir": self.sink_dir,
+                "enabled": self._sink_meta is not None,
+                "rows": self._sink_rows,
+                "buf_rows": self._buf_rows, "buf_secs": self._buf_secs,
+                "buf_max": self._buf_max,
+                "pending": len(self._sbuf_meta),
+                "thread": self._sink_thread is not None,
+            },
+            extra={"shutdown": bool(shutdown),
+                   "health_path": self.health_path,
+                   "warned": self._warned,
+                   "memo": {"on": self.memo_on, "unit": self.memo_unit,
+                            "max": self.memo_max, "size": len(self._memo)}},
+        )
+
+    def _health_write(self, shutdown: bool = False, force: bool = False) -> None:
+        """Publish health.json ATOMICALLY. Never raises, never blocks a request.
+
+        Called only from the flusher thread (plus once at init and once at
+        shutdown), so the request path pays nothing. os.replace on the same
+        filesystem is atomic, which is what lets pn119-doctor read the file
+        with no lock and never see a torn document.
+        """
+        if not self.health_path or self._health_fails > 5:
+            return
+        try:
+            now = time.time()
+            # Cheap change detector: STATS is monotonic, so the sum plus the
+            # key count moves whenever anything at all happened.
+            fp = (len(STATS), sum(STATS.values()))
+            if not (force or shutdown or fp != self._h_prev_fp
+                    or now >= self._h_next_beat):
+                return
+            self._h_prev_fp = fp
+            self._h_next_beat = now + self._health_every
+            # Derive the traffic timestamps from counter movement — the
+            # alternative is a time.time() per request, which this module
+            # does not get to spend.
+            scored = int(STATS.get("scored", 0))
+            decisions = scored + int(STATS.get("unscoreable", 0))
+            if scored > self._h_prev_scored:
+                if self._h_first_scored_ts is None:
+                    self._h_first_scored_ts = now
+                self._h_last_scored_ts = now
+                self._h_prev_scored = scored
+            if decisions > self._h_prev_decisions:
+                self._h_last_decision_ts = now
+                self._h_prev_decisions = decisions
+            snap = self.health_snapshot(shutdown=shutdown)
+            tmp = f"{self.health_path}.tmp.{os.getpid()}"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(snap, f, indent=1, sort_keys=False, default=str)
+                f.write("\n")
+                f.flush()
+            os.replace(tmp, self.health_path)
+            self._health_fails = 0
+        except Exception as e:  # noqa: BLE001 — health must never cost a request
+            self._health_fails += 1
+            if self._health_fails <= 3:
+                logger.warning("[PN119] health write failed (%d/6): %s",
+                               self._health_fails, e)
+            if self._health_fails > 5:
+                logger.warning("[PN119] health writes disabled after 6 failures "
+                               "— the router keeps serving, blind")
 
     # ── explicit fallback for requests that cannot be scored ────────────────
     def _unscoreable(self, req_id, reason: str, missing: int, prompt_len: int) -> None:
