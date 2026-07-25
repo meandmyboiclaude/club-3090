@@ -113,8 +113,33 @@ _SUB_PATCH_RE = re.compile(r"sub-patch ['\"]([^'\"]+)['\"]")
 # appears in any compose or model_config). The composes that DO arm these
 # lane-2 patches set the canonical flag explicitly, so the BUG-122 mirror below
 # (`flag not in os.environ`) never fires for them either.
+#
+# [2026-07-25] PN79 REMOVED — dead entry, and the only one of the three
+# `[guard]`-noted ids that was actually stale. Its house side is ARCHIVED:
+# fixes/_archive/patch_pn79_tq_decode_scratch_cudagraph_safe.py, retired
+# 2026-07-23 (BUG-119 — the vllm#46067 crash class is handled in-tree). With
+# no house patch of any spelling claiming 79, there is no collision left to
+# guard, so the alias named nothing. (That archived house patch was an
+# unrelated TQ decode-scratch cudagraph fix; lane-2's PN79 is the in-place SSM
+# state backport of vllm#41824, itself parked after a PROD IMA.)
+#
+# PN91 and PN106 are DELIBERATELY KEPT even though the lint's guard check used
+# to note them: their house counterparts are live, merely suffixed —
+# patch_pn91g_48475_gdn_spec_state_index_clamp.py (PN91G) and
+# patch_pn106d_bug076_nan_slot_audit.py (PN106D). Same number, different
+# patch, which is exactly the collision the audit §4 table and
+# tests/test_patch_id_lint.py::test_six_audited_collisions_are_now_guarded
+# require to stay guarded. patch_id_lint now recognises a `<id><SUFFIX>` house
+# id as claiming the number, so it no longer mis-flags them.
+#
+# Net effect of the PN79 removal: exactly one alias disappears
+# (GENESIS_ENABLE_SPN79_INPLACE_SSM_STATE); the other 16 S-aliases are
+# byte-identical, and that variable appears in no compose, script or
+# model_config (grepped), so no boot ever resolved through it. Rule B in
+# patch_id_lint is the safety net: if a house patch ever re-claims a bare
+# PN79, the lint FAILS (not notes) and tells you to re-add it here.
 _HOUSE_COLLIDING_IDS = {
-    "PN71", "PN72", "PN73", "PN79", "PN80", "PN82", "PN90", "PN91", "PN92",
+    "PN71", "PN72", "PN73", "PN80", "PN82", "PN90", "PN91", "PN92",
     "PN95", "PN96",
     "PN102", "PN104", "PN105", "PN106", "PN108", "PN118",
 }

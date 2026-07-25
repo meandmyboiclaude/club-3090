@@ -460,10 +460,21 @@ def run(genesis_root: Optional[Path] = None) -> LintReport:
                 f"lane-2 id — the S-alias is a no-op; remove it."
             )
         elif fixes_dir is not None and pid not in report.house_ids:
+            # A house patch may claim the NUMBER under a suffixed id — PN106 vs
+            # house PN106D, PN91 vs house PN91G. That is still exactly the
+            # collision the guard exists for (same number, unrelated patch), so
+            # the entry is correct and must not be reported as stale. Only a
+            # number no house patch claims under ANY spelling is a dead entry.
+            suffixed = sorted(
+                h for h in report.house_ids
+                if h != pid and re.fullmatch(re.escape(pid) + r"[A-Z]+", h)
+            )
+            if suffixed:
+                continue
             report.notes.append(
-                f"[guard] _HOUSE_COLLIDING_IDS lists {pid!r} but no live "
-                f"house patch claims that id (archived or `d`/`g`-suffixed "
-                f"on the house side) — harmless, the alias only adds a name"
+                f"[guard] _HOUSE_COLLIDING_IDS lists {pid!r} but no house "
+                f"patch claims that number under any spelling (archived or "
+                f"removed) — the S-alias names nothing; remove the entry"
             )
     for old, new in sorted(renamed_shared.items()):
         if old not in report.lane2_ids:
