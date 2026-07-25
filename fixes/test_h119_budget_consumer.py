@@ -242,7 +242,13 @@ def run_pin(tag: str, stock_src: str, ns) -> None:
     side = _load_sidecar()
 
     prompt = [1, 2, 3, THINK_START[0]]  # thinking-on template shape
-    DEEP, LEAN = 10240, 800
+    # Mirror the sidecar's OWN defaults instead of restating them. _reset()
+    # passes deep=None/lean=None, which POPS both env vars, so every assertion
+    # below is really testing the module's fallback values — and hardcoding
+    # them meant this suite went red the moment the lean default moved
+    # 800 -> 1600 (which it did, because 800 truncated 61-87% of live thinking
+    # traffic). Reading them here keeps the test honest about what it asserts.
+    DEEP, LEAN = side._DEEP_DEFAULT, side._LEAN_DEFAULT
 
     # ── P2 flag OFF == stock ────────────────────────────────────────────
     for label, kw in (("flag-off", dict(flag=False, mode="enforce", router_present=True)),
