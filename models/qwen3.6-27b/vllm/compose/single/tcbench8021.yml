@@ -113,6 +113,15 @@ services:
       # (proven: 12:17/13:34 bench boots ran prod's hot 153,064 plan). Skip-path
       # design flaw = BUG-078 re-class; see endgame8020.yml + loop file 07-19.
       - VLLM_ENABLE_STARTUP_PLAN=0
+      # [2026-07-25] PIN THE V1 MODEL RUNNER EXPLICITLY. model-runner-v2 is in
+      # this pin and supports mtp, but it does NOT implement thinking budgets at
+      # all (upstream #46727 / #44510). If it ever becomes the default for
+      # hybrids, thinking_budget_state.py stops being the path: all seven H119
+      # sites vanish AND PN100's budgets silently stop being enforced. The
+      # container still boots, still serves, still looks healthy — cost and
+      # accuracy just drift. Relying on the upstream default here is relying on
+      # a value we do not control; state it.
+      - VLLM_USE_V2_MODEL_RUNNER=0
       # [2026-07-13 Wave-3b] arms the torch profiler endpoints (inert until /start_profile)
       # DEV_MODE required: /start_profile //stop_profile are dev-mode-gated on dev1060.
       - VLLM_TORCH_PROFILER_DIR=/profiles

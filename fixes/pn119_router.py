@@ -118,13 +118,22 @@ import hashlib
 import json
 import logging
 import os
+import sys
 import threading
 import time
 import weakref
 
 import torch
 
-logger = logging.getLogger("genesis.pn119")
+# vLLM's DEFAULT_LOGGING_CONFIG attaches a handler to the "vllm" logger ONLY, so
+# a name outside that tree gets no handler and an effective level of WARNING in
+# the EngineCore process. Measured 2026-07-25: 61 scored requests produced 61
+# logger.info calls and ZERO lines in a 2,637-line container log. Every INFO the
+# router emitted about its own health -- including the mode/threshold banner --
+# was discarded, which is why two degenerate boots (0% and 100% deep) were only
+# noticed hours later by reading the sink offline. Sitting under "vllm" inherits
+# the handler and the level.
+logger = logging.getLogger("vllm.h119")
 
 LAYERS = (42, 47, 51)
 D_MODEL = 5120
@@ -251,6 +260,19 @@ class PN119Router:
             inst = cls(runner, npz_path)
             global ROUTER
             ROUTER = inst
+            # Belt and braces for the discarded-logs class above: if this
+            # logger still cannot emit INFO, attach a stderr handler rather than
+            # run blind. A router nobody can observe is how two degenerate boots
+            # (0% and 100% deep) survived a whole afternoon unnoticed.
+            if not logger.isEnabledFor(logging.INFO):
+                _h = logging.StreamHandler(sys.stderr)
+                _h.setFormatter(logging.Formatter(
+                    "%(asctime)s [h119] %(levelname)s %(message)s"))
+                logger.addHandler(_h)
+                logger.setLevel(logging.INFO)
+                logger.propagate = False
+                logger.info("[PN119] attached own stderr handler — the 'vllm' "
+                            "logging config did not reach %s", logger.name)
             logger.info(
                 "[PN119] router active: mode=%s tdeep=%.3f probe=%s aux layers=%s "
                 "sink=%s fallback_route=%s prefix_memo=%s(unit=%d max=%d)",
@@ -267,6 +289,15 @@ class PN119Router:
         global _FALLBACK_ROUTE
         self.runner = runner
         self.mode = _env("PN119_MODE", "shadow").lower() or "shadow"
+        if self.mode not in ("shadow", "enforce"):
+            # Everything downstream tests `mode != "enforce"`, so a typo like
+            # "enforced" or "ENFORCE " silently degrades to shadow: the router
+            # scores, logs, sinks, and acts on nothing, which is exactly what a
+            # working enforce boot looks like from the outside.
+            logger.error("[PN119] PN119_MODE=%r is not shadow|enforce — "
+                         "falling back to shadow; NOTHING will be enforced",
+                         self.mode)
+            self.mode = "shadow"
         self.tdeep = float(_env("PN119_TDEEP", "0.5") or 0.5)
         # Route for requests we cannot score (see module docstring §2).
         fb = _env("PN119_FALLBACK_ROUTE", ROUTE_DEEP).lower() or ROUTE_DEEP
@@ -391,6 +422,21 @@ class PN119Router:
         w = torch.from_numpy(np.asarray(z["w"])).float().to(dev)      # [pcs+1] incl bias
         if mu.numel() != FEAT_DIM or sd.numel() != FEAT_DIM:
             raise ValueError(f"probe dim {mu.numel()} != {FEAT_DIM}")
+        # A degenerate probe is the WORST failure this router has, because it is
+        # completely silent: scoring divides by sd, so a zero entry yields inf
+        # or NaN, and `NaN >= tdeep` is False — every request routes LEAN, at
+        # full accuracy cost, with no exception, no warning and a deep rate of
+        # 0% that looks like a calibration question rather than a broken file.
+        # Refuse to load instead; maybe_create turns a raise into "router
+        # disabled", which is loud and leaves upstream behaviour intact.
+        for name, t in (("mu", mu), ("sd", sd), ("Vt10", vt), ("w", w)):
+            if not bool(torch.isfinite(t).all()):
+                raise ValueError(f"probe {name} contains non-finite values")
+        sd_min = float(sd.min())
+        if sd_min < 1e-4:
+            raise ValueError(
+                f"probe sd has a near-zero entry ({sd_min:.3e} < 1e-4) — "
+                "scores would be inf/NaN and every request would route lean")
         if vt.shape[1] != FEAT_DIM or w.numel() != vt.shape[0] + 1:
             raise ValueError(f"probe shapes Vt{tuple(vt.shape)} w{tuple(w.shape)} inconsistent")
         return mu, sd, vt, w
@@ -949,17 +995,23 @@ H119_PROVISIONAL = "_h119_provisional"
 # binds only on runaways (the uncapped-native arm measured 2.9-3.4K rtok/req).
 _DEEP_DEFAULT = 10240
 
-# Lean = 800. Provenance and its ONE honest caveat:
-#   ~/shared/REPORT-prodmatrix-goal80-20260724.md §1 measures the v3fam arm at
-#   778 reasoning tokens/req with 24/24 (100%) consolidate parse — the cheapest
-#   arm that stayed reliable. 800 is 778 rounded onto PN100's 100-token grid.
-#   CAVEAT (do not lose this): 778 is a MEAN of a BANNER-shaped arm, not a cap
-#   that arm respected, and this consumer cannot reproduce that banner (see
-#   above). As a hard cap, 800 will force </think> on the upper part of the
-#   spend distribution rather than sit above it. That is the same mechanism
-#   PN100's own tiers already use in prod, but it is a cap, not a nudge — which
-#   is exactly why it is tunable and why the flag ships OFF.
-_LEAN_DEFAULT = 800
+# Lean = 1600.
+#
+# It was 800, from ~/shared/REPORT-prodmatrix-goal80-20260724.md §1: the v3fam
+# arm measured 778 reasoning tokens/req with 24/24 consolidate parse, rounded
+# onto PN100's 100-token grid. That reasoning was wrong in a specific way, and
+# the 2026-07-25 lens review quantified it from three directions:
+#   * 778 is the MEAN of a BANNER-shaped arm, not a cap that arm respected. As a
+#     hard cap it does not sit above the distribution, it bisects it.
+#   * Live thinking traffic: p10 794, p50 1295, p90 3095. A cap of 800 truncates
+#     61-87% of it (two independent counts, on prod and on GPQA).
+#   * Truncation is the expensive direction. Over-granting is nearly free
+#     because 12 of 31 live rows stop naturally below their grant, while an
+#     under-grant forces </think> mid-thought and costs the answer.
+# 1600 truncates 4/31 and covers ~90.8% of measured need. It is an interim
+# number: the durable form is a conditional quantile Q_t(need | score), which
+# needs the regression head, not this constant.
+_LEAN_DEFAULT = 1600
 
 # PN100 stamps this into SamplingParams.extra_args (via the request's
 # vllm_xargs) on every budget IT chose, and sets it to 0 on the two it must keep
@@ -974,6 +1026,14 @@ H119_OVERRIDABLE = "h119_overridable"
 # Kill switch for the PN100 override alone; the rest of the consumer is
 # unaffected. Default ON — a consumer that defers to PN100 does nothing at all.
 _OVERRIDE_PN100_FLAG = "H119_OVERRIDE_PN100"
+
+# Identity witnesses recorded when we mark an entry, checked before we rewrite
+# it. `_state` is keyed by BATCH INDEX, and indices are reused as requests come
+# and go — so between marking and resolving, index i can belong to a different
+# request entirely. Rewriting then applies one request's route to another's
+# budget: silent, and it looks exactly like "the router capped the wrong row".
+H119_PLEN = "_h119_plen"
+H119_OUT = "_h119_out"
 
 # Set on an entry we took over from PN100, holding the budget PN100 had chosen.
 # If the route never lands, this is what the row falls back to — PN100's own
@@ -1103,6 +1163,8 @@ def h119_on_batch_add(holder, index, params, prompt_tok_ids,
                 _bump("h119_pn100_entry_missing")
                 return False
             entry[H119_PRIOR_BUDGET] = budget
+            entry[H119_PLEN] = len(prompt_tok_ids or ())
+            entry[H119_OUT] = output_tok_ids
             entry[H119_PROVISIONAL] = True
             _bump("h119_pn100_override")
             # False = "caller keeps its own entry", which is right here: we
@@ -1120,6 +1182,8 @@ def h119_on_batch_add(holder, index, params, prompt_tok_ids,
         entry = holder._init_state_entry(prompt_tok_ids, deep)
         entry["output_tok_ids"] = output_tok_ids
         entry["spec_token_ids"] = []
+        entry[H119_PLEN] = len(prompt_tok_ids or ())
+        entry[H119_OUT] = output_tok_ids
         entry[H119_PROVISIONAL] = True
         holder._state[index] = entry
         _bump("h119_provisional_added")
@@ -1148,6 +1212,42 @@ def _h119_apply_budget(state: dict, budget: int) -> None:
         state["in_end"] = (budget - state.get("think_count", 0)) <= 0
 
 
+def _h119_index_matches(index: int, req_id: str, state: dict) -> bool:
+    """True iff batch slot `index` still holds the request we marked.
+
+    Two witnesses, cheap and independent:
+      * prompt length — a scalar the runner keeps per request;
+      * the OUTPUT TOKEN LIST'S IDENTITY (`is`, not `==`). The holder entry and
+        the runner's request state share one list object, so identity is a
+        proof of provenance that no amount of equal content can fake.
+    Missing witnesses (an entry from before this code, or a runner that does not
+    expose `requests`) return True: this guard exists to catch a recycled slot,
+    not to disable the consumer on an unfamiliar runner.
+    """
+    try:
+        plen = state.get(H119_PLEN)
+        out = state.get(H119_OUT)
+        if plen is None and out is None:
+            return True
+        reqs = getattr(ROUTER.runner, "requests", None)
+        if reqs is None:
+            return True
+        rs = reqs.get(req_id)
+        if rs is None:
+            return False
+        if plen is not None:
+            actual = getattr(rs, "num_prompt_tokens", None)
+            if actual is not None and actual != plen:
+                return False
+        if out is not None:
+            rs_out = getattr(rs, "output_token_ids", None)
+            if rs_out is not None and rs_out is not out:
+                return False
+        return True
+    except Exception:  # noqa: BLE001 — a guard must never fail the step
+        return True
+
+
 def h119_resolve_routes(holder) -> None:
     """Called at the top of ThinkingBudgetStateHolder.update_state.
 
@@ -1173,10 +1273,20 @@ def h119_resolve_routes(holder) -> None:
         for index, state in pending:
             if index >= n:
                 # Batch index outside the current batch: the row is mid-move.
-                # Leave it provisional; it resolves on a later step.
+                # Leave it provisional; it resolves on a later step. Counted,
+                # because a row that NEVER comes back sits at the provisional
+                # deep budget forever and this is the only trace of it.
+                _bump("h119_index_out_of_batch")
                 continue
             req_id = req_ids[index]
             if not req_id:
+                continue
+            if not _h119_index_matches(index, req_id, state):
+                # The batch slot was recycled to a different request between the
+                # add and now. Refuse: applying this route would cap the wrong
+                # request, which is invisible in every output we collect.
+                _bump("h119_index_desync")
+                state[H119_PROVISIONAL] = False
                 continue
             route = ROUTES.get(req_id)
             if route is None:
