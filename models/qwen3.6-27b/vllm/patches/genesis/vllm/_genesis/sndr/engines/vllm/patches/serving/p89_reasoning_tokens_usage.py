@@ -118,12 +118,47 @@ NOT deleted. The two sites #45171 did not move (import, accumulator
 extend) keep their single ``required=True`` anchor (identical bytes in
 both pins). protocol.py needed no re-anchor (count==1 in both trees).
 
+CONTENT-SNIFFED RE-ANCHOR 2026-07-25 (wheel v2 recovery). P89 reported
+"dry-run failed" on the wheel-v2 boot. Three of its serving anchors had
+drifted, and — verified by extracting the source from all three pinned
+images — they had drifted on EVERY currently-pinned image, i.e. the patch
+had been silently inert, not newly broken:
+
+  * import — upstream added ``PerRequestTimingMetrics`` to the
+    ``engine.protocol`` import list (present on dev1060cherry-20260713,
+    wheel v1 dev1474cherry-1711 and wheel v2 dev1474cherrymax-1757).
+  * stream_attach — the dev101 anchor spanned from
+    ``_make_prompt_tokens_details(...)`` to ``final_usage_chunk =
+    ChatCompletionStreamResponse(``; upstream inserted the
+    ``stream_per_request_metrics`` block between them (all three pins) and
+    added a ``num_cache_creation_tokens`` argument (wheel v1/v2 only).
+  * full_attach — same ``num_cache_creation_tokens`` argument, on the
+    ``final_res.`` spelling (wheel v1/v2 only).
+
+Fix shape (the P101 92647851/748d2a0b precedent): both attach spans are cut
+back to the helper call itself — the Genesis block only needs to land after
+the usage object exists and before it is consumed — and the pin-varying
+argument / import line is CONTENT-SNIFFED via ``_pick_anchor`` so one module
+serves all three pinned images without an in-place anchor rewrite. Sniffing
+is wrapped in ``except Exception``: an unreadable target degrades to the
+plain anchors (an ordinary anchor miss), never a boot-killing exception.
+Byte-verified offline against source extracted from all three images: each
+site is count==1 in exactly one shape per pin and count==0 in the other, all
+five serving sub-patches plus the protocol sub-patch apply, and the patched
+files byte-compile. NOT verified live — no boot was performed.
+
+The capability is NOT available natively: upstream exposes
+``reasoning_tokens`` only on ``/v1/responses`` (responses/protocol.py +
+responses/serving.py); a grep of the whole vllm package in the wheel-v2
+image finds zero ``reasoning_tokens`` under the chat-completion path.
+
 Author backport: Sandermage (Sander) Barzov Aleksandr, Ukraine, Odessa.
 Vendor target: vllm-project/vllm#45471 (DRAFT/OPEN as of 2026-06-13).
 """
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from sndr.engines.vllm.detection.guards import resolve_vllm_file
 from sndr.kernel import (
@@ -230,29 +265,53 @@ def _protocol_sub_patches() -> list[TextPatch]:
 # ── serving.py sub-patches ───────────────────────────────────────────
 
 # (1) Import CompletionTokenUsageInfo alongside the existing usage models.
-_SERVING_IMPORT_OLD = (
+#
+# CONTENT-SNIFFED (2026-07-25, dual-pin) — upstream added
+# ``PerRequestTimingMetrics`` to this import list between dev101 and the
+# dev1060/dev1474 pins. The tree is DUAL-PIN (dev1060cherry, wheel v1
+# dev1474cherry, wheel v2 dev1474cherrymax must all keep booting), so we do
+# NOT rewrite the literal — we build both the plain and the spliced form and
+# let ``_pick_anchor`` choose per target content. Byte-verified: the plain
+# form is count==1 on pre-PerRequestTimingMetrics pins, the spliced form is
+# count==1 on dev1060cherry-20260713 / dev1474cherry-1711 /
+# dev1474cherrymax-1757, count==0 the other way round.
+_SERVING_IMPORT_HEAD = "from vllm.entrypoints.openai.engine.protocol import (\n"
+_SERVING_IMPORT_HEAD_NEW = (
     "from vllm.entrypoints.openai.engine.protocol import (\n"
+    "    # [Genesis P89 vendor of vllm#45471] CompletionTokenUsageInfo\n"
+    "    CompletionTokenUsageInfo,\n"
+)
+_SERVING_IMPORT_MID = (
     "    DeltaMessage,\n"
     "    ErrorResponse,\n"
     "    FunctionCall,\n"
+)
+# Only present on pins that carry the per-request timing-metrics frontend.
+_SERVING_IMPORT_TIMING_METRICS = "    PerRequestTimingMetrics,\n"
+_SERVING_IMPORT_TAIL = (
     "    PromptTokenUsageInfo,\n"
     "    RequestResponseMetadata,\n"
     "    ToolCall,\n"
     "    UsageInfo,\n"
     ")\n"
 )
+_SERVING_IMPORT_OLD = (
+    _SERVING_IMPORT_HEAD + _SERVING_IMPORT_MID + _SERVING_IMPORT_TAIL
+)
 _SERVING_IMPORT_NEW = (
-    "from vllm.entrypoints.openai.engine.protocol import (\n"
-    "    # [Genesis P89 vendor of vllm#45471] CompletionTokenUsageInfo\n"
-    "    CompletionTokenUsageInfo,\n"
-    "    DeltaMessage,\n"
-    "    ErrorResponse,\n"
-    "    FunctionCall,\n"
-    "    PromptTokenUsageInfo,\n"
-    "    RequestResponseMetadata,\n"
-    "    ToolCall,\n"
-    "    UsageInfo,\n"
-    ")\n"
+    _SERVING_IMPORT_HEAD_NEW + _SERVING_IMPORT_MID + _SERVING_IMPORT_TAIL
+)
+_SERVING_IMPORT_OLD_TIMING = (
+    _SERVING_IMPORT_HEAD
+    + _SERVING_IMPORT_MID
+    + _SERVING_IMPORT_TIMING_METRICS
+    + _SERVING_IMPORT_TAIL
+)
+_SERVING_IMPORT_NEW_TIMING = (
+    _SERVING_IMPORT_HEAD_NEW
+    + _SERVING_IMPORT_MID
+    + _SERVING_IMPORT_TIMING_METRICS
+    + _SERVING_IMPORT_TAIL
 )
 
 # (2) Declare the per-choice token-id accumulator next to previous_texts.
@@ -417,22 +476,35 @@ _SERVING_STREAM_ATTACH_DEV491_NEW = (
 # ``reasoning_parser.count_reasoning_tokens(ids)`` form still never
 # appears in our emitted text (we walk ``p89_reasoning_parsers[i]``), so
 # the lint self-collision contract holds.
-_SERVING_STREAM_ATTACH_DEV101_OLD = (
+# RE-ANCHOR 2026-07-25 (dev1060cherry / wheel v1 / wheel v2) — the dev101
+# anchor above ran from the ``_make_prompt_tokens_details(...)`` call all the
+# way to ``final_usage_chunk = ChatCompletionStreamResponse(``. Upstream then
+# (a) inserted the ``stream_per_request_metrics`` block between those two
+# statements and (b) added a ``num_cache_creation_tokens`` argument to the
+# helper call. Both changes broke the dev101 span, which is why P89's dry-run
+# reported a failure on every current pin.
+#
+# The span is now cut back to the helper call alone (the Genesis block only
+# needs to land after ``final_usage`` exists and before the chunk is built),
+# and the cache-creation argument is CONTENT-SNIFFED so the same code serves
+# all three pinned images. Byte-verified counts:
+#   plain (no cache-creation arg):   dev1060cherry-20260713 == 1, v1/v2 == 0
+#   spliced (cache-creation arg):    wheel v1 + wheel v2   == 1, dev1060 == 0
+_SERVING_STREAM_ATTACH_CALL_HEAD = (
     "                final_usage.prompt_tokens_details = _make_prompt_tokens_details(\n"
     "                    self.enable_prompt_tokens_details,\n"
     "                    num_cached_tokens,\n"
-    "                    mm_token_counts,\n"
-    "                )\n"
-    "\n"
-    "                final_usage_chunk = ChatCompletionStreamResponse(\n"
 )
-_SERVING_STREAM_ATTACH_DEV101_NEW = (
-    "                final_usage.prompt_tokens_details = _make_prompt_tokens_details(\n"
-    "                    self.enable_prompt_tokens_details,\n"
-    "                    num_cached_tokens,\n"
+_SERVING_STREAM_ATTACH_CACHE_CREATION = "                    num_cache_creation_tokens,\n"
+_SERVING_STREAM_ATTACH_CALL_TAIL = (
     "                    mm_token_counts,\n"
     "                )\n"
     "\n"
+)
+_SERVING_STREAM_ATTACH_DEV101_OLD = (
+    _SERVING_STREAM_ATTACH_CALL_HEAD + _SERVING_STREAM_ATTACH_CALL_TAIL
+)
+_SERVING_STREAM_ATTACH_DEV101_BODY = (
     "                # [Genesis P89 vendor of vllm#45471] surface\n"
     "                # completion_tokens_details.reasoning_tokens for reasoning\n"
     "                # models (qwen3 on all 4 PROD models). The pin's #45171\n"
@@ -456,7 +528,18 @@ _SERVING_STREAM_ATTACH_DEV101_NEW = (
     "                        )\n"
     "                    )\n"
     "\n"
-    "                final_usage_chunk = ChatCompletionStreamResponse(\n"
+)
+_SERVING_STREAM_ATTACH_DEV101_NEW = (
+    _SERVING_STREAM_ATTACH_DEV101_OLD + _SERVING_STREAM_ATTACH_DEV101_BODY
+)
+# Cache-creation-argument variants (wheel v1 / wheel v2).
+_SERVING_STREAM_ATTACH_CACHE_OLD = (
+    _SERVING_STREAM_ATTACH_CALL_HEAD
+    + _SERVING_STREAM_ATTACH_CACHE_CREATION
+    + _SERVING_STREAM_ATTACH_CALL_TAIL
+)
+_SERVING_STREAM_ATTACH_CACHE_NEW = (
+    _SERVING_STREAM_ATTACH_CACHE_OLD + _SERVING_STREAM_ATTACH_DEV101_BODY
 )
 
 # (5) Attach completion_tokens_details to the non-streaming response
@@ -534,22 +617,30 @@ _SERVING_FULL_ATTACH_DEV491_NEW = (
 # => byte-inert for non-reasoning models). Anchor + replacement are
 # byte-exact, count==1 verified on the live 0.23.1 container; the variant
 # is ``required=True`` so silent drift SKIPs loudly.
-_SERVING_FULL_ATTACH_DEV101_OLD = (
+# RE-ANCHOR 2026-07-25 (dev1060cherry / wheel v1 / wheel v2) — same two
+# upstream changes as the streaming site: the span is cut back to the helper
+# call (the trailing ``request_metadata.final_usage_info = usage`` line is no
+# longer part of the anchor, it simply follows the inserted block), and the
+# ``final_res.num_cache_creation_tokens`` argument is CONTENT-SNIFFED.
+# Byte-verified: plain form count==1 on dev1060cherry-20260713 and count==0 on
+# wheel v1 / v2; spliced form is the mirror image.
+_SERVING_FULL_ATTACH_CALL_HEAD = (
     "        usage.prompt_tokens_details = _make_prompt_tokens_details(\n"
     "            self.enable_prompt_tokens_details,\n"
     "            final_res.num_cached_tokens,\n"
-    "            mm_token_counts,\n"
-    "        )\n"
-    "\n"
-    "        request_metadata.final_usage_info = usage\n"
 )
-_SERVING_FULL_ATTACH_DEV101_NEW = (
-    "        usage.prompt_tokens_details = _make_prompt_tokens_details(\n"
-    "            self.enable_prompt_tokens_details,\n"
-    "            final_res.num_cached_tokens,\n"
+_SERVING_FULL_ATTACH_CACHE_CREATION = (
+    "            final_res.num_cache_creation_tokens,\n"
+)
+_SERVING_FULL_ATTACH_CALL_TAIL = (
     "            mm_token_counts,\n"
     "        )\n"
     "\n"
+)
+_SERVING_FULL_ATTACH_DEV101_OLD = (
+    _SERVING_FULL_ATTACH_CALL_HEAD + _SERVING_FULL_ATTACH_CALL_TAIL
+)
+_SERVING_FULL_ATTACH_DEV101_BODY = (
     "        # [Genesis P89 vendor of vllm#45471] non-streaming\n"
     "        # completion_tokens_details.reasoning_tokens (see streaming attach\n"
     "        # above). The pin's #45171 refactor exposes the reasoning parser as\n"
@@ -566,11 +657,42 @@ _SERVING_FULL_ATTACH_DEV101_NEW = (
     "                reasoning_tokens=p89_reasoning_count,\n"
     "            )\n"
     "\n"
-    "        request_metadata.final_usage_info = usage\n"
+)
+_SERVING_FULL_ATTACH_DEV101_NEW = (
+    _SERVING_FULL_ATTACH_DEV101_OLD + _SERVING_FULL_ATTACH_DEV101_BODY
+)
+# Cache-creation-argument variants (wheel v1 / wheel v2).
+_SERVING_FULL_ATTACH_CACHE_OLD = (
+    _SERVING_FULL_ATTACH_CALL_HEAD
+    + _SERVING_FULL_ATTACH_CACHE_CREATION
+    + _SERVING_FULL_ATTACH_CALL_TAIL
+)
+_SERVING_FULL_ATTACH_CACHE_NEW = (
+    _SERVING_FULL_ATTACH_CACHE_OLD + _SERVING_FULL_ATTACH_DEV101_BODY
 )
 
 
-def _serving_sub_patches() -> list[TextPatch]:
+def _pick_anchor(
+    src: str,
+    plain_old: str,
+    plain_new: str,
+    spliced_old: str,
+    spliced_new: str,
+) -> tuple[str, str]:
+    """Content-sniff between two anchor shapes of the SAME site.
+
+    ``spliced_old`` is the shape carrying an extra upstream argument /
+    import line; ``plain_old`` is the shape without it. The tree is
+    DUAL-PIN, so we must never rewrite one in place — we pick per target
+    content. When neither matches we return the plain pair, which the
+    TextPatcher surfaces as an ordinary anchor miss (never an exception).
+    """
+    if spliced_old in src:
+        return spliced_old, spliced_new
+    return plain_old, plain_new
+
+
+def _serving_sub_patches(src: str = "") -> list[TextPatch]:
     # Three sub-patches (decl / stream_attach / full_attach) carry a
     # dev259 AND a dev491 variant with required-at-least-one semantics:
     # both variants are declared ``required=False`` so the TextPatcher
@@ -582,11 +704,38 @@ def _serving_sub_patches() -> list[TextPatch]:
     # window. The two sites #45171 did NOT move (import, accumulator
     # extend) keep their single ``required=True`` anchor (same bytes in
     # both pins).
+    #
+    # 2026-07-25: the import / stream_attach / full_attach sites are now
+    # additionally CONTENT-SNIFFED (``_pick_anchor``) between the pre- and
+    # post-``PerRequestTimingMetrics`` / ``num_cache_creation_tokens`` shapes,
+    # so one module serves dev1060cherry, wheel v1 and wheel v2 without ever
+    # rewriting an anchor in place.
+    import_old, import_new = _pick_anchor(
+        src,
+        _SERVING_IMPORT_OLD,
+        _SERVING_IMPORT_NEW,
+        _SERVING_IMPORT_OLD_TIMING,
+        _SERVING_IMPORT_NEW_TIMING,
+    )
+    stream_old, stream_new = _pick_anchor(
+        src,
+        _SERVING_STREAM_ATTACH_DEV101_OLD,
+        _SERVING_STREAM_ATTACH_DEV101_NEW,
+        _SERVING_STREAM_ATTACH_CACHE_OLD,
+        _SERVING_STREAM_ATTACH_CACHE_NEW,
+    )
+    full_old, full_new = _pick_anchor(
+        src,
+        _SERVING_FULL_ATTACH_DEV101_OLD,
+        _SERVING_FULL_ATTACH_DEV101_NEW,
+        _SERVING_FULL_ATTACH_CACHE_OLD,
+        _SERVING_FULL_ATTACH_CACHE_NEW,
+    )
     return [
         TextPatch(
             name="p89_serving_import",
-            anchor=_SERVING_IMPORT_OLD,
-            replacement=_SERVING_IMPORT_NEW,
+            anchor=import_old,
+            replacement=import_new,
             required=True,
             upstream_merged_markers=list(_SERVING_DRIFT_MARKERS),
             on_upstream_merge="abort_bundle",
@@ -636,8 +785,8 @@ def _serving_sub_patches() -> list[TextPatch]:
         ),
         TextPatch(
             name="p89_serving_stream_attach_dev101",
-            anchor=_SERVING_STREAM_ATTACH_DEV101_OLD,
-            replacement=_SERVING_STREAM_ATTACH_DEV101_NEW,
+            anchor=stream_old,
+            replacement=stream_new,
             required=True,
         ),
         # full_attach — dev259 / dev491 / dev101 variants (same rationale
@@ -658,8 +807,8 @@ def _serving_sub_patches() -> list[TextPatch]:
         ),
         TextPatch(
             name="p89_serving_full_attach_dev101",
-            anchor=_SERVING_FULL_ATTACH_DEV101_OLD,
-            replacement=_SERVING_FULL_ATTACH_DEV101_NEW,
+            anchor=full_old,
+            replacement=full_new,
             required=True,
         ),
     ]
@@ -686,6 +835,15 @@ def _make_serving_patcher() -> TextPatcher | None:
     target = resolve_vllm_file(_SERVING_REL)
     if target is None:
         return None
+    try:
+        # resolve_vllm_file may hand back a str or a Path — normalize before
+        # IO (the P101 748d2a0b lesson). Sniffing is best-effort: an
+        # unreadable target falls through to the plain anchors, which the
+        # TextPatcher reports as an ordinary anchor miss, never an EXCEPTION
+        # that could take the boot down.
+        src = Path(target).read_text(encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        src = ""
     return TextPatcher(
         patch_name=(
             "P89 entrypoints/openai/chat_completion/serving.py — "
@@ -693,7 +851,7 @@ def _make_serving_patcher() -> TextPatcher | None:
         ),
         target_file=str(target),
         marker=GENESIS_P89_SERVING_MARKER,
-        sub_patches=_serving_sub_patches(),
+        sub_patches=_serving_sub_patches(src),
         upstream_drift_markers=list(_SERVING_DRIFT_MARKERS),
     )
 
