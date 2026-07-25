@@ -173,7 +173,8 @@ services:
       - GENESIS_PROFILE_RUN_CAP_M=4128
       - GENESIS_ENABLE_P74_CHUNK_CLAMP=1
       - GENESIS_ENABLE_P94=1
-      #- GENESIS_ENABLE_PN8_MTP_DRAFT_ONLINE_QUANT=1
+      # [2026-07-25 USER KV-headroom push] PN8 promoted (see tcbench8021.yml note).
+      - GENESIS_ENABLE_PN8_MTP_DRAFT_ONLINE_QUANT=1
       - GENESIS_ENABLE_PN17_FA2_LSE_CLAMP=1
       - GENESIS_ENABLE_PN19_SCOPED_MAX_SPLIT=1
       # [2026-07-14] PN59 (streaming GDN) DISABLED so chunk.py keeps a plain fused-replaceable
