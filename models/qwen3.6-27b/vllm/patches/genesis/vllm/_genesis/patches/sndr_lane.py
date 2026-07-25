@@ -38,7 +38,7 @@ future `git read-tree` grafts from the sndr remote are conflict-free):
      entries would additionally self-skip on model detection; we do not
      rely on that alone.)
 
-  3. S-PREFIX ALIASES — his in-registry PN71..PN95 numbers collide with
+  3. S-PREFIX ALIASES — his in-registry PN71..PN118 numbers collide with
      our /fixes house series of the same numbers (different patches!).
      Zero exact env-var collisions exist, but to keep enable-waves and
      log greps unambiguous, each colliding entry gets an extra alias
@@ -71,9 +71,39 @@ log = logging.getLogger("genesis.sndr_lane")
 # GENESIS_ENABLE_SPN96_EMERGENCY_DEMOTE) keep Sander's pair individually
 # addressable with zero collision; both remain opt-in (default_on=False,
 # offload/tiering PoCs — no-op-to-risky on a single-card rig).
+#
+# PN102/PN104/PN105/PN106/PN108/PN118 added 2026-07-25 (patch-id collision
+# audit). Each of these lane-2 ids ALSO names a completely different house
+# /fixes patch:
+#
+#   PN102  house middleware/answer_rescue.py Leg-1 envelope contract
+#          (GENESIS_ENABLE_PN102_CONTRACT)          vs lane-2 PrefetchOffloader
+#          pinned-allocator prewarm pool (…_PN102_PARAM_POOL)
+#   PN104  house patch_pn104_mamba_align_gather_clamp.py (always-on)
+#          vs lane-2 cpu-offload → Prefetch redirect
+#   PN105  house patch_pn105_nan_logits_abort.py (always-on)
+#          vs lane-2 AutoRound INT4 offload compat
+#   PN106  house patch_pn106d_bug076_nan_slot_audit.py (house id PN106D)
+#          vs lane-2 GDN scratch tensor pool
+#   PN108  house patch_pn108_plateau_cap.py (GENESIS_ENABLE_PN108_PLATEAU_CAP)
+#          vs lane-2 GDN fused_recurrent prefill dispatch
+#   PN118  house answer_rescue.py Leg-3 premature-close gate
+#          (GENESIS_ENABLE_PN118_CLOSEGATE) vs lane-2 TurboQuant workspace
+#          graceful-fallback (bare GENESIS_ENABLE_PN118)
+#
+# No pair collides on the EXACT env-var today — but nothing prevented it, and
+# that is precisely the BUG-122 failure shape (a patch gating on the wrong var
+# while the boot record says "applied"). Bringing them under the same S-alias
+# guard as the other 11 is purely ADDITIVE: step 3 only appends
+# GENESIS_ENABLE_S<bare> to env_flag_aliases, and sndr's _resolve_env_state
+# ignores an alias whose env var is unset (verified: none of the six S-names
+# appears in any compose or model_config). The composes that DO arm these
+# lane-2 patches set the canonical flag explicitly, so the BUG-122 mirror below
+# (`flag not in os.environ`) never fires for them either.
 _HOUSE_COLLIDING_IDS = {
     "PN71", "PN72", "PN73", "PN79", "PN80", "PN82", "PN90", "PN91", "PN92",
     "PN95", "PN96",
+    "PN102", "PN104", "PN105", "PN106", "PN108", "PN118",
 }
 
 # Shared ids that LANE-1 hard-owns and applies (its wiring is the live form
