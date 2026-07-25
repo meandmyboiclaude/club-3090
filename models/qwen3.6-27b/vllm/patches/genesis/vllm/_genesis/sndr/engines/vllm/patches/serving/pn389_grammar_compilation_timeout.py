@@ -990,11 +990,19 @@ def apply() -> tuple[str, str]:
         return "skipped", "vllm install root not discoverable"
 
     patchers = _all_patchers()
-    if len(patchers) != 1:
+    # [2026-07-25] the 07-13 dev1060 re-wire made _all_patchers() return the
+    # 3-file design again (utils + envs + xgrammar) but left this gate at
+    # exactly-1 — PN389 has silently skipped as "3/1" on every boot since.
+    # Correct gate: the backend_xgrammar patcher must be present (it lands
+    # the call sites); utils/envs arms ride along only on pins where their
+    # builders resolve (pins lacking the upstream helper/env).
+    if not any(
+        os.path.basename(p.target_file) == "backend_xgrammar.py" for p in patchers
+    ):
         return (
             "skipped",
             "PN389: target not resolvable "
-            f"({len(patchers)}/1 of backend_xgrammar found)",
+            f"(backend_xgrammar missing from {len(patchers)} resolved patcher(s))",
         )
 
     # The single target must be unpatched and free of the upstream-merged
@@ -1059,7 +1067,11 @@ def is_applied() -> bool:
     if vllm_install_root() is None:
         return False
     patchers = _all_patchers()
-    if len(patchers) != 1:
+    # [2026-07-25] same gate fix as apply(): require the xgrammar patcher,
+    # not an exact count (see the dev1060 re-wire note in _all_patchers).
+    if not any(
+        os.path.basename(p.target_file) == "backend_xgrammar.py" for p in patchers
+    ):
         return False
     for p in patchers:
         try:
