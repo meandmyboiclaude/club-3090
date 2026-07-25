@@ -1,0 +1,80 @@
+{
+ "_README": [
+  "Hand verdicts on commits, keyed by SHORT sha (12 chars) as the ledger emits it.",
+  "These WIN over the heuristic and survive every regeneration of the ledger.",
+  "Use them for the two cases the fingerprinter cannot decide on its own:",
+  "  1. a commit deliberately superseded by later work (record WHY, with evidence)",
+  "  2. a commit whose fingerprints are structurally underivable (pure revert, etc.)",
+  "Allowed verdicts: intact | LOST | superseded | accepted-loss | doc-only |",
+  "                  config-drift | removal | unfingerprintable",
+  "Never set a verdict to 'superseded' without naming the thing that supersedes it."
+ ],
+ "5192458dcc30": {
+  "verdict": "superseded",
+  "note": "PN71 06-19 'clamp thinking_token_budget below max_tokens so cut-mid-think never yields empty content'. The clamp (`if max_tokens is not None and _pn71_ttb >= max_tokens: self.thinking_token_budget = max(1, max_tokens - _pn71_grace)`) is GONE from fixes/patch_pn71_reasoning_alias.py, and PN71_ANSWER_GRACE moved 1024 -> 512. Removed 41 minutes later by 4f7e524b 'pn71 v2: leak-proof reasoning budget', which deleted think-end FORCING entirely and whose own message states the trade explicitly: 'on open-ended prompts where Qwopus massively over-thinks, it can fill the budget thinking and get cut -> empty content ... rather than polluted'. So this is a documented, deliberate trade, not a silent loss. REVISIT LINK: the accepted defect is the same empty-content class BUG-127 measures at 39-43%; if that lane reopens, this clamp is prior art worth re-reading."
+ },
+ "80792e9a4f76": {
+  "verdict": "superseded",
+  "note": "vllm-build: our 07-03 draft of #47574 (zero new KV blocks for quantized sliding-window hybrid caches). All three symbols it introduced (has_block_dropping_layers, has_quantized_kv_cache, needs_quantized_reuse_zeroing) are absent from cherry-max, which is why the fingerprinter flags it. NOT our loss: #47574 merged upstream as 8ce53a616 on 07-20 and that commit is an ancestor of our base 0ba2aa35. Upstream's merged form is DIFFERENT code (gates on has_mixed_precision_kv_cache, i.e. >1 distinct (dtype, kv_quant_mode)) and is strictly narrower than our draft - a uniformly-quantized sliding-window cache zeroes under ours but not under upstream's. Inert for us either way: Qwen3.6 is hybrid-mamba, so has_mamba_layers forces zeroing regardless. Recorded in vllm-build BUILD-NOTES.md."
+ },
+ "310495614520": {
+  "verdict": "accepted-loss",
+  "note": "vllm-build: 07-13 cherry-pick of the FULL #48361 head 86e1b161b (11 files, +1420). The 07-25 replay 25e7a397b took only the slimmed head 68ada38bc4 (2 files, +46) on the grounds that the core corruption fix was absorbed upstream in-range - which is CORRECT for the runtime mechanisms (drop_eagle_block, _cache_hit_alignment_tokens, _mamba_block_aligned_split are all present in origin/main). What was NOT re-established: (a) tests/v1/core/test_mamba_align_chunk_split.py and (b) tests/v1/e2e/test_hybrid_mamba_prefix_cache_correctness.py, both ABSENT from every current branch, and (c) supports_eagle_cache_peek, the per-spec gating refinement upstream never adopted. Those two test files cover the #43559/#47194 hybrid-mamba + prefix-cache + MTP/EAGLE KV corruption class, which is exactly this rig's live failure mode. ACTION: restore them from 310495614520 on the next wheel rebuild."
+ },
+ "c20672d176ed": {
+  "verdict": "superseded",
+  "note": "fixes/patch_pn119_lens_router.py is gone because bb501000 RENAMED it to fixes/patch_h119_lens_router.py — the house lens-router had to move off the id PN119, which lane-2 already owns for the TurboQuant k8v4 GQA head-grouping kernel (PATCH-ID-COLLISION-AUDIT-20260725.md). The old flag name survives as a ':-' chain shim in the compose entrypoint so an operator compose setting only GENESIS_ENABLE_PN119_ROUTER still works. Rename, not loss. The basename fallback cannot see this one because the stem changed."
+ },
+ "df5e3f1806cf": {
+  "verdict": "superseded",
+  "note": "PN109 budget bridge RETIRED 2026-07-20 (BUG-107h): the 107e diagnosis was wrong — this pin's chat_completion/protocol.py carries thinking_token_budget natively (:244 -> :774), so budgets were engine-enforced all along. Module moved to fixes/_archive/patch_pn109_budget_bridge.py; re-wire only if a future pin drops the protocol field."
+ },
+ "9395db3998b9": {
+  "verdict": "superseded",
+  "note": "PN79 RETIRED 2026-07-23 (BUG-119). The #46067 crash class is handled IN-TREE — turboquant_attn.py pre-reserves decode scratch and locks the workspace (~:393/~:1396). The patch had silently SKIPped on every boot since the pin bump, and weeks of conc-4 cudagraph+TQ+MTP bench load ran without it with zero device asserts. That absence of incidents IS the evidence. Module in fixes/_archive/."
+ },
+ "7cb8a00313a3": {
+  "verdict": "superseded",
+  "note": "patch_vram_budget.py was recorded specifically so it could be removed — superseded by patch_vram_guardian.py, which is live in both compose entrypoints. The commit subject says so outright."
+ },
+ "f6613c869abd": {
+  "verdict": "superseded",
+  "note": "patch_inputs_embeds_optional.py dropped by the Genesis v7.72.2 bump: PN35 is native (docs/UPSTREAM.md:35). The local sidecar retires when the Genesis lane covers it; the capability did not go away."
+ },
+ "9af1a5245adf": {
+  "verdict": "superseded",
+  "note": "patch_pn30_dst_shaped_temp_fix.py dropped by Genesis v7.72.2 — PN30 v7.68 covers it (docs/UPSTREAM.md:35, :160-162 'Closed in v7.69')."
+ },
+ "a62ad78a4e8a": {
+  "verdict": "superseded",
+  "note": "patch_pn25_genesis_register_fix.py dropped by Genesis v7.72.2 — PN25 covers it (docs/UPSTREAM.md:35). Cliff 1 mech B is closed by the lane-1/lane-2 PN25 SiluAndMul import-time-cached pool."
+ },
+ "5aa97a25d910": {
+  "verdict": "superseded",
+  "note": "patch_workspace_lock_disable.py dropped by Genesis v7.72.2 — PN34 (workspace-lock relax) covers it, and PN34 itself is now superseded by SNDR_WORKSPACE_001 grow-after-lock (docs/UPSTREAM.md:35, :101)."
+ },
+ "53d0663a50c9": {
+  "verdict": "superseded",
+  "note": "patch_pn12_compile_safe_custom_op.py retired: PN12 anchors match natively and the compile-safe hook is P38B in Genesis v7.65+ (docs/UPSTREAM.md:152-153), active via GENESIS_ENABLE_P38B_COMPILE_SAFE=1 on every TQ3 compose."
+ },
+ "9f06a0fe79e8": {
+  "verdict": "superseded",
+  "note": "patch_fa_max_seqlen_clamp.py (local P104) dropped during the v0.20 migration: Sandermage's PN17 (FA wrapper) + P15B (TQ wrapper) together cover both layers (docs/UPSTREAM.md:149-150, :154). Sidecar removed from compose mounts 2026-05-01."
+ },
+ "41eabac17b0b": {
+  "verdict": "superseded",
+  "note": "patch_pn12_ffn_pool_anchor.py retired — PN12 anchors match natively on the current pins (docs/UPSTREAM.md:152). The FFN intermediate scratch pool ships as lane-1/lane-2 PN12."
+ },
+ "2511a981109b": {
+  "verdict": "superseded",
+  "note": "The initial models/ import carried two sidecars that have since retired: patch_pr40798_workspace.py (explicitly a research artifact) and patch_tolist_cudagraph.py (P78, superseded by upstream's CPU-mirror metadata path). Both listed in the v7.72.2 drop set, docs/UPSTREAM.md:35 / :101."
+ },
+ "f785a3a5f196": {
+  "verdict": "LOST",
+  "note": "KVQ-2 sink32 RUNTIME gather. THE SINGLE LARGEST AT-RISK ASSET WE HAVE. cherry-max ships sink32 as ACCOUNTING ONLY — its own source says so at turboquant_attn.py:350 ('the sink side-buffer store/gather is not yet wired into the'). The runtime lives only on the kvq2-sink-runtime worktree: +487 across 4 files, new turboquant/sink.py (tag-validated direct-mapped slot cache, _tq_sink_claim/_tq_sink_write kernels) plus two test files. CPU-tested, never GPU-run, NEVER PUSHED to the fork, in no wheel. It exists in exactly one place on disk. ACTION: `git push fork kvq2-sink-runtime`."
+ },
+ "8a7ff61ee0dd": {
+  "verdict": "LOST",
+  "note": "The self-review on top of f785a3a5f that closes a SILENT-WRONG stale-tag read — a freed-and-reissued slot could return another sequence's K/V. Same exposure as its parent: unpushed, single copy on disk. Losing this one is worse than losing the feature, because the feature without it is silently incorrect. ACTION: push with the parent."
+ }
+}

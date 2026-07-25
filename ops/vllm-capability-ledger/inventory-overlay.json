@@ -1,0 +1,72 @@
+{
+ "_README": [
+  "Hand-written per-capability facts, merged OVER the extracted record by",
+  "vllm-capability-extract.py.  Keyed by the capability `key` (which is",
+  "`<id>@<lane>:<module>` when the id is ambiguous across lanes) or by bare `id`",
+  "when it is unique.  Nothing here is regenerated - the extraction is.",
+  "",
+  "Use it for: one-line descriptions the docstring does not give, upstream",
+  "absorption evidence, retirement rationale, and - most valuable - a",
+  "verification handle for anything the AST cannot see.",
+  "",
+  "Fields the verifier understands beyond the extracted ones:",
+  "  markers  []  extra marker strings to look for (merged, not replaced)",
+  "  targets  []  extra container-absolute target paths",
+  "  status   ''  overrides the heuristic status",
+  "  note     ''  free text, shown in --json output"
+ ],
+
+ "_BLIND_SPOTS": [
+  "These five capabilities have NO verification signal of any kind - not a",
+  "marker, not an attribute, not a metric.  If the ledger's promise is 'an",
+  "upstream bump cannot silently drop work', these are precisely where it",
+  "would happen, and two of them are LIVE in production right now.",
+  "Fixing them means adding a marker string to the patch, which is a change to",
+  "a patch module and therefore out of scope for the session that built this.",
+  "  P5b     lane-2 memory/p5b_page_size_pad_smaller  - env coordinator for P5",
+  "  PN289   lane-2 observability/genesis_process_info - ON in both composes",
+  "  PN201   lane-2 streaming/pn201_scheduler_empty_cache - ON in both composes",
+  "  PN203   lane-2 streaming/pn203_cold_prefix_offload",
+  "  G4_T1   lane-2 tool_parsing/g4_t1_pr42006_marker"
+ ],
+
+ "PN91G": {
+  "note": "fixes-lane vllm#48475 GDN spec-decode state-index clamp. Targets are built by a helper (_fla()) so the AST cannot see them; resolved by the whole-tree marker sweep. VERIFIED MISSING 2026-07-25 on the live tcbench container: third_party/flash_linear_attention/ops/fused_recurrent.py exists and contains ZERO '# PN91g:' - the patch is always-on in the entrypoint and had no effect. This is a live BUG-122-class instance, not a tooling artifact."
+ },
+
+ "P39": {
+  "note": "P39a FLA chunk_scaled_dot_kkt persistent A pool. Was setattr-only and therefore INERT across `exec vllm serve` for months while logging 'applied' every boot. 69cae1bd gave it a self-install hook text-patched into chunk_scaled_dot_kkt.py, gated OFF by default behind GENESIS_ENABLE_P39A_SELFINSTALL. Zero markers with the flag unset is CORRECT. Live behaviour remains unverified until a boot with the flag on."
+ },
+
+ "P89": {
+  "note": "completion_tokens_details.reasoning_tokens in chat usage. 'Upstream has this natively' is FALSE: reasoning_tokens exists only under entrypoints/openai/responses/; chat_completion has zero hits on all three image pins. The populated reasoning_tokens in bench rows was computed CLIENT-side (qbench45/bench/client.py). Three sub-anchors had drifted on EVERY pin, so P89 was silently inert for a long time rather than newly broken. Re-anchored 6edf8386 (content-sniffed, dual-pin safe)."
+ },
+
+ "PN119": {
+  "note": "AMBIGUOUS ID - two different patches. lane-2 PN119 = TurboQuant k8v4 GQA head-grouping kernel (vllm#40792). The house lens-router formerly called PN119 was renamed to H119 in bb501000 (fixes/patch_h119_lens_router.py) precisely to end this collision; the old flag name survives as a ':-' chain shim in the compose entrypoint. Renaming lane-2's PN119 is REJECTED: the vendored tree must stay byte-identical for git read-tree grafts, and P18B_TEXT anchors on PN119's post-apply output."
+ },
+
+ "P18B_TEXT": {
+  "note": "TQ decode stage1 kernel-literal tune. COUPLED TO PN119: both anchors key on the launch shape PN119 EMITS, so if PN119 stops applying, P18B_TEXT necessarily misses too. Re-anchor the pair in ONE pass, never separately. Its own flag is commented out in the composes - it only announces APPLY via GENESIS_SNDR_TRUST_DEFAULT_ON=1."
+ },
+
+ "PN346": {
+  "note": "RETIRED - do NOT re-anchor. PN346_ANCHOR_OLD count is 0 on all three image pins. The house /fixes pn87 applies, emits the byte-identical guard AND additionally fixes the fine-grained max_num_partial_units loop - a strict superset. Forcing PN346 would be HARMFUL, not neutral: lane-2 dispatches before /fixes and would consume pn87's coarse anchor. Documented in f5632b96."
+ },
+
+ "P87": {
+  "note": "ABSORBED, closed on two independent grounds. (1) marlin_padded_nk (#45295) is native in nightly-0ba2aa35 and pads K as well as N; P87's drift markers now recognise it and self-skip cleanly. (2) Independently useless: #40361 was closed-unmerged, the text anchor is gone on BOTH engine pins, and P87 was never active on any validated boot - so even a revert of #45295 leaves it retired. docs/UPSTREAM.md:100."
+ },
+
+ "PN79": {
+  "note": "RETIRED 2026-07-23 (BUG-119). The #46067 crash class is handled IN-TREE by turboquant_attn.py, which pre-reserves decode scratch and locks the workspace. The patch had silently SKIPped on every boot since the pin bump - weeks of conc-4 cudagraph+TQ+MTP bench load ran without it and produced zero device asserts, which is the evidence. Archived to fixes/_archive/."
+ },
+
+ "PN73@fixes:patch_pn73_vendor_legacy_reasoning_parser": {
+  "note": "Superseded by PN76 (engine-level deferred tool-call commit) and deliberately COMMENTED OUT in both compose entrypoints, kept for instant rollback if functional test D regresses. Not invoked == not a loss."
+ },
+
+ "PN81": {
+  "note": "/rerank on :8020, adapting TEI + Cohere wire formats onto upstream /generative_scoring. Requires PN82. USER 2026-07-25: nothing consumes it; do NOT build out PN81 further and do NOT load a reranker model. Kill-switch GENESIS_PN81_RERANK=0."
+ }
+}
