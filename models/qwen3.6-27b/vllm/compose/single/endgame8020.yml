@@ -181,6 +181,16 @@ services:
       # [2026-07-25 USER KV-headroom push] PN8 promoted — no-ops on this config
       # (see tcbench8021.yml correction note); harmless, kept for parity.
       - GENESIS_ENABLE_PN8_MTP_DRAFT_ONLINE_QUANT=1
+      # [2026-07-25] ladder knobs (inert defaults; flip per-boot via unit env).
+      # THESE LINES ARE LOAD-BEARING even at their default: podman-compose can
+      # only forward a unit drop-in (e.g. mtp-head-quant.conf) into the container
+      # for a variable that is DECLARED here. Without this line, dropping
+      # VLLM_MTP_HEAD_QUANT=fp8 onto the prod unit is a SILENT NO-OP and quietly
+      # costs the measured +8,387 KV tokens / +2.5% tok/s that the fp8 MTP-head
+      # quant buys (bench A/B 2026-07-25: KV 134,193 -> 142,580, acceptance 83.3%
+      # on real prod traffic, 0 defects both legs).
+      - VLLM_MTP_HEAD_QUANT=${VLLM_MTP_HEAD_QUANT:-off}
+      - VLLM_TQ_LAYER_BITS=${VLLM_TQ_LAYER_BITS:-}
       - GENESIS_ENABLE_PN17_FA2_LSE_CLAMP=1
       - GENESIS_ENABLE_PN19_SCOPED_MAX_SPLIT=1
       # [2026-07-14] PN59 (streaming GDN) DISABLED so chunk.py keeps a plain fused-replaceable
