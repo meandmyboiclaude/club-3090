@@ -48,6 +48,25 @@ def _is_enabled() -> bool:
     ).strip().lower() in ("1", "true", "yes", "on")
 
 
+# VERDICT 2026-07-25 — the "anchor not found — soft skip" line PN50 emits for
+# `pn50_gdn_fused_proj` is CORRECT, not a degraded apply. The two sub-patches
+# below are MUTUALLY EXCLUSIVE by construction (see the required=False note in
+# _make_patcher): ANCHOR_OLD is the pre-vllm#41126 nested `ba.chunk(2, dim=-1)`
+# shape, ANCHOR_OLD_DEV1060 the post-split de-nested `self.split_ba(ba)` shape.
+# Counted against mamba/gdn/qwen_gdn_linear_attn.py extracted from all three
+# pinned images (dev1060cherry-20260713, wheel v1 dev1474cherry-1711, wheel v2
+# dev1474cherrymax-1757): ANCHOR_OLD count==0 and ANCHOR_OLD_DEV1060 count==1
+# on every one. The dev1060 variant IS the whole patch on every pin we can
+# boot; ANCHOR_OLD is retained purely for dual-pin safety against an older
+# image and must NOT be "re-derived" — deriving a second anchor that also
+# matched the current shape would double-apply the fusion.
+#
+# The separate lane-2 line ("both ENABLE and DISABLE env flags set ... DISABLE
+# wins") is likewise by design: PN50 is a SHARED id, so patches/sndr_lane.py
+# policy step 1 injects GENESIS_DISABLE_<bare> for lane-2 to keep THIS
+# house-lane wiring authoritative. The log's "disabled by operator" wording is
+# what makes it look like a defect; no compose sets that DISABLE var.
+
 # Pristine upstream anchor — Qwen3.5/3.6 contiguous-projection branch
 ANCHOR_OLD = (
     "            else:\n"
