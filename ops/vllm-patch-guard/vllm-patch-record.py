@@ -124,6 +124,25 @@ def extract(log: str) -> dict:
         re.findall(r"⚠️\s+([A-Za-z]+\d+[a-zA-Z]*)\s+.*required anchor", log)
     ))
     disp_names = sorted(set(disp_names) - set(drift_names))
+    # BUG-122 2026-07-25: lane-2 (sndr) announces "APPLY <id>" as a DECISION and
+    # used to log no outcome, so a module whose own env gate disagreed with the
+    # entry-level decision skipped silently and was banked here as applied
+    # (SPN71/73/92 phantoms: DB said applied, targets had 0 markers). sndr_lane
+    # now emits "[Genesis lane-2/sndr] RESULT <status>: <name>". Trust the
+    # RESULT over the announcement whenever present; logs predating that fix
+    # carry no RESULT lines and behave exactly as they used to.
+    lane2_results = re.findall(
+        r"\[Genesis lane-2/sndr\] RESULT (\w+): ([A-Za-z]+\d+[a-zA-Z]*)", log
+    )
+    lane2_not_applied = {
+        name for status, name in lane2_results if status != "applied"
+    }
+    phantom_names = sorted(set(disp_names) & lane2_not_applied)
+    disp_names = sorted(set(disp_names) - set(phantom_names))
+    # The dispatcher's own "N applied" tally counts the same announcements, so
+    # correct it by the announced-but-not-applied set rather than leaving the
+    # headline number contradicting the per-patch rows.
+    disp -= len(phantom_names)
     return {
         "lanes": len(re.findall(r"Genesis Results:", log)),
         "dispatcher_applied": disp,
@@ -137,6 +156,7 @@ def extract(log: str) -> dict:
         "image": img.group(1) if img else None,
         "disp_names": disp_names,
         "house_names": house_names,
+        "phantom_names": phantom_names,
         "drift_names": sorted(set(re.findall(r"DRIFT skipped: (\w+)", log))),
     }
 
@@ -169,7 +189,9 @@ def cmd_record(a):
         cur.execute("DELETE FROM boot_patches WHERE boot_id=%s", (boot_id,))
         rows = ([(boot_id, p, "dispatcher", "applied") for p in d["disp_names"]]
                 + [(boot_id, p, "house", "applied") for p in d["house_names"]]
-                + [(boot_id, p, "dispatcher", "drift") for p in d["drift_names"]])
+                + [(boot_id, p, "dispatcher", "drift") for p in d["drift_names"]]
+                + [(boot_id, p, "dispatcher", "phantom")
+                   for p in d["phantom_names"]])
         cur.executemany(
             "INSERT INTO boot_patches (boot_id,patch,lane,status) VALUES (%s,%s,%s,%s) "
             "ON CONFLICT DO NOTHING", rows)

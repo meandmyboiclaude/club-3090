@@ -56,6 +56,7 @@ import importlib.util
 import logging
 import os
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any, Optional
 
@@ -216,6 +217,7 @@ def apply_policy() -> dict[str, Any]:
 
     # 3. S-prefix aliases for house-series numeric collisions
     aliased = []
+    alias_mirrored = []
     for pid in _HOUSE_COLLIDING_IDS:
         meta = his_reg.get(pid)
         if not meta or pid in OUR_REGISTRY:
@@ -229,6 +231,23 @@ def apply_policy() -> dict[str, Any]:
             aliases.append(s_alias)
             meta["env_flag_aliases"] = aliases
             aliased.append(f"{pid}→{s_alias}")
+        # BUG-122 fix 2026-07-25: the alias is honored at the ENTRY level only
+        # (decision._resolve_env_state) — it decides should_apply=True and the
+        # dispatcher announces "APPLY <pid>". But each module's own apply()
+        # re-gates on the CANONICAL flag via its private _enabled(), which never
+        # learns about aliases, reads it unset, and returns "skipped" silently.
+        # Net effect before this fix: compose enables SPN71/73/92, the record DB
+        # says "applied", and the targets were never touched (0 markers).
+        # Mirror a truthy S-alias onto the canonical flag so the module-level
+        # gate agrees with the entry-level decision. Safe for these ids: they
+        # are net-new (pid not in OUR_REGISTRY), and the canonical flag carries
+        # the sndr module's own descriptive suffix, so it cannot shadow lane-1's
+        # same-numbered patch (verified: no lane-1 flag shares these names).
+        if os.environ.get(s_alias, "").strip().lower() in (
+            "1", "true", "yes", "on"
+        ) and flag not in os.environ:
+            os.environ[flag] = "1"
+            alias_mirrored.append(f"{pid}:{s_alias}→{flag}")
 
     return {
         "shared_suppressed": len(suppressed),
@@ -236,6 +255,7 @@ def apply_policy() -> dict[str, Any]:
         "net_new": len(net_new),
         "default_on_forced_off": forced_off,
         "s_aliases": aliased,
+        "s_alias_mirrored": alias_mirrored,
         "lane1_hardowned": lane1_hardowned,
     }
 
@@ -267,16 +287,47 @@ def run_lane2(dry: bool) -> Optional[Any]:
     log.info(
         "[Genesis lane-2/sndr] policy: %d shared ids suppressed "
         "(lane-1 owns), %d net-new ids available, default_on forced off "
-        "for %d (%s), S-aliases: %s, lane-1 hard-owned (repointed): %s, "
+        "for %d (%s), S-aliases: %s, S-alias mirrored to canonical: %s, "
+        "lane-1 hard-owned (repointed): %s, "
         "handed to lane-2: %s",
         summary["shared_suppressed"],
         summary["net_new"],
         len(summary["default_on_forced_off"]),
         ",".join(summary["default_on_forced_off"]) or "-",
         ",".join(summary["s_aliases"]) or "-",
+        ",".join(summary["s_alias_mirrored"]) or "-",
         ",".join(summary["lane1_hardowned"]) or "-",
         ",".join(summary["handed_to_lane2"]) or "-",
     )
 
     from sndr.apply import run as sndr_run
-    return sndr_run(verbose=True, apply=not dry)
+    stats = sndr_run(verbose=True, apply=not dry)
+
+    # BUG-122 fix 2026-07-25: lane-2 previously logged only DECISIONS
+    # ("[Genesis Dispatcher] APPLY <id>") and never RESULTS, so a module whose
+    # private gate disagreed with the entry-level decision skipped silently and
+    # every consumer — including vllm-patch-record — counted the announcement
+    # as an apply. Lane-1 has always logged per-patch results; emit the lane-2
+    # equivalent so "applied" means applied on BOTH lanes. Best-effort: a
+    # reporting gap must never take the boot down.
+    try:
+        results = list(getattr(stats, "results", None) or ())
+        for r in results:
+            log.info(
+                "[Genesis lane-2/sndr] RESULT %s: %s — %s",
+                getattr(r, "status", "unknown"),
+                getattr(r, "name", "?"),
+                (getattr(r, "reason", "") or "")[:120],
+            )
+        if results:
+            counts = Counter(getattr(r, "status", "unknown") for r in results)
+            log.info(
+                "[Genesis lane-2/sndr] Results: %d applied, %d skipped, "
+                "%d failed (of %d dispatched)",
+                counts.get("applied", 0), counts.get("skipped", 0),
+                counts.get("failed", 0), len(results),
+            )
+    except Exception as exc:  # pragma: no cover - reporting must not break boot
+        log.warning("[Genesis lane-2/sndr] result logging failed: %s", exc)
+
+    return stats
