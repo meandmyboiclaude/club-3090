@@ -506,6 +506,8 @@ KNOWN_GOOD_VLLM_PINS: tuple[str, ...] = (
     "0.23.1rc1.dev1474+g0ba2aa35a",
     # dev1474 cherry wheel (setuptools-scm degenerate version, shallow CI clone)
     "0.1.dev1+g91fdf2451.d20260725",
+    # dev1474 cherry-MAX wheel (v2: +7 picks +KVQ +mtpq)
+    "0.1.dev1+g4e2e9bf00.d20260725",
 )
 
 
