@@ -146,6 +146,13 @@ class PN119Router:
                 start = end
                 continue
             acc = self._acc.get(req_id)
+            # Preemption-recompute guard: a request preempted mid-prefill
+            # restarts from num_computed_tokens=0; a stale accumulator would
+            # double-count. Reset when the engine's progress is behind ours.
+            engine_computed = getattr(state, "num_computed_tokens", None)
+            if (acc is not None and engine_computed is not None
+                    and engine_computed < acc["seen"]):
+                acc = None
             if acc is None:
                 acc = self._acc[req_id] = {
                     "seen": 0,
@@ -187,8 +194,11 @@ class PN119Router:
             SCORES[req_id] = score
         if self._sink_feat is not None:
             try:
+                # bf16 has no numpy dtype — reinterpret as uint16 for the raw
+                # write (reader: np.fromfile(uint16).view via torch bf16).
                 self._sink_feat.write(
-                    torch.stack(rows).to(torch.bfloat16).cpu().numpy().tobytes())
+                    torch.stack(rows).to(torch.bfloat16).view(torch.uint16)
+                    .cpu().numpy().tobytes())
                 self._sink_feat.flush()
                 self._sink_meta.write(json.dumps({
                     "req_id": req_id, "row": self._sink_rows, "score": score,
@@ -196,7 +206,7 @@ class PN119Router:
                 }) + "\n")
                 self._sink_meta.flush()
                 self._sink_rows += 1
-            except OSError as e:
+            except Exception as e:  # noqa: BLE001 — any sink failure disables it
                 logger.warning("[PN119] sink write failed (%s) — disabling sink", e)
                 self._sink_feat = self._sink_meta = None
 

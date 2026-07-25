@@ -96,28 +96,23 @@ def main() -> int:
     if MARKER in text:
         print(f"{LOG} already applied (idempotent)")
         return 0
-    applied = 0
-    for name, old, new in (("A-load", A_OLD, A_NEW), ("B-observe", B_OLD, B_NEW),
-                           ("C-finish", C_OLD, C_NEW)):
-        n = text.count(old)
-        if n != 1:
-            # A and B are REQUIRED together; C is the sink only.
-            print(f"{LOG} anchor {name}: {n} matches — "
-                  f"{'FATAL' if name != 'C-finish' else 'soft-skip (sink off)'}",
-                  file=sys.stderr)
-            if name != "C-finish":
-                if applied == 0 and name == "A-load":
-                    # older pin without these shapes: PN119 is new-capability,
-                    # absence is fine — declared soft-skip, no boot brick.
-                    print(f"{LOG} soft-skip: pin predates PN119 anchors "
-                          f"(new capability, not a restore)")
-                    return 0
-                return 1
-            continue
+    # ALL-OR-NOTHING with soft failure: PN119 is a NEW capability, never a
+    # restore — on ANY anchor mismatch we ship the file UNTOUCHED and return 0
+    # (the entrypoint runs under `set -e`; a hard failure would brick boots on
+    # pins whose runner drifted). A and C without B would be inert-but-harmless;
+    # B without A would crash at runtime — hence all-or-nothing.
+    sites = (("A-load", A_OLD, A_NEW), ("B-observe", B_OLD, B_NEW),
+             ("C-finish", C_OLD, C_NEW))
+    missing = [name for name, old, _ in sites if text.count(old) != 1]
+    if missing:
+        print(f"{LOG} soft-skip: anchor(s) {missing} not unique on this pin — "
+              f"router NOT wired (new capability; serving unaffected)",
+              file=sys.stderr)
+        return 0
+    for _name, old, new in sites:
         text = text.replace(old, new, 1)
-        applied += 1
     RUNNER.write_text(text, encoding="utf-8")
-    print(f"{LOG} applied {applied}/3 sites (A=init B=observe C=finish-sink); "
+    print(f"{LOG} applied 3/3 sites (A=init B=observe C=finish-sink); "
           f"inert unless GENESIS_ENABLE_PN119_ROUTER=1")
     return 0
 
