@@ -5574,7 +5574,37 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
         # - 35B FP8 dense MoE: +6.6% TPS (validated, 2 runs)
         # - 27B Lorbus + TQ k8v4: neutral (MTP layer in TQ overlay group)
         # No negative cases observed. Safe to enable by default.
-        "default_on": True,
+        #
+        # REVERTED TO False 2026-07-26 (ledger MISSING-row pass). Not a
+        # walk-back of the 05-29 benchmark — a structural finding that
+        # postdates it. PN286 has FOUR components and only ONE of them
+        # survives the boot:
+        #   1. FlashAttentionBackend.get_kv_cache_shape       setattr
+        #   2. FlashAttentionBackend.get_kv_cache_stride_order setattr
+        #   3. GPUModelRunner._update_hybrid_attention_mamba_layout  setattr
+        #   4. FA forward / do_kv_cache_update -> unbind(0)   TEXT PATCH
+        # `apply_all` runs standalone and the entrypoint then does
+        # `exec vllm serve`, which REPLACES the process — so 1-3 are
+        # discarded and only 4 reaches the server. That leaves the forward
+        # path reading K/V with unbind(0) (pre-#42095, "2 outer") out of a
+        # cache the allocator laid out in upstream's post-#42095
+        # (num_blocks, 2, ...) interleave, because the shape/stride
+        # overrides are gone. Wrong KV bytes, silently.
+        # The 05-29 validation predates the P39a finding that established
+        # exec-discards-setattr for this tree, so it cannot have measured
+        # this shape.
+        # What actually kept us safe is an undocumented disagreement: the
+        # module's apply() has always required an explicit
+        # GENESIS_ENABLE_PN286_FA_LAYOUT_REVERT_SM86=1 and ignores
+        # default_on, so with GENESIS_SNDR_TRUST_DEFAULT_ON=1 in both
+        # composes the registry said ON, the dispatcher logged APPLY, and
+        # the module logged "PN286 disabled". Two gates disagreeing is not a
+        # safety mechanism. default_on=False makes them agree, on the side
+        # that does not corrupt KV.
+        # To revive PN286: convert components 1-3 to self-install text
+        # patches (the P103 / P39a `_genesis_<id>_install_at_import`
+        # pattern), then re-run the SM 8.6 A/B. Do NOT simply flip this back.
+        "default_on": False,
         "category": "perf_hotfix",
         "credit": (
             "Genesis-original 2026-05-29 (K.1.R.R.5). Upstream vllm#42095 "
@@ -6800,7 +6830,36 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
         # design). Operators disable via GENESIS_DISABLE_PN346=1.
         "default_on": True,
         "apply_module": "sndr.engines.vllm.patches.kv_cache.pn346_mamba_mtp_apc_boundary",
-        "lifecycle": "experimental",
+        # RETIRED 2026-07-26 (ledger MISSING-row pass). The module docstring
+        # has carried the analysis since 2026-07-25; this is the registry half
+        # so the capability ledger stops reading `required_anchor_missing` as
+        # an unresolved re-anchor item. Re-verified, not inherited:
+        #   * PN346_ANCHOR_OLD count == 0 on the boot pin
+        #     dev1474cherrymax-1757-20260725 (upstream inserted the
+        #     fine-grained hash-lookup branch through the 4-line span).
+        #   * /fixes pn87 applied on the same boot and its markers are in the
+        #     LIVE container's single_type_kv_cache_manager.py: "PN87:
+        #     vllm#43650 backport" at the coarse loop (`if drop_eagle_block
+        #     and max_num_blocks > 0: max_num_blocks -= 1`) AND at the
+        #     fine-grained loop (`max_num_partial_units`), which PN346 never
+        #     knew about. Strict superset.
+        # Forcing PN346 would be HARMFUL, not neutral: lane-2 dispatches
+        # before /fixes and would consume pn87's coarse anchor, either making
+        # pn87 fatal on its anchor check or double-decrementing the boundary.
+        # PN346_ANCHOR_OLD/_NEW stay in the module — P85's dual Site-2 anchor
+        # is assembled from them. The coordinator half is NOT retired: PN346B
+        # (#45614) and PN384 (#44986) both report applied on the same boot.
+        "lifecycle": "retired",
+        "superseded_by": (
+            "/fixes patch_pn87_43650_mamba_eagle_cache_hit_boundary.py — same "
+            "vllm#43650 vendor, emits the byte-identical coarse guard AND "
+            "additionally fixes the fine-grained max_num_partial_units loop "
+            "the upstream refactor added. Verified by effect 2026-07-26: both "
+            "PN87 markers present in the LIVE container's "
+            "single_type_kv_cache_manager.py while PN346_ANCHOR_OLD is "
+            "count == 0 on all three pinned images. Do NOT re-anchor — lane-2 "
+            "runs first and would consume pn87's anchor."
+        ),
         "category": "correctness",
         "credit": (
             "Genesis vendoring of OPEN upstream PR vllm#43650 (6-LOC). "
@@ -8833,7 +8892,24 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
         "implementation_status": "full",
         "apply_module": "sndr.engines.vllm.patches.attention.turboquant.pn118_v2_md5_workspace",
         "source": "vllm_pr_backport",
-        "lifecycle": "experimental",
+        # RETIRED 2026-07-26 (ledger MISSING-row pass). PoC complete;
+        # it cannot apply again and does not need to.
+        "lifecycle": "retired",
+        "superseded_by": (
+            "the anchor-based PN118 (pn118_tq_workspace_fallback), which "
+            "APPLIED on the boot pin dev1474cherrymax-1757-20260725 and "
+            "covers this file plus turboquant_attn.py. This row is an "
+            "md5 + whole-file PoC of the PN119 pattern: it pins a 32-char "
+            "digest of one exact pre-patch file, so ANY upstream edit "
+            "retires it permanently. Boot line: 'skipped — md5 mismatch "
+            "(got 902951004e1d5710276b33aa1c86d2c1, expected "
+            "439f0c086cc50f467960b6e610bdf803) — upstream drifted from PoC "
+            "baseline', and the same line names the fallback: 'The "
+            "original PN118 (anchor-based) will continue to attempt "
+            "patching this file on its own.' Re-baselining the digest "
+            "would buy one pin and break on the next; the pattern it was "
+            "built to demonstrate is demonstrated. No capability is lost."
+        ),
         "conflicts_with": [],
         "requires_patches": [],
     },
@@ -8870,7 +8946,18 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
         "implementation_status": "full",
         "apply_module": "sndr.engines.vllm.patches.attention.turboquant.pn118_v2_md5_turboquant_attn",
         "source": "vllm_pr_backport",
-        "lifecycle": "experimental",
+        # RETIRED 2026-07-26 (ledger MISSING-row pass) — same grounds as
+        # PN118_V2_MD5_WORKSPACE.
+        "lifecycle": "retired",
+        "superseded_by": (
+            "the anchor-based PN118 (pn118_tq_workspace_fallback), which "
+            "APPLIED on the boot pin. md5 + whole-file PoC; boot line "
+            "'skipped — md5 mismatch (got cd3de45f97a67bd7e32169806ea1e9bc, "
+            "expected 8ee234caac59bf099d717e56d7cfa00c) — upstream drifted "
+            "from PoC baseline'. A pinned whole-file digest cannot survive "
+            "a moving pin by construction, and the anchor-based original "
+            "already covers this target. No capability is lost."
+        ),
         "conflicts_with": [],
         "requires_patches": [],
     },
@@ -9866,9 +9953,23 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
         "env_flag": "GENESIS_LEGACY_P29",
         "default_on": True,
         "implementation_status": "marker_only",
-        "lifecycle": "legacy",
+        "lifecycle": "retired",
         "category": "structured_output",
         "credit": "Pre-dispatcher legacy patch. Wraps tool-arg index access so malformed parser state returns empty instead of raising IndexError.",
+        # Mirror of the lane-1 verdict (dispatcher.py). The companion module
+        # row P29_HEAL was retired 2026-07-05 for exactly this reason; this
+        # bare marker_only row was left announcing an APPLY decision against a
+        # file upstream deleted a month earlier.
+        "superseded_by": (
+            "vllm#45413 (+ #45588), merged c4a3f9d13 2026-06-15, ancestor of "
+            "the boot pin's build base 4e2e9bf00. It DELETES "
+            "tool_parsers/qwen3coder_tool_parser.py; the engine-native "
+            "qwen3_engine_tool_parser.py has no streamed_args_for_tool / "
+            "current_tool_index list state, so the IndexError class is "
+            "structurally absent (verified on the pin: zero occurrences, and "
+            "no *qwen3coder* file anywhere in the installed vllm)."
+        ),
+        "vllm_version_range": "<0.23.0",
     },
     "P29_HEAL": {
         "title": "qwen3coder tool parser index heal (P29 companion, fix-wire 2026-06-04)",
@@ -9956,10 +10057,25 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
         "env_flag": "GENESIS_LEGACY_P34",
         "default_on": True,
         "apply_module": "sndr.engines.vllm.patches.scheduler.p34_mamba_deadlock_guard",
-        "lifecycle": "legacy",
+        "lifecycle": "retired",
         "category": "stability",
         "credit": "Pre-dispatcher legacy patch. Guards against Mamba state collapse-to-zero deadlock when delta is exactly zero on hybrid models.",
         "implementation_status": "full",
+        # Mirror of the lane-1 verdict (dispatcher.py). Absorbed on the build
+        # line as a1d5ec96f (Cherry #40757 intent, adapted to the #47782
+        # Marconi shape; upstream #40757 still OPEN, absent from origin/main),
+        # then deliberately REMOVED again by /fixes
+        # patch_pr48361_mamba_align_split.py, which floors unconditionally
+        # because the escape "buys progress by writing a boundary the mamba
+        # hash contract forbids". Counted 2026-07-26 on the pristine image AND
+        # the live post-boot container. Do NOT re-anchor: it would reinstate
+        # the escape pr48361 deleted on purpose.
+        "superseded_by": (
+            "build-line cherry a1d5ec96f (vllm#40757 intent, OPEN upstream), "
+            "then superseded again by /fixes patch_pr48361_mamba_align_split.py "
+            "which removes the guard deliberately. Do NOT re-anchor."
+        ),
+        "vllm_version_range": (">=0.19.0", "<0.24.0"),
     },
     "P36": {
         "title": "TurboQuant shared decode buffers — RETIRED 2026-06-11",

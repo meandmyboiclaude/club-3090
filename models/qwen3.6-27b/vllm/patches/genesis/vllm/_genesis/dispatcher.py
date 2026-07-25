@@ -1884,9 +1884,32 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
         "title": "tool parser IndexError guard",
         "env_flag": "GENESIS_LEGACY_P29",
         "default_on": True,
-        "lifecycle": "legacy",
+        "lifecycle": "retired",
         "category": "structured_output",
         "credit": "Pre-dispatcher legacy patch. Wraps tool-arg index access so malformed parser state returns empty instead of raising IndexError.",
+        "superseded_by": (
+            "vllm#45413 (+ #45588), merged as c4a3f9d137099023a93fbb2299f3c5 "
+            "2477751176 '[Frontend] Add Streaming Parser Engine and new Qwen3 "
+            "Parser' on 2026-06-15, a strict ancestor of the boot pin's build "
+            "base 4e2e9bf00. That commit DELETES "
+            "tool_parsers/qwen3coder_tool_parser.py — the only file this row "
+            "guards — and replaces it with tool_parsers/"
+            "qwen3_engine_tool_parser.py driven by vllm/parser/engine/*. "
+            "Verified on the boot pin dev1474cherrymax-1757-20260725: no file "
+            "matching *qwen3coder* exists anywhere in the installed vllm, and "
+            "qwen3_engine_tool_parser.py contains ZERO occurrences of "
+            "streamed_args_for_tool or current_tool_index — the list-index "
+            "state whose overrun this row wraps is structurally absent, so "
+            "there is no IndexError class left to guard. Same deletion "
+            "commit, same class, and the same verdict already recorded for "
+            "P12/P27/P59/PN51 (f742f09c) and for lane-2's P29_HEAL (retired "
+            "2026-07-05) — this bare registry_only row is the half that never "
+            "got one, and it has been printing 'skipped: P29 tool parser "
+            "IndexError guard — qwen3coder_tool_parser.py not found' on every "
+            "boot since. Sibling PN56 self-retires with the same finding: "
+            "'upstream parser engine absorbed'."
+        ),
+        "applies_to": {"vllm_version_range": (">=0.19.0", "<0.23.0")},
     },
     "P31": {
         "title": "MoE router fp32 softmax",
@@ -1908,9 +1931,37 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
         "title": "Mamba zero-collapse deadlock guard",
         "env_flag": "GENESIS_LEGACY_P34",
         "default_on": True,
-        "lifecycle": "legacy",
+        "lifecycle": "retired",
         "category": "stability",
         "credit": "Pre-dispatcher legacy patch. Guards against Mamba state collapse-to-zero deadlock when delta is exactly zero on hybrid models.",
+        "superseded_by": (
+            "TWICE, and the second one is why this row must not be "
+            "re-anchored. (1) ABSORBED on the build line as a1d5ec96f "
+            "'Cherry #40757 intent (adapted to #47782 Marconi shape): "
+            "zero-collapse floor guard'. Upstream vllm#40757 is still OPEN — "
+            "`git log -S 'aligned = end // block_size * block_size' "
+            "origin/main` is empty — so this is a build-line cap, not a vllm "
+            "version cap: a nightly without our cherries re-exposes the "
+            "spin. The absorbing code, scheduler.py in the PRISTINE boot pin "
+            "dev1474cherrymax-1757-20260725: 'aligned = end // block_size * "
+            "block_size' / 'if aligned > start: end = aligned', which is "
+            "_NEW_V2 minus the Genesis comment. (2) THEN REMOVED ON PURPOSE "
+            "by /fixes patch_pr48361_mamba_align_split.py, which floors "
+            "UNCONDITIONALLY and says so in the code it writes: 'PR48361: "
+            "floor UNCONDITIONALLY. The old escape kept a sub-block end when "
+            "flooring would empty the chunk, which buys progress by writing "
+            "a boundary the mamba hash contract forbids. Hunk B restores "
+            "progress the correct way.' apply_all runs BEFORE /fixes, so "
+            "P34 still self-retires on the drift marker at its own dispatch "
+            "time and the post-boot file carries pr48361's form. Verified "
+            "2026-07-26 by counting both the pristine image and the live "
+            "post-boot container (ops/vllm-capability-ledger/"
+            "verify_genesis_reanchors.py --live). Re-anchoring P34 would "
+            "reinstate the escape pr48361 deliberately deleted. PN388 keeps "
+            "requires_patches ['P34'] and its dual pristine/post-P34 anchor; "
+            "the post-P34 arm is dead on this line."
+        ),
+        "applies_to": {"vllm_version_range": (">=0.19.0", "<0.24.0")},
     },
     "P36": {
         "title": "TurboQuant shared decode buffers",
