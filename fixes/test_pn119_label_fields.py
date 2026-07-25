@@ -122,10 +122,12 @@ class _SP:
 
 
 class _Req:
-    def __init__(self, prompt_token_ids, output_token_ids=()):
+    def __init__(self, prompt_token_ids, output_token_ids=(), max_tokens=512):
         self.prompt_token_ids = prompt_token_ids
         self.output_token_ids = list(output_token_ids)
-        self.sampling_params = _SP()
+        sp = _SP()
+        sp.max_tokens = max_tokens
+        self.sampling_params = sp
 
 
 def _prompt_thinking_on(seed_tokens: int, filler: int = 400) -> list[int]:
@@ -144,9 +146,13 @@ def main() -> int:
                        os.path.join(HERE, "pn119_router.py"))
 
     r = object.__new__(router_mod.PN119Router)
-    r._think_start = THINK_START
-    r._think_end = THINK_END
+    # Marker SEQUENCES now (the holder's shape) — single-element here because
+    # <think>/</think> are single tokens in the served tokenizer.json.
+    r._think_start_ids = [THINK_START]
+    r._think_end_ids = [THINK_END]
     r._tail_window = 64  # the shipped default
+    r._censor_slack = len(r._think_end_ids) + 8
+    r._h119_applied = {}
 
     seeds = harvest_seeds(ar)
     print(f"\n-- harvested {len(seeds)} PN102 banner seeds "
@@ -157,7 +163,7 @@ def main() -> int:
         n = seed_token_len(seed)
         widest = max(widest, n)
         req = _Req(_prompt_thinking_on(n))
-        thinking, rtok, cap_hit = r._label_fields(req, generated=64)
+        thinking, rtok, cap_hit, censored = r._label_fields(req, generated=64)
         check(f"thinking=True under {label}", thinking is True,
               f"seed={seed!r} tok<={n} got={thinking}")
 
@@ -167,35 +173,75 @@ def main() -> int:
 
     # thinking-OFF must still read False (both markers present, </think> last).
     req = _Req(_prompt_thinking_off())
-    thinking, _, _ = r._label_fields(req, generated=64)
+    thinking, _, _, _ = r._label_fields(req, generated=64)
     check("thinking=False on a pre-closed think region", thinking is False,
           f"got={thinking}")
 
     # raw/completion prompt: neither marker -> None (refit treats as ineligible)
-    thinking, _, _ = r._label_fields(_Req([7] * 400), generated=64)
+    thinking, _, _, _ = r._label_fields(_Req([7] * 400), generated=64)
     check("thinking=None with no markers", thinking is None, f"got={thinking}")
 
     # multi-turn: an EARLIER turn's closed region must not outrank this turn's
     # open <think>. Last-marker-wins is what makes widening safe.
     multi = ([7] * 380 + [THINK_START] + [11] * 6 + [THINK_END]
              + [7] * 4 + [THINK_START] + [11] * 12)
-    thinking, _, _ = r._label_fields(_Req(multi), generated=64)
+    thinking, _, _, _ = r._label_fields(_Req(multi), generated=64)
     check("thinking=True with a prior closed region in-window",
           thinking is True, f"got={thinking}")
 
     # rtok / cap_hit still work off the widened label.
     longest = max(seed_token_len(s) for _, s in seeds)
     req = _Req(_prompt_thinking_on(longest), output_token_ids=[5, 5, 5, THINK_END, 9])
-    thinking, rtok, cap_hit = r._label_fields(req, generated=5)
+    thinking, rtok, cap_hit, censored = r._label_fields(req, generated=5)
     check("rtok counts tokens before </think>",
           thinking is True and rtok == 3 and cap_hit is False,
           f"thinking={thinking} rtok={rtok} cap_hit={cap_hit}")
 
     req = _Req(_prompt_thinking_on(longest), output_token_ids=[5] * 512)
-    thinking, rtok, cap_hit = r._label_fields(req, generated=512)
+    thinking, rtok, cap_hit, censored = r._label_fields(req, generated=512)
     check("cap_hit when </think> never emitted",
           thinking is True and rtok == 512 and cap_hit is True,
           f"thinking={thinking} rtok={rtok} cap_hit={cap_hit}")
+
+    # A LATER </think> inside the answer must not be mistaken for the end of
+    # the spend: the FIRST occurrence is the boundary.
+    req = _Req(_prompt_thinking_on(longest),
+               output_token_ids=[5, 5, THINK_END, 9, 9, THINK_END])
+    thinking, rtok, _, _ = r._label_fields(req, generated=6)
+    check("rtok takes the FIRST </think>, not the last", rtok == 2, f"rtok={rtok}")
+
+    # ── BUG-139: censoring is derived from the BUDGET, not from max_tokens ──
+    # The exact live signature — 43 of 79 thinking rows sat at grant-5 while
+    # only 4 flagged cap_hit, because cap_hit never looked at the budget.
+    req = _Req(_prompt_thinking_on(longest),
+               output_token_ids=[5] * 1295 + [THINK_END] + [9] * 40,
+               max_tokens=4096)
+    thinking, rtok, cap_hit, censored = r._label_fields(
+        req, generated=1336, budget=1300)
+    check("censored at grant-5 (the BUG-139 signature)",
+          rtok == 1295 and censored is True and cap_hit is False,
+          f"rtok={rtok} censored={censored} cap_hit={cap_hit}")
+
+    req = _Req(_prompt_thinking_on(longest),
+               output_token_ids=[5] * 300 + [THINK_END], max_tokens=4096)
+    _, rtok, _, censored = r._label_fields(req, generated=301, budget=1300)
+    check("a natural stop well below the grant is not censored",
+          rtok == 300 and censored is False, f"rtok={rtok} censored={censored}")
+
+    _, _, _, censored = r._label_fields(
+        _Req(_prompt_thinking_on(longest),
+             output_token_ids=[5] * 1295 + [THINK_END], max_tokens=4096),
+        generated=1296, budget=None)
+    check("no budget => nothing could have truncated it here",
+          censored is False, f"censored={censored}")
+
+    # An empty output never closed the think region either, but there is no
+    # evidence in it at all — labelling it a cap hit put a y=1 censoring label
+    # on a request that produced nothing (an abort, a disconnect).
+    _, rtok, cap_hit, _ = r._label_fields(
+        _Req(_prompt_thinking_on(longest), output_token_ids=[]), generated=0)
+    check("an EMPTY output is not a cap hit",
+          rtok == 0 and cap_hit is False, f"rtok={rtok} cap_hit={cap_hit}")
 
     # Regression witness: the OLD 8-token window loses the v3-family seeds.
     r._tail_window = 8

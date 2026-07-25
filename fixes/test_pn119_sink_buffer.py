@@ -39,6 +39,8 @@ import tempfile
 import threading
 import time
 
+import types
+
 import torch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -48,8 +50,12 @@ PROBE = os.path.join(NEEDFIT, "pn119-live/probe.npz")
 
 D_MODEL = 5120
 LAYERS = (42, 47, 51)
-FEAT_BYTES = len(LAYERS) * 2 * D_MODEL * 2   # 61440
+# LAST-ONLY: one pooled block per layer, so a feature row halved to 30,720 B.
+FEAT_DIM = len(LAYERS) * D_MODEL
+FEAT_BYTES = FEAT_DIM * 2                    # 30720
 PROMPT_LEN = 40
+THINK_START = 248068
+THINK_END = 248069
 
 FAILURES: list[str] = []
 
@@ -89,15 +95,21 @@ class StubBatch:
 
 class StubRunner:
     device = "cpu"
+    max_num_reqs = 64
 
     def __init__(self):
         self.input_batch = StubBatch()
         self.requests: dict[str, StubState] = {}
+        self.vllm_config = types.SimpleNamespace(
+            reasoning_config=types.SimpleNamespace(
+                reasoning_start_token_ids=[THINK_START],
+                reasoning_end_token_ids=[THINK_END]))
 
 
 class Sched:
-    def __init__(self, d):
+    def __init__(self, d, new=()):
         self.num_scheduled_tokens = d
+        self.scheduled_new_reqs = list(new)
 
 
 _IDX = torch.arange(D_MODEL, dtype=torch.float32)
@@ -111,13 +123,16 @@ def aux_rows(layer_i: int, token_ids, positions) -> torch.Tensor:
 
 
 def prompt_ids(seed: int, n: int = PROMPT_LEN) -> list[int]:
-    return [(seed * 7919 + i * 104729) % 150000 + 1 for i in range(n)]
+    """A thinking-ON prompt: the tail opens <think>, which is what makes the
+    row ROUTABLE and therefore what makes it get a feature row at all."""
+    ids = [(seed * 7919 + i * 104729) % 150000 + 1 for i in range(n - 1)]
+    return ids + [THINK_START]
 
 
 _ENV_KEYS = ("PN119_MODE", "PN119_TDEEP", "PN119_SINK", "PN119_EXPLORE",
-             "PN119_FALLBACK_ROUTE", "PN119_PREFIX_MEMO", "PN119_MEMO_UNIT",
-             "PN119_MEMO_MAX", "PN119_STATS_EVERY", "PN119_SINK_BUF_ROWS",
-             "PN119_SINK_BUF_SECS", "PN119_SINK_BUF_MAX")
+             "PN119_FALLBACK_ROUTE", "PN119_STATS_EVERY", "PN119_SINK_BUF_ROWS",
+             "PN119_SINK_BUF_SECS", "PN119_SINK_BUF_MAX", "PN119_ASYNC_SCORE",
+             "PN119_ACC_MAX", "PN119_FULLSCAN_EVERY", "PN119_HEALTH")
 
 
 def new_router(mod, **env):
@@ -142,14 +157,19 @@ def run_prefill(router, runner, req_id, ids, chunks, cached=0):
         state.num_computed_tokens = pos
         toks = ids[pos:pos + n]
         aux = [aux_rows(li, toks, range(pos, pos + n)) for li in range(len(LAYERS))]
-        router.observe(Sched({req_id: n}), aux)
+        router.observe(Sched({req_id: n}, new=[req_id] if pos == cached else []),
+                       aux)
         pos += n
     return state
 
 
 def drive(router, runner, n_ok: int, n_miss: int = 0, seed: int = 0):
-    """A deterministic request sequence: n_ok scoreable + n_miss cache-hit
-    (unscoreable) requests, each finished so both meta lines are emitted."""
+    """A deterministic request sequence: n_ok scoreable + n_miss UNSCOREABLE
+    requests, each finished so both meta lines are emitted.
+
+    The unscoreable case is no longer a prefix-cache hit — those are all
+    scoreable under last-only. The one that remains is a request first seen in
+    DECODE, i.e. one whose prefill this process never forwarded."""
     order = []
     for i in range(max(n_ok, n_miss)):
         if i < n_ok:
@@ -161,10 +181,9 @@ def drive(router, runner, n_ok: int, n_miss: int = 0, seed: int = 0):
         ids = prompt_ids(seed * 1000 + i + (500 if kind == "miss" else 0))
         if kind == "ok":
             st = run_prefill(router, runner, rid, ids, [PROMPT_LEN])
-            st.prompt_token_ids = list(ids) + [router._think_start]
-            st.output_token_ids = [5, 5, router._think_end, 9]
+            st.output_token_ids = [5, 5, THINK_END, 9]
         else:
-            st = run_prefill(router, runner, rid, ids, [PROMPT_LEN - 16], cached=16)
+            st = run_prefill(router, runner, rid, ids, [1], cached=PROMPT_LEN)
         router.on_finish(rid, st)
 
 
@@ -179,7 +198,12 @@ def sink_files(d: str):
 def _strip_ts(meta_bytes: bytes) -> list[dict]:
     """The REQUEST-PATH events, normalised for comparison.
 
-    ts is wall-clock and differs run to run. The boot header line
+    ts is wall-clock and differs run to run; boot_id is a fresh uuid4 per
+    router instance and pid is the process — all three are BOOT identity, not
+    request content, and comparing two routers on them can only ever fail.
+    (They are on every row deliberately: forty sink files from a dozen boots
+    could previously only be told apart by their filename timestamps.) The
+    boot header line
     ({"pn119_header": 1, ...}, added 2026-07-25 with the health surface) is
     not a request-path event at all — it is written once at sink open, before
     any traffic, so that a sink file with no rows is still attributable to a
@@ -194,6 +218,8 @@ def _strip_ts(meta_bytes: bytes) -> list[dict]:
         if m.get("pn119_header"):
             continue
         m.pop("ts", None)
+        m.pop("boot_id", None)
+        m.pop("pid", None)
         out.append(m)
     return out
 
@@ -231,8 +257,16 @@ def b0_header(new_mod):
         r._sink_close()
 
 
-# ── B1: byte-identical to the unbuffered HEAD module ───────────────────────
-def b1_byte_identical(new_mod, old_mod):
+# ── B1: byte-identical to the SAME module in synchronous mode ──────────────
+# The reference used to be `git show HEAD:fixes/pn119_router.py`. That stopped
+# being a reference the moment FEAT_DIM changed: the HEAD module cannot even
+# LOAD the live probe (`probe dim 15360 != 30720`), so the check was not
+# testing buffering any more, it was testing that the file had not changed.
+# The invariant B1 actually exists to protect is "buffering does not alter the
+# on-disk bytes", and the honest control for that is the module's own
+# synchronous escape hatch (PN119_SINK_BUF_ROWS=0) — which is what a reader
+# would fall back to and what the buffered path must reproduce exactly.
+def b1_byte_identical(new_mod, _unused=None):
     for label, kw in (("buf=1 (every event)", {"PN119_SINK_BUF_ROWS": 1}),
                       ("buf=4 (boundary mid-request)", {"PN119_SINK_BUF_ROWS": 4}),
                       ("buf=64 (default)", {"PN119_SINK_BUF_ROWS": 64}),
@@ -243,8 +277,9 @@ def b1_byte_identical(new_mod, old_mod):
             rn, run_n = new_router(new_mod, PN119_MODE="enforce", PN119_SINK=dn,
                                    PN119_TDEEP="0.495", PN119_SINK_BUF_SECS=600,
                                    **kw)
-            ro, run_o = new_router(old_mod, PN119_MODE="enforce", PN119_SINK=do,
-                                   PN119_TDEEP="0.495")
+            ro, run_o = new_router(new_mod, PN119_MODE="enforce", PN119_SINK=do,
+                                   PN119_TDEEP="0.495",
+                                   PN119_SINK_BUF_ROWS=0)
             drive(rn, run_n, n_ok=7, n_miss=3, seed=1)
             drive(ro, run_o, n_ok=7, n_miss=3, seed=1)
             rn._sink_close()
@@ -257,12 +292,12 @@ def b1_byte_identical(new_mod, old_mod):
             ro._sink_close()
             fn, mn = sink_files(dn)
             fo, mo = sink_files(do)
-            check(f"B1 {label}: feats bytes identical to HEAD",
+            check(f"B1 {label}: feats bytes identical to the sync path",
                   fn == fo and len(fn) == 7 * FEAT_BYTES,
-                  f"buffered={len(fn)}B head={len(fo)}B")
-            check(f"B1 {label}: meta lines identical to HEAD (ts aside)",
+                  f"buffered={len(fn)}B sync={len(fo)}B")
+            check(f"B1 {label}: meta lines identical to the sync path (ts aside)",
                   _strip_ts(mn) == _strip_ts(mo),
-                  f"buffered={len(_strip_ts(mn))} head={len(_strip_ts(mo))} lines")
+                  f"buffered={len(_strip_ts(mn))} sync={len(_strip_ts(mo))} lines")
 
 
 # ── B2: shutdown drains a partial buffer ───────────────────────────────────
@@ -354,7 +389,7 @@ def b4_partial_parses(new_mod):
         import numpy as np
         feats = np.fromfile(os.path.join(
             d, [x for x in os.listdir(d) if x.startswith("feats-")][0]),
-            dtype=np.uint16).reshape(-1, 30720)
+            dtype=np.uint16).reshape(-1, FEAT_DIM)
         ok = True
         for x in scored:
             k = x["row"]
@@ -422,19 +457,12 @@ def main() -> int:
     if not os.path.isfile(PROBE):
         print(f"probe missing: {PROBE}")
         return 1
-    with tempfile.TemporaryDirectory() as td:
-        head = os.path.join(td, "pn119_router_head.py")
-        with open(head, "wb") as f:
-            f.write(subprocess.run(["git", "-C", REPO, "show",
-                                    "HEAD:fixes/pn119_router.py"],
-                                   check=True, capture_output=True).stdout)
-        old_mod = _load("pn119_router_head", head)
     new_mod = _load("pn119_router_new", os.path.join(HERE, "pn119_router.py"))
 
     print("== B0 boot header line ==")
     b0_header(new_mod)
-    print("== B1 on-disk bytes identical to the unbuffered router ==")
-    b1_byte_identical(new_mod, old_mod)
+    print("== B1 on-disk bytes identical to the synchronous router ==")
+    b1_byte_identical(new_mod)
     print("== B2 shutdown / atexit flush ==")
     b2_shutdown_flush(new_mod)
     print("== B3 buffer bound ==")

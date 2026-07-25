@@ -247,6 +247,13 @@ def render(snap, err, path, cf, alarms) -> None:
               f" (deep={t.get('deep')} lean={t.get('lean')})"
               f" unscoreable={t.get('unscoreable')}"
               f" unroutable={t.get('unroutable')} batch_adds={t.get('batch_adds')}")
+        # The contract population. `scored` counts ROUTABLE (thinking-ON) rows
+        # only; a boot where most traffic is thinking-off is not broken, but
+        # the saving it can produce is bounded by (1 - thinking_off_rate) and
+        # that has to be readable, not inferred.
+        print(f"             thinking_off={t.get('thinking_off')}"
+              f" unknown_routable={t.get('scored_unknown')}"
+              f" decisions={t.get('decisions')}")
         print(f"             first={fmt_age(t.get('first_scored_ts'))}"
               f" last={fmt_age(t.get('last_scored_ts'))}")
         print(f"  rates      deep_frac={ra.get('deep_frac', 0):.3f}"
@@ -254,6 +261,12 @@ def render(snap, err, path, cf, alarms) -> None:
               f"  fallback={ra.get('fallback_rate', 0):.3f}"
               f"  unscoreable={ra.get('unscoreable_rate', 0):.3f}"
               f"  unroutable={ra.get('unroutable_rate', 0):.3f}")
+        # BUG-139. A censored finish is a LOWER BOUND recorded as a spend. The
+        # 2026-07-25 sink was 54% censored and nothing displayed it, which is
+        # exactly why it capped every probe fit for a day without being named.
+        print(f"             censored={ra.get('censored_rate', 0):.3f}"
+              f" (n={ra.get('censored_rate_n')}, {t.get('censored')} rows)"
+              f"  thinking_off={ra.get('thinking_off_rate', 0):.3f}")
         print(f"  consumer   flag={c.get('flag_env')} on={c.get('on')}"
               f" deep={c.get('deep_budget')} lean={c.get('lean_budget')}"
               f" override_pn100={c.get('override_pn100')}")

@@ -2,14 +2,38 @@
 
 Per-request deep/mass thinking router on the serving model's OWN prefill
 hidden states — no extra model, no extra VRAM. Basis: needfit lens probe
-(nested-LOO AUC 0.930 lens-only; PN119-BUILD-PACK.md is the spec).
+(seed LOO AUC 0.9459 last-only; PN119-BUILD-PACK.md is the spec).
 
 Capture: vLLM's native EAGLE3 aux-hidden-state mechanism
 (model.set_aux_hidden_state_layers((42, 47, 51)) — cudagraph/compile-safe,
-no python hooks). Feature vector per request (order = lens_pilot.py /
-train_pn119_probe.py ground truth, [6, 5120] row-major):
-  L42-last, L42-mean, L47-last, L47-mean, L51-last, L51-mean
+no python hooks). Feature vector per request (order = the npz `blocks` key,
+[3, 5120] row-major):
+  L42-last, L47-last, L51-last
 Score: xs = (x-mu)/sd; p = xs @ Vt10.T; score = concat(p,[1]) @ w.
+
+LAST-ONLY (2026-07-25). The mean-pooled half of the feature vector is GONE.
+The evaluation that decided it is in probe-v2/pn119-probe-lastonly-report.json:
+seed LOO AUC 0.9459 vs the incumbent recipe's 0.9358 (shuffled p95 floor
+0.7174), best of every configuration measured. The sink-side deltas are NOT
+individually significant — on the full 79-row OOD window last-only wins rho
+(0.6231 vs 0.5845) and AUC@2500 (0.8601 vs 0.8304) and LOSES AUC@2000
+(0.8983 vs 0.9022); on the 62-row replication window it wins all three. The
+case for shipping it is STRUCTURAL, not accuracy:
+  * FEAT_DIM 30720 -> 15360. Sink bytes halve, 61,440 -> 30,720 per request.
+  * The target stays BINARY (rtok >= 2000), so PN119_TDEEP=0.495 remains
+    valid (the npz's own suggestion is 0.4897, deep frac 0.35).
+  * 100% of requests become scoreable. vLLM ALWAYS recomputes the last prompt
+    token even on a total prefix-cache hit — verified in this image at
+    v1/core/kv_cache_manager.py: `max_cache_hit_length = request.num_tokens - 1`
+    with the comment "When all tokens hit the cache, we must recompute the
+    last token to obtain logits". The mean-pool was the ONLY reason a partial
+    prefill could not be scored, so the exact-reconstruction memo
+    (PN119_PREFIX_MEMO / _MEMO_UNIT), the accumulator, the partial_prefill
+    refusal and the 15-blocking-sync memo D2H are all deleted rather than
+    maintained. What survives is the ONE case that is still real: a request
+    whose last prompt token this process never forwarded at all (the router
+    attached mid-flight) — `prefill_not_observed`, still an explicit
+    counted fallback, never a silent pass-through.
 
 Modes (PN119_MODE): shadow (default) = log + sink only, act on nothing;
 enforce = additionally publish the decision to the ROUTES/SCORES registries
@@ -57,46 +81,72 @@ a separate cheap prefill-only probe request, or nothing. The shipped consumer
 is therefore the budget half of deep/lean, NOT the full treatment: do not read
 it as reproducing the 25-to-v5 / 75-to-v3 result.
 
-PARTIAL PREFILLS / PREFIX-CACHE HITS (fixed 2026-07-25)
--------------------------------------------------------
-The tap only sees the tokens the engine actually FORWARDS this pass. On an
-APC prefix-cache hit the first `num_computed_tokens` prompt positions are
-served from the KV cache and their layer-42/47/51 residual states are never
-materialised — so the mean-pooled half of the feature vector cannot be
-formed from this pass alone. The accumulator used to start at 0 regardless,
-never reach `prompt_len`, and the request was SILENTLY never scored: under
-enforce it fell through to default handling with no score, no log, no
-counter. Harmless only while prefix caching never hit (BUG-131); the moment
-`prefix_match_unit: 258` (compose/single/cache-override-apc.yaml, 5884a5f9)
-is enabled, exactly the shared-system-prompt agent traffic goes unrouted.
+THINKING-ON GATE (2026-07-25) — the router's contract population
+-----------------------------------------------------------------
+The router can only move a request that HAS a thinking budget to move. A
+thinking-OFF prompt (the Qwen3.6 template pre-closes `<think></think>`)
+spends zero reasoning tokens no matter what the probe says, so scoring it
+buys nothing and costs a 30,720-byte sink row and a matvec. Worse, it
+poisoned every rate: measured on one live window, 30 of 61 scored rows were
+thinking-OFF, so "deep fraction", "fallback rate" and every percentile were
+computed over a population that is roughly HALF requests the router cannot
+affect.
 
-Three behaviours now, in order of preference:
-  1. EXACT RECONSTRUCTION (PN119_PREFIX_MEMO=1, default OFF): cumulative
-     pooled sums are memoised at PN119_MEMO_UNIT boundaries keyed by the
-     hash of the token prefix, so a later cache-hit request whose cached
-     length lands on a stored checkpoint gets a mathematically identical
-     feature vector. Its validity assumption is *the same one APC itself
-     makes* — identical token prefix => identical hidden states (b3 proved
-     this prefill bit-deterministic for identical token ids). Default OFF
-     because its cost (one D2H snapshot per checkpoint) and its hit rate
-     (needs PN119_MEMO_UNIT == the live prefix_match_unit) are unmeasured
-     until a boot; the memo NEVER produces a score from partial data — a
-     miss falls through to (2).
-  2. EXPLICIT FALLBACK: a request whose prompt was not fully observed is
-     UNSCOREABLE — a partial-feature score is not a degraded score, it is a
-     different quantity (mu/sd/PCA were fit on whole-prompt pooling), so it
-     is never computed. Instead the router publishes a defined default route
-     (PN119_FALLBACK_ROUTE, default "deep" = fail-safe on accuracy), logs it
-     at WARNING and counts it. No feature row reaches the v2 sink.
-  3. Consumers call `route_for(req_id)`, which can never return None. The
-     old `SCORES.get(req_id) -> None -> whatever the default is` shape is
-     what made the failure silent; it stays populated for compatibility.
+`_prompt_thinking(state)` now runs at the TOP of `_finalize`:
+  * True  -> score, sink row, `"routable": true`. The only rows in the
+             deep-fraction denominator and the only rows the refit may learn
+             from.
+  * False -> publish ROUTE_LEAN with reason "thinking_off", SKIP the matvec
+             and the feature-row write, `_bump("skip_thinking_off")`, meta
+             line with `"routable": false`.
+  * None  -> raw/completion prompt, no marker either way. Still scored
+             (the treatment might matter) but tagged `"routable": null`,
+             counted as `scored_unknown`, and kept OUT of every rate
+             denominator.
+
+MARKER IDENTITY (boot assertion). This module used to scan for the SINGLE
+ids PN119_THINK_START_ID / PN119_THINK_END_ID while the holder that actually
+forces `</think>` uses `reasoning_config.reasoning_start_token_ids` /
+`…end_token_ids`, which are SEQUENCES from `tokenizer.encode()`. A silent
+divergence mislabels the whole sink and nothing downstream would notice, so
+`_resolve_think_markers()` compares them at init and ADOPTS the holder's
+sequences on disagreement (ERROR log + `think_marker_divergence` counter +
+the THINK_MARKERS_DIVERGED alarm). The scan itself is now a subsequence
+search, identical in shape to the holder's `_find_last_sequence_index`.
 
 v2 self-training sink (PN119-BUILD-PACK §v2): every finalized prefill
 appends (bf16 features row, meta line w/ score+mode+explore) to PN119_SINK;
 request finish appends a label line (generated, thinking flag, true rtok =
-tokens before </think>, cap_hit) keyed by req_id. Shadow traffic is
-uncensored → doubles as the v2 training bootstrap.
+tokens before </think>, cap_hit, censored, budget_grant) keyed by req_id.
+Shadow traffic is uncensored → doubles as the v2 training bootstrap.
+
+CENSORING IS THE BINDING CONSTRAINT (BUG-139, 2026-07-25)
+---------------------------------------------------------
+Measured over all 79 thinking-finish rows in the sink: 43 of them (54%) have
+rtok exactly equal to a PN100 100-token-grid grant MINUS FIVE — 1295 x20
+(grant 1300), 3095 x12, 2095 x7, 3895 x4. That is the signature of the
+holder forcing `</think>` when the budget ran out, i.e. a LOWER BOUND on the
+request's need. Only FOUR rows logged `cap_hit=True`, because `_label_fields`
+derived cap_hit from `max_tokens` alone and never looked at the thinking
+budget at all. So over half the training corpus was a truncation recorded as
+a natural stop, which caps rho and AUC for ANY probe fit on it (two
+independent evaluations hit that ceiling and named it), and — once enforce
+acts — makes lean an ABSORBING STATE: a lean-routed row that truncates is
+indistinguishable from one that genuinely needed little, so the router
+reinforces its own decision forever.
+The fix is to record it, not to guess it. Each finish line now carries:
+  censored     = thinking and budget and rtok >= budget - SLACK,
+                 SLACK = len(think_end_ids) + 8 (the measured offset is
+                 exactly 5; the slack absorbs a multi-token end marker and
+                 the spec-decode lookahead without reaching a natural stop).
+  budget_grant = the EFFECTIVE thinking budget — H119's own number when the
+                 consumer rewrote it, otherwise sampling_params
+                 .thinking_token_budget. On BOTH the score and finish lines,
+                 because the score line is written before H119 resolves and
+                 the pair is what makes the rewrite auditable.
+  budget_source= caller | pn100 | h119 | none, from the PN100 ownership
+                 stamp plus H119's own application record.
+`cap_hit` keeps its old meaning for compatibility with sinks already on disk.
 The sink is BUFFERED IN RAM and drained by a daemon thread, so the request
 path holds no disk I/O at all (PN119_SINK_BUF_ROWS / _BUF_SECS / _BUF_MAX;
 0 rows = legacy synchronous mode). Clean shutdown always drains via atexit;
@@ -104,9 +154,34 @@ a hard kill loses at most one buffer. On-disk bytes are unchanged.
 
 v2 loop (fixes/refit_pn119_probe.py + pn119-refit.timer): refits the probe
 from the sink on CPU and ATOMICALLY swaps the npz (pn119_atomic.py); this
-router hot-reloads it on (mtime,size) change — PN119_RELOAD_S throttle,
-no restart. PN119_EXPLORE=<frac> flags a deterministic ~frac of requests
-for generous caps in enforce mode so labels stay uncensored (EXPLORE set).
+router hot-reloads it on a CONTENT HASH change — PN119_RELOAD_S throttle, no
+restart. The signature used to be (mtime_ns, size), which is blind in
+exactly the case that matters: the tap-trained and the offline-trained
+probes are byte-IDENTICAL in size, so `cp -p`, `rsync -a` and a snapshot
+rollback all leave the pair unchanged and the router keeps serving the old
+weights while every operator believes the swap landed. Hashing 1.4 MB once
+per PN119_RELOAD_S (60 s) is not a cost worth a class of invisible failure.
+PN119_EXPLORE=<frac> flags a deterministic ~frac of requests for generous
+caps in enforce mode so labels stay uncensored (EXPLORE set).
+
+LATENCY HYGIENE (2026-07-25). `float(torch.dot(...))` is an `.item()` in
+disguise — a full device sync in the middle of a step, on a stack vLLM went
+to some trouble to keep sync-free. Under PN119_ASYNC_SCORE=1 the score (and,
+when the sink is on, the bf16 feature row) is copied into PINNED host memory
+with `non_blocking=True`, a `cuda.Event` is recorded, and the readback is
+resolved at the last responsible moment — inside `h119_resolve_routes`,
+which runs LATER IN THE SAME STEP (sampler time) than observe() does
+(post-forward). Semantics are preserved exactly: the route is still on
+record before the sampler that emits the request's first token. Paired with
+H119_ROUTE_GRACE_TOKENS (default 8): a provisional row is allowed a few
+output tokens of slack before it is committed to the fallback, which against
+an 800/10240 cap is arithmetically identical and gives the async path room.
+Any failure to resolve asynchronously falls back to the blocking readback
+and bumps `sync_fallback_used`. Two further step-level cuts: steps with no
+`scheduled_new_reqs` and an empty accumulator early-out entirely (with a
+full scan every PN119_FULLSCAN_EVERY=256 steps so a stuck request is still
+found), and the two per-request `logger.info` calls are DEBUG — only the
+periodic rollup stays at INFO.
 
 HEALTH SURFACE (PN119_HEALTH, added 2026-07-25 — read this before touching it)
 ------------------------------------------------------------------------------
@@ -152,6 +227,7 @@ from __future__ import annotations
 import atexit
 import collections
 import hashlib
+import itertools
 import json
 import logging
 import math
@@ -177,7 +253,14 @@ logger = logging.getLogger("vllm.h119")
 
 LAYERS = (42, 47, 51)
 D_MODEL = 5120
-FEAT_DIM = len(LAYERS) * 2 * D_MODEL  # 30720
+# LAST-ONLY: one pooled block per layer (the last prompt token's residual),
+# no mean-pool. See §LAST-ONLY in the module docstring — this halves the sink
+# and, far more importantly, makes every request scoreable because vLLM always
+# recomputes the last prompt token.
+POOLS = ("last",)
+FEAT_DIM = len(LAYERS) * len(POOLS) * D_MODEL  # 15360
+# The npz `blocks` key must equal this, in this order.
+FEAT_BLOCKS = tuple(f"L{li}-{p}" for li in LAYERS for p in POOLS)
 
 # Live sinks, so a clean interpreter exit always drains their RAM buffers.
 # WeakSet: a router that is garbage collected takes its buffer with it and
@@ -194,6 +277,11 @@ def _flush_all_sinks() -> None:
 
 
 atexit.register(_flush_all_sinks)
+
+# Sentinel for "the attribute is not on this scheduler_output at all", which is
+# a different fact from "it is empty" — the first must force a full scan, the
+# second is the whole point of the early-out.
+_MISSING = object()
 
 ROUTE_DEEP = "deep"
 ROUTE_LEAN = "lean"
@@ -323,6 +411,26 @@ _ALARM_OUT_OF_BATCH_MIN_N = 25
 # and worth knowing on a bench container that was booted to serve.
 _ALARM_TAP_GRACE_S = 600.0
 
+# CENSORED_STORM (BUG-139). A finish whose rtok lands within SLACK of its own
+# thinking budget did not stop, it was STOPPED — the label is a lower bound.
+# The 2026-07-25 sink measured 43 of 79 thinking finishes (54%) at exactly
+# grant-5 while only 4 rows flagged cap_hit, which is why the ceiling on rho
+# and AUC was invisible. Under enforce the same fact is worse than a data
+# problem: a lean-routed row that truncates looks identical to one that needed
+# little, so the router trains on its own decision. 0.35 sits above the noise a
+# healthy shadow boot produces on runaway requests and well below the 0.54 that
+# actually happened. Warn, not critical: the fix is a budget policy change, not
+# a broken component.
+_ALARM_CENSORED_RATE = 0.35
+_ALARM_CENSORED_MIN_N = 25
+
+# THINK_MARKERS_DIVERGED. The sidecar's PN119_THINK_*_ID single ids and the
+# holder's reasoning_config token-id SEQUENCES must describe the same markers.
+# When they do not, every `thinking` label and every rtok in the sink is wrong
+# and nothing else in the system can tell. The router adopts the holder's
+# sequences (it is the thing that actually forces `</think>`) and alarms so the
+# env that lied gets fixed rather than silently overridden forever.
+
 # Severity: "critical" = the router is not doing its job (or is doing it to
 # the wrong requests); "warn" = it is working but outside its design point.
 # pn119-doctor exits 2 on any critical, 1 on warnings only.
@@ -338,6 +446,8 @@ _ALARM_SEVERITY = {
     "UNROUTABLE_TRAFFIC": "warn",
     "MODE_INVALID": "critical",
     "INDEX_DESYNC": "critical",
+    "THINK_MARKERS_DIVERGED": "critical",
+    "CENSORED_STORM": "warn",
 }
 ALARM_IDS = tuple(_ALARM_SEVERITY)
 
@@ -379,11 +489,23 @@ def make_snapshot(*, stats, boot_id="", pid=0, hostname="", started=0.0,
     """
     now = time.time() if now is None else now
     st = dict(stats or {})
+    # `scored` counts ROUTABLE rows only (thinking-ON prompts). Everything
+    # keyed off it — deep_frac, the design band, the degenerate check — is
+    # therefore computed over the population the router can actually move.
+    # Thinking-OFF prompts spend zero reasoning tokens whatever the probe
+    # says, and folding them in is how a "31% deep" reading was produced from
+    # a window that was half out of contract.
     scored = int(st.get("scored", 0))
     deep = int(st.get("scored_deep", 0))
     lean = int(st.get("scored_lean", 0))
     unscoreable = int(st.get("unscoreable", 0))
-    decisions = scored + unscoreable
+    # Scored, but the prompt carried no think marker either way (raw /
+    # completion). Published like any other route; kept out of every rate.
+    scored_unknown = int(st.get("scored_unknown", 0))
+    thinking_off = int(st.get("skip_thinking_off", 0))
+    censored = int(st.get("finish_censored", 0))
+    finished_thinking = int(st.get("finish_thinking", 0))
+    decisions = scored + scored_unknown + unscoreable + thinking_off
     # Requests that reached NO probe decision. route_for_miss and
     # h119_route_missing are the consumer inventing a route; skip_* are the
     # observer failing to attach to a request at all.
@@ -447,6 +569,10 @@ def make_snapshot(*, stats, boot_id="", pid=0, hostname="", started=0.0,
             "deep": deep,
             "lean": lean,
             "unscoreable": unscoreable,
+            "scored_unknown": scored_unknown,
+            "thinking_off": thinking_off,
+            "censored": censored,
+            "finished_thinking": finished_thinking,
             "decisions": decisions,
             "unroutable": unroutable,
             "batch_adds": batch_adds,
@@ -467,6 +593,15 @@ def make_snapshot(*, stats, boot_id="", pid=0, hostname="", started=0.0,
             # The narrower "the probe refused to score this" rate.
             "unscoreable_rate": _rate(unscoreable, decisions),
             "unroutable_rate": _rate(unroutable, decisions),
+            # Share of everything the router saw that it can never move.
+            # Not a failure — but if it is most of the traffic, the saving
+            # the router can produce is bounded by (1 - this).
+            "thinking_off_rate": _rate(thinking_off, decisions),
+            "unknown_routable_rate": _rate(scored_unknown, decisions),
+            # BUG-139: share of finished thinking requests whose rtok is a
+            # lower bound, not a stop. Over ROUTABLE finishes only.
+            "censored_rate": _rate(censored, finished_thinking),
+            "censored_rate_n": finished_thinking,
         },
         "stats": {k: int(v) for k, v in sorted(st.items())},
     }
@@ -576,6 +711,8 @@ def pn119_alarms(snap: dict) -> list[dict]:
         # twenty-odd 0-byte sink files exist and none of them told anyone
         # anything.
         observations = (scored + int(t.get("unscoreable", 0))
+                        + int(t.get("scored_unknown", 0))
+                        + int(t.get("thinking_off", 0))
                         + int(st.get("skip_no_req_state", 0))
                         + int(st.get("skip_no_prompt_len", 0)))
         batch_adds = int(t.get("batch_adds", 0))
@@ -701,6 +838,36 @@ def pn119_alarms(snap: dict) -> list[dict]:
                    unroutable=int(t.get("unroutable", 0)), decisions=decisions,
                    rate=float(rt.get("unroutable_rate", 0.0)))
 
+        # ── THINK_MARKERS_DIVERGED ─────────────────────────────────────────
+        # The env told this module one thing and the holder that actually
+        # forces `</think>` uses another. Whichever is wrong, every `thinking`
+        # flag and every rtok in the sink is now suspect — and the router
+        # cannot tell which rows. Critical, and it fires from the first boot
+        # because the divergence is a static property of the configuration.
+        if int(st.get("think_marker_divergence", 0)) > 0:
+            _alarm(out, "THINK_MARKERS_DIVERGED",
+                   "PN119_THINK_START_ID/PN119_THINK_END_ID disagree with the "
+                   "holder's reasoning_config token-id sequences — the holder's "
+                   "were adopted, but the env is lying and every historical "
+                   "label written under it is suspect",
+                   markers=st.get("think_marker_divergence"))
+
+        # ── CENSORED_STORM (BUG-139) ───────────────────────────────────────
+        # rtok landed within SLACK of the request's own budget: a lower bound
+        # recorded as a spend. In shadow this caps what any refit can learn;
+        # in enforce it makes lean self-confirming.
+        cens_n = int(t.get("finished_thinking", 0))
+        if (cens_n >= _ALARM_CENSORED_MIN_N
+                and float(rt.get("censored_rate", 0.0)) > _ALARM_CENSORED_RATE):
+            _alarm(out, "CENSORED_STORM",
+                   f"{t.get('censored')}/{cens_n} thinking finishes "
+                   f"({rt.get('censored_rate', 0.0):.1%}) stopped at their own "
+                   f"budget (> {_ALARM_CENSORED_RATE:.0%}) — those rtok values "
+                   "are lower bounds, and under enforce a truncated lean row "
+                   "trains the router to keep routing it lean",
+                   censored=int(t.get("censored", 0)), n=cens_n,
+                   rate=float(rt.get("censored_rate", 0.0)))
+
         # ── INDEX_DESYNC ───────────────────────────────────────────────────
         # _state is keyed by BATCH INDEX and indices are recycled. A desync
         # means slot i belonged to a different request between mark and
@@ -766,14 +933,6 @@ def _truthy(v: str) -> bool:
     return v.lower() in ("1", "true", "yes", "on")
 
 
-def _rindex(seq, value):
-    """Index of the LAST occurrence of `value` in `seq`, or None."""
-    for i in range(len(seq) - 1, -1, -1):
-        if seq[i] == value:
-            return i
-    return None
-
-
 class PN119Router:
     @classmethod
     def maybe_create(cls, runner):
@@ -822,13 +981,16 @@ class PN119Router:
                 logger.info("[PN119] attached own stderr handler — the 'vllm' "
                             "logging config did not reach %s", logger.name)
             logger.info(
-                "[PN119] router active: mode=%s tdeep=%.3f probe=%s aux layers=%s "
-                "sink=%s fallback_route=%s prefix_memo=%s(unit=%d max=%d) "
-                "boot_id=%s health=%s",
-                inst.mode, inst.tdeep, os.path.basename(npz_path), LAYERS,
+                "[PN119] router active: mode=%s tdeep=%.3f probe=%s(%s) "
+                "feat_dim=%d blocks=%s aux layers=%s sink=%s fallback_route=%s "
+                "async_score=%s acc_max=%d think_start=%s think_end=%s "
+                "censor_slack=%d boot_id=%s health=%s",
+                inst.mode, inst.tdeep, os.path.basename(npz_path),
+                inst.probe_sig_short(), FEAT_DIM, ",".join(FEAT_BLOCKS), LAYERS,
                 inst.sink_dir or "-", inst.fallback_route,
-                "on" if inst.memo_on else "off", inst.memo_unit, inst.memo_max,
-                inst.boot_id, inst.health_path or "-",
+                "on" if inst._async_want else "off", inst._acc_max,
+                inst._think_start_ids, inst._think_end_ids,
+                inst._censor_slack, inst.boot_id, inst.health_path or "-",
             )
             return inst
         except Exception as e:  # noqa: BLE001 — never brick model load
@@ -877,20 +1039,28 @@ class PN119Router:
                            fb, ROUTE_DEEP)
             fb = ROUTE_DEEP
         self.fallback_route = _FALLBACK_ROUTE = fb
-        # Exact-reconstruction memo for cached prefixes (module docstring §1).
-        # OFF by default: correctness is not at stake either way (a miss falls
-        # back), but the D2H snapshot cost and the hit rate are unmeasured
-        # until a boot, and OFF keeps the full-recompute path byte-identical.
-        self.memo_on = _truthy(_env("PN119_PREFIX_MEMO", "0"))
-        # MUST equal the engine's APC prefix_match_unit for checkpoints to line
-        # up with cache-hit lengths (cache-override-apc.yaml ships 258).
-        self.memo_unit = max(int(_env("PN119_MEMO_UNIT", "258") or 258), 1)
-        self.memo_max = max(int(_env("PN119_MEMO_MAX", "256") or 256), 1)
-        # key -> [len(LAYERS), D_MODEL] float32 CPU cumulative sums, LRU.
-        self._memo: "collections.OrderedDict[tuple, torch.Tensor]" = (
-            collections.OrderedDict())
         self._stats_every = max(int(_env("PN119_STATS_EVERY", "200") or 200), 1)
         self._decisions = 0
+        # ── step-level early-out (latency hygiene) ─────────────────────────
+        # A step with no newly scheduled request and nothing mid-prefill has
+        # nothing this module can possibly finalize, so the whole batch scan
+        # (a python loop over req_ids plus a `sum()` over the schedule dict)
+        # is pure overhead on every decode step — which is the overwhelming
+        # majority of steps. The periodic FULL scan is the safety valve: if
+        # `scheduled_new_reqs` ever fails to mean what we think it means, a
+        # request stuck in the accumulator is still found within
+        # PN119_FULLSCAN_EVERY steps rather than never.
+        self._step = 0
+        self._fullscan_every = max(
+            int(_env("PN119_FULLSCAN_EVERY", "256") or 256), 1)
+        # ── bounded in-flight state ────────────────────────────────────────
+        # Every per-request map here is popped in on_finish. on_finish is
+        # driven by scheduler_output.finished_req_ids, so a request the engine
+        # aborts without reporting (or one racing a router that attached late)
+        # leaks an entry forever. 4x max_num_seqs is enough headroom that the
+        # reaper never touches a live request and small enough that a leak is
+        # bounded by megabytes rather than by uptime.
+        self._acc_max = self._resolve_acc_max()
         # v2 explore knob (BUILD-PACK §v2): fraction of requests flagged for
         # generous caps regardless of score. Deterministic per req_id so the
         # sink row and the enforce-side consumer always agree.
@@ -898,23 +1068,37 @@ class PN119Router:
             self.explore_rate = min(max(float(_env("PN119_EXPLORE", "0") or 0.0), 0.0), 1.0)
         except ValueError:
             self.explore_rate = 0.0
-        # v2 hot-reload: refit timer atomically swaps the npz; we re-load on
-        # (mtime, size) change, throttled to one stat() per PN119_RELOAD_S.
+        # v2 hot-reload: refit timer atomically swaps the npz; we re-load on a
+        # CONTENT HASH change, throttled to one read per PN119_RELOAD_S.
+        # (mtime_ns, size) was the old signature and it is blind to `cp -p`,
+        # `rsync -a` and snapshot rollbacks — and the two probes we actually
+        # swap between have IDENTICAL sizes, so that blindness is not
+        # theoretical. See §v2 loop in the module docstring.
         self._probe_path = npz_path
         self._reload_every = max(float(_env("PN119_RELOAD_S", "60") or 60.0), 1.0)
         self._next_reload_check = time.time() + self._reload_every
-        self._probe_sig = self._stat_sig(npz_path)
+        self._probe_sig = self._content_sig(npz_path)
         self._failed_sig = None
         # Health: the fold self-check residual of the weights actually in use.
         self._probe_fold_resid = None
+        self._probe_canary = None
         self._probe_loads = 0
         self.pv, self.pb = self._load_probe(npz_path)
-        # v2 label plumbing: think-region markers of the SERVED model's
-        # tokenizer (defaults = thinkingcap-gptq-pro-v2 / Qwen3.6 template:
-        # thinking-ON prompt ends "<think>\n", thinking-OFF ends
-        # "<think>\n\n</think>\n\n"; </think> in OUTPUT marks end of spend).
-        self._think_start = int(_env("PN119_THINK_START_ID", "248068") or 248068)
-        self._think_end = int(_env("PN119_THINK_END_ID", "248069") or 248069)
+        # v2 label plumbing: think-region markers. Resolved against the
+        # holder's reasoning_config SEQUENCES — see _resolve_think_markers.
+        self._think_start_ids, self._think_end_ids = self._resolve_think_markers()
+        # Kept as scalars for the tests and log lines that name a single id;
+        # nothing in the scan path reads them.
+        self._think_start = self._think_start_ids[0] if self._think_start_ids else None
+        self._think_end = self._think_end_ids[0] if self._think_end_ids else None
+        # BUG-139 slack: how close to its own grant an rtok has to land before
+        # the stop is attributed to the budget rather than to the model. The
+        # measured offset on 43 live rows is exactly 5; +8 over the end-marker
+        # length absorbs a multi-token `</think>` and the spec-decode lookahead
+        # without ever reaching far enough down to swallow a natural stop
+        # (the nearest non-grid modal value in the same window is 881 against
+        # a 1300 grant).
+        self._censor_slack = max(len(self._think_end_ids) + 8, 8)
         # Tail window for the thinking-label scan. MUST be wide enough to reach
         # back past whatever PN102 seeded INSIDE the think region, otherwise the
         # <think> marker falls out of view and the row labels thinking=None —
@@ -927,12 +1111,41 @@ class PN119Router:
         # an EARLIER conversation turn can never outrank the current turn's.
         self._tail_window = max(
             int(_env("PN119_TAIL_WINDOW", "64") or 64), 8)
-        # per-request prefill accumulators: req_id -> state dict
+        # In-flight prefill tracker: req_id -> {"seen", "plen", "step"}. With
+        # last-only there is nothing to accumulate, so this is bookkeeping
+        # only — it is what tells a chunked prefill apart from a request the
+        # router has never seen, and it is what the step early-out consults.
         self._acc: dict[str, dict] = {}
         self.scored: dict[str, float] = {}
+        # req_id -> prompt length AT SCORE TIME. A streaming/multi-turn client
+        # that re-prefills under the SAME req_id used to keep turn 1's route
+        # for the rest of the session and then write turn N's labels against
+        # turn 1's feature row — a wrong training row, not merely a stale one.
+        # A mismatch here drops the score and re-enters the accumulator.
+        self._scored_plen: dict[str, int] = {}
         # req_id -> reason, for requests that got the fallback route instead of
         # a score. Keeps the warning + the sink line to one per request.
         self.unscored: dict[str, str] = {}
+        # req_id -> reason, for requests deliberately NOT scored because the
+        # router has no lever on them (thinking-off). Distinct from `unscored`
+        # so a design decision never reads as a failure in the health surface.
+        self.skipped: dict[str, str] = {}
+        # req_id -> budget H119's consumer actually applied. The only way the
+        # finish line can report the EFFECTIVE grant: the consumer rewrites
+        # the holder's state entry, never SamplingParams.
+        self._h119_applied: dict[str, int] = {}
+        # Bounded window of routable scores, for the per-row `pctl` field.
+        self._pctl_window = max(int(_env("PN119_PCTL_WINDOW", "512") or 512), 8)
+        self._score_win: collections.deque = collections.deque()
+        self._score_sorted: list[float] = []
+        # ── deferred score readback (PN119_ASYNC_SCORE) ────────────────────
+        self._async_want = _truthy(_env("PN119_ASYNC_SCORE", "0"))
+        self._async_slots = max(int(_env("PN119_ASYNC_SLOTS", "0") or 0), 0)
+        self._async_ready = False
+        self._pin_score = None
+        self._pin_feat = None
+        self._free_slots: list[int] = []
+        self._pending: list[dict] = []
         self._warned = 0
         # v2 sink — RAM-buffered, flushed off the request path (see
         # _sink_append).  The sink is pure observability; the routing decision
@@ -1035,13 +1248,13 @@ class PN119Router:
                                              b =  w[-1] - v . mu
 
         Folding at LOAD time instead of per request:
-          * VRAM 1,474,604 B -> 122,884 B (-91.7%) — mu, sd and the [10,30720]
-            Vt matrix stop being resident at all;
+          * VRAM collapses to one [FEAT_DIM] fp32 vector — mu, sd and the
+            [10, FEAT_DIM] Vt matrix stop being resident at all;
           * six kernels (sub, div, matvec, dot, add, and their temporaries)
             collapse to one dot product;
           * numerically BETTER, not worse: the fold is computed in float64 on
             the host, so the per-request path carries one rounding instead of
-            four. A 10x30720 GEMV is bandwidth-bound, which is also why fp16
+            four. A 10xFEAT_DIM GEMV is bandwidth-bound, which is also why fp16
             would buy nothing here and would cost precision.
 
         Raises on any problem — callers decide whether that is fatal
@@ -1076,6 +1289,19 @@ class PN119Router:
                 "scores would be inf/NaN and every request would route lean")
         if vt.shape[1] != FEAT_DIM or w.size != vt.shape[0] + 1:
             raise ValueError(f"probe shapes Vt{vt.shape} w{w.shape} inconsistent")
+        # BLOCK ORDER. mu/sd/Vt are fit on a specific concatenation order and
+        # nothing about a [FEAT_DIM] vector reveals which one. A probe trained
+        # on [last, mean] per layer has exactly the same shape as one trained
+        # on [last] over twice the layers, and mis-ordering the blocks produces
+        # finite, plausible, meaningless scores. When the npz declares its
+        # order (`blocks`), it must match ours.
+        blocks = z["blocks"] if "blocks" in z.files else None
+        if blocks is not None:
+            got_blocks = tuple(str(b) for b in np.asarray(blocks).reshape(-1))
+            if got_blocks != FEAT_BLOCKS:
+                raise ValueError(
+                    f"probe block order {got_blocks} != router {FEAT_BLOCKS} — "
+                    "the feature vector would be assembled in the wrong order")
 
         v64 = (vt.T @ w[:-1]) / sd            # [FEAT_DIM]
         b64 = float(w[-1] - float(v64 @ mu))
@@ -1095,25 +1321,89 @@ class PN119Router:
             raise ValueError(
                 f"probe fold disagrees with the staged form: {got} vs {ref}")
 
+        # ── CANARY BLOCK ───────────────────────────────────────────────────
+        # The fold check above proves the folded form agrees with the STAGED
+        # form of the SAME file. It cannot detect that the file itself is the
+        # wrong file: both forms of a wrong probe agree perfectly. A canary is
+        # the trainer's signed claim about what this probe outputs — a
+        # feature vector and the score it must produce — re-scored here, on
+        # the folded weights, at every load and every hot-reload.
+        # Schema (all optional; a probe without them loads and counts
+        # `probe_canary_absent`, which is the state every npz on disk is in
+        # today):
+        #     canary_score : float  — required to activate the check
+        #     canary_x     : [FEAT_DIM] float  — the input, or
+        #     canary_seed  : int    — np.random.default_rng(seed)
+        #                             .standard_normal(FEAT_DIM) instead
+        #     canary_tol   : float  — relative tolerance, default 1e-6
+        canary = None
+        if "canary_score" in z.files:
+            want = float(np.asarray(z["canary_score"]).reshape(-1)[0])
+            if "canary_x" in z.files:
+                cx = np.asarray(z["canary_x"], dtype=np.float64).reshape(-1)
+                src = "canary_x"
+            elif "canary_seed" in z.files:
+                seed = int(np.asarray(z["canary_seed"]).reshape(-1)[0])
+                cx = np.random.default_rng(seed).standard_normal(FEAT_DIM)
+                src = f"canary_seed={seed}"
+            else:
+                raise ValueError(
+                    "probe declares canary_score but neither canary_x nor "
+                    "canary_seed — the claim cannot be checked")
+            if cx.size != FEAT_DIM:
+                raise ValueError(
+                    f"probe canary_x dim {cx.size} != {FEAT_DIM}")
+            tol = (float(np.asarray(z["canary_tol"]).reshape(-1)[0])
+                   if "canary_tol" in z.files else 1e-6)
+            cgot = float(v64 @ cx + b64)
+            if abs(cgot - want) > tol * max(1.0, abs(want)):
+                raise ValueError(
+                    f"probe CANARY FAILED ({src}): scored {cgot!r}, npz claims "
+                    f"{want!r} (tol {tol:g}) — this is not the probe the "
+                    "trainer validated")
+            canary = {"source": src, "want": want, "got": cgot,
+                      "resid": abs(cgot - want), "tol": tol}
+        else:
+            _bump("probe_canary_absent")
+
         v = torch.from_numpy(np.ascontiguousarray(v64, dtype=np.float32)).to(dev)
         # Health surface: the residual of the check above, on the weights that
         # are actually about to serve. Published rather than only logged —
         # every INFO this module emitted about its own health was discarded
         # for a whole afternoon, which is the entire reason health.json exists.
         self._probe_fold_resid = abs(ref - got)
+        self._probe_canary = canary
         self._probe_loads += 1
         logger.info("[PN119] probe folded: %d B on device (was %d B), "
-                    "fold check |d|=%.3e", v.numel() * 4,
-                    (mu.size + sd.size + vt.size + w.size) * 4, abs(ref - got))
+                    "fold check |d|=%.3e canary=%s", v.numel() * 4,
+                    (mu.size + sd.size + vt.size + w.size) * 4, abs(ref - got),
+                    "ok" if canary else "absent")
         return v, b64
 
     @staticmethod
-    def _stat_sig(path: str):
+    def _content_sig(path: str):
+        """(size, sha256) of the probe file — the reload trigger.
+
+        Deliberately NOT (mtime_ns, size). Every mechanism that would put a
+        DIFFERENT probe at this path without moving the mtime is a mechanism
+        we use: `cp -p` from the staging dir, `rsync -a` from a backup, a
+        btrfs snapshot rollback. And the two probes this deployment actually
+        alternates between (tap-trained vs offline-trained) have byte-equal
+        sizes, so `size` alone catches nothing either. Reading 1.4 MB once per
+        PN119_RELOAD_S is ~0.3 ms of a background check.
+        """
         try:
-            st = os.stat(path)
-            return (st.st_mtime_ns, st.st_size)
+            h = hashlib.sha256()
+            with open(path, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    h.update(chunk)
+            return (os.path.getsize(path), h.hexdigest())
         except OSError:
             return None
+
+    def probe_sig_short(self) -> str:
+        sig = self._probe_sig
+        return sig[1][:12] if sig else "-"
 
     def _maybe_reload(self) -> None:
         """Pick up an atomically-swapped probe without a restart. The swap
@@ -1125,7 +1415,7 @@ class PN119Router:
         if now < self._next_reload_check:
             return
         self._next_reload_check = now + self._reload_every
-        sig = self._stat_sig(self._probe_path)
+        sig = self._content_sig(self._probe_path)
         if sig is None or sig == self._probe_sig or sig == self._failed_sig:
             return
         try:
@@ -1141,8 +1431,8 @@ class PN119Router:
         self.pv, self.pb = new
         self._probe_sig = sig
         self._failed_sig = None
-        logger.info("[PN119] probe hot-reloaded from %s (mtime_ns=%d size=%d)",
-                    self._probe_path, sig[0], sig[1])
+        logger.info("[PN119] probe hot-reloaded from %s (size=%d sha256=%s)",
+                    self._probe_path, sig[0], sig[1][:12])
 
     def _is_explore(self, req_id: str) -> bool:
         if self.explore_rate <= 0.0:
@@ -1163,8 +1453,31 @@ class PN119Router:
     def _observe(self, scheduler_output, aux) -> None:
         if aux is None or len(aux) != len(LAYERS):
             return
+        self._step += 1
         runner = self.runner
+        # Resolve any score whose D2H was deferred from an EARLIER step. Under
+        # normal operation h119_resolve_routes drains within the same step; this
+        # is the backstop for a boot with no holder (no reasoning_config) where
+        # update_state never runs at all.
+        if self._pending:
+            self._drain_pending()
         sched = scheduler_output.num_scheduled_tokens  # dict req_id -> n
+        # ── step early-out ────────────────────────────────────────────────
+        # Nothing can be finalized on a step that admitted no new request and
+        # has nothing mid-prefill. The full scan every _fullscan_every steps
+        # is the safety valve for the case where that reasoning is wrong.
+        new_reqs = getattr(scheduler_output, "scheduled_new_reqs", _MISSING)
+        if new_reqs is _MISSING:
+            _bump("no_scheduled_new_reqs_attr")
+        elif (not new_reqs and not self._acc
+                and (self._step - 1) % self._fullscan_every):
+            # `_step - 1` so the FIRST step this router ever sees is always a
+            # full scan: a router that attached mid-flight has requests in the
+            # batch that were never "new" and are not in the accumulator, and
+            # making them wait a whole fullscan period to be noticed is the
+            # silent-unrouted-request failure this module exists to not have.
+            _bump("step_early_out")
+            return
         req_ids = list(runner.input_batch.req_ids)
         start = 0
         total = sum(sched.get(r, 0) for r in req_ids)
@@ -1175,155 +1488,139 @@ class PN119Router:
             if n <= 0:
                 continue
             end = start + n
-            state = runner.requests.get(req_id)
-            # Already decided (scored or explicitly fallen back) => nothing to
-            # do on this step. Both maps are popped in on_finish.
-            if req_id in self.scored or req_id in self.unscored:
+            try:
+                self._observe_one(runner, req_id, n, aux, start)
+            finally:
+                # `start` MUST advance for every scheduled request whatever
+                # happens above, or every later request in the batch reads
+                # another request's hidden states.
                 start = end
-                continue
-            if state is None:
-                _bump("skip_no_req_state")
-                start = end
-                continue
-            prompt_len = getattr(state, "num_prompt_tokens", None)
-            if not prompt_len:
-                _bump("skip_no_prompt_len")
-                start = end
-                continue
-            acc = self._acc.get(req_id)
-            # Preemption-recompute guard: a request preempted mid-prefill
-            # restarts from a lower num_computed_tokens; a stale accumulator
-            # would double-count. Reset when the engine is behind us — the
-            # rebuilt accumulator re-derives its own starting offset below.
-            engine_computed = getattr(state, "num_computed_tokens", None)
-            if (acc is not None and engine_computed is not None
-                    and engine_computed < acc["seen"]):
-                _bump("acc_reset_recompute")
-                acc = None
-            if acc is None:
-                # `num_computed_tokens` is the engine's PRE-step progress (set
-                # in _update_states, which runs before the forward and before
-                # this postprocess hook). For a first-prefill step it is
-                # exactly the APC-cached prefix length: those positions were
-                # NOT forwarded, so their aux rows do not exist this pass.
-                base = int(engine_computed or 0)
-                base = min(max(base, 0), prompt_len)
-                if base >= prompt_len:
-                    # We never saw any of this prompt's prefill (router
-                    # attached late, or an earlier observe error dropped the
-                    # accumulator). Nothing to reconstruct from.
-                    self._unscoreable(req_id, "prefill_not_observed",
-                                      prompt_len, prompt_len)
-                    start = end
-                    continue
-                acc = self._acc[req_id] = {
-                    "seen": base,
-                    "sum": torch.zeros(len(LAYERS), D_MODEL,
-                                       dtype=torch.float32, device=aux[0].device),
-                    "last": None,
-                    "cached": base,
-                    "missing": base,
-                }
-                if base > 0:
-                    _bump("prefill_partial_cached")
-                    prefix = self._memo_get(state, base, aux[0].device)
-                    if prefix is not None:
-                        acc["sum"] += prefix
-                        acc["missing"] = 0
-                        _bump("memo_hit")
-                    else:
-                        _bump("memo_miss")
-            remaining = prompt_len - acc["seen"]
-            if remaining <= 0:
-                start = end
-                continue
-            take = min(n, remaining)
-            self._accumulate(state, acc, aux, start, take)
-            if acc["seen"] >= prompt_len:
-                if acc["missing"]:
-                    # The mean-pool half of the feature vector would be pooled
-                    # over a different token set than mu/sd/Vt were fit on.
-                    # That is not a degraded score, it is a different quantity
-                    # — refuse to compute one.
-                    self._unscoreable(req_id, "partial_prefill",
-                                      acc["missing"], prompt_len)
-                else:
-                    last_rows = [aux[li][start + take - 1].float()
-                                 for li in range(len(LAYERS))]
-                    self._finalize(req_id, acc, last_rows, prompt_len)
-            start = end
+        self._reap()
 
-    def _accumulate(self, state, acc, aux, start: int, take: int) -> None:
-        """Add aux rows [start, start+take) to the running pooled sum.
+    def _observe_one(self, runner, req_id, n, aux, start) -> None:
+        state = runner.requests.get(req_id)
+        if req_id in self.unscored or req_id in self.skipped:
+            return                                   # decided, and not scored
+        if req_id in self.scored:
+            # RE-PREFILL GUARD. A streaming / multi-turn client that reuses one
+            # req_id across turns re-prefills a LONGER prompt. The old code saw
+            # "already scored" and skipped forever, so turn 1's route governed
+            # the whole session and turn N's finish labels were written against
+            # turn 1's feature row — a wrong training row, silently.
+            plen_now = getattr(state, "num_prompt_tokens", None) if state else None
+            if not plen_now or plen_now == self._scored_plen.get(req_id):
+                return
+            _bump("rescore_reprefill")
+            self.scored.pop(req_id, None)
+            self._scored_plen.pop(req_id, None)
+            SCORES.pop(req_id, None)
+            ROUTES.pop(req_id, None)
+            self._acc.pop(req_id, None)
+        if state is None:
+            _bump("skip_no_req_state")
+            return
+        prompt_len = getattr(state, "num_prompt_tokens", None)
+        if not prompt_len:
+            _bump("skip_no_prompt_len")
+            return
+        # `num_computed_tokens` is the engine's PRE-step progress (set in
+        # _update_states, which runs before the forward and before this
+        # postprocess hook). On a first prefill step it is exactly the
+        # APC-cached prefix length: those positions were NOT forwarded.
+        base = int(getattr(state, "num_computed_tokens", None) or 0)
+        base = min(max(base, 0), prompt_len)
+        acc = self._acc.get(req_id)
+        if acc is None:
+            if base >= prompt_len:
+                # The engine says this prompt is fully computed and we have
+                # never seen a chunk of it: the last prompt token was forwarded
+                # before this router existed (attach mid-flight) or on a step an
+                # observe error swallowed. vLLM guarantees the last prompt token
+                # is recomputed on a cache hit, so this is NOT the prefix-cache
+                # case — it is the only remaining unscoreable case.
+                self._unscoreable(req_id, "prefill_not_observed",
+                                  prompt_len, prompt_len)
+                return
+            acc = self._acc[req_id] = {"seen": base, "plen": prompt_len,
+                                       "cached": base, "step": self._step}
+            if base > 0:
+                # Prefix-cache hit. Scoreable now — the mean-pool that used to
+                # make it unscoreable is gone.
+                _bump("prefill_partial_cached")
+        elif base < acc["seen"]:
+            # Preemption-recompute: the engine restarted this prefill from a
+            # lower offset. Re-derive rather than trust the old progress.
+            _bump("acc_reset_recompute")
+            acc["seen"] = base
+            acc["cached"] = base
+        remaining = prompt_len - base
+        if remaining <= 0:
+            return
+        take = min(n, remaining)
+        acc["seen"] = base + take
+        acc["step"] = self._step
+        if acc["seen"] < prompt_len:
+            return                                   # chunked prefill, not done
+        # The last prompt token sits at slice offset take-1 — the same row the
+        # accumulator version used, which is why the last-only feature vector is
+        # a strict SUBSET of the old one and needs no new capture plumbing.
+        last_rows = [aux[li][start + take - 1].float()
+                     for li in range(len(LAYERS))]
+        self._finalize(req_id, state, last_rows, prompt_len, acc.get("cached", 0))
 
-        With the memo OFF this is a single fused `sum(0)` over the whole slice
-        — byte-identical to the pre-2026-07-25 accumulator. With the memo ON
-        the slice is split at PN119_MEMO_UNIT boundaries so a complete-from-
-        zero cumulative sum can be snapshotted at each one.
+    # ── bounded state: one reaper for every per-request map ────────────────
+    def _resolve_acc_max(self) -> int:
+        """PN119_ACC_MAX, defaulting to 4x the engine's max_num_seqs."""
+        try:
+            explicit = int(_env("PN119_ACC_MAX", "") or 0)
+            if explicit > 0:
+                return explicit
+        except ValueError:
+            logger.warning("[PN119] PN119_ACC_MAX is not an integer — derived")
+        seqs = int(getattr(self.runner, "max_num_reqs", 0) or 0)
+        if not seqs:
+            cfg = getattr(self.runner, "vllm_config", None)
+            sch = getattr(cfg, "scheduler_config", None) if cfg else None
+            seqs = int(getattr(sch, "max_num_seqs", 0) or 0)
+        return max(4 * (seqs or 256), 64)
+
+    def _reap(self) -> None:
+        """Evict the oldest entries from every per-request map over the bound.
+
+        These maps are all popped in on_finish, which is driven by
+        `scheduler_output.finished_req_ids`. A request that leaves the engine
+        without appearing there — an abort racing a shutdown, or anything the
+        router saw before it was fully attached — leaks one entry per map for
+        the life of the process. Insertion order is arrival order, so the head
+        of each dict is the oldest and the least likely to still be live.
+        ONE reaper for all of them: the maps are keyed by the same req_id and
+        letting them drift apart is how a route outlives its score.
         """
-        if not self.memo_on:
-            for li in range(len(LAYERS)):
-                # sum(dtype=) accumulates in fp32 WITHOUT materialising an fp32
-                # copy of the slice first. `.float().sum(0)` allocated one: at a
-                # 4128-token chunk x 5120 dims that is an 80.6 MiB transient per
-                # layer per step, on a card running util 0.935 with an OOM
-                # history (BUG-126). Same result, same precision, no allocation.
-                acc["sum"][li] += aux[li][start:start + take].sum(
-                    0, dtype=torch.float32)
-            acc["seen"] += take
-            return
-        pos = acc["seen"]
-        off = 0
-        unit = self.memo_unit
-        while off < take:
-            nxt = ((pos // unit) + 1) * unit
-            step = min(take - off, nxt - pos)
-            for li in range(len(LAYERS)):
-                acc["sum"][li] += aux[li][start + off:start + off + step].sum(
-                    0, dtype=torch.float32)
-            pos += step
-            off += step
-            if pos % unit == 0 and not acc["missing"]:
-                self._memo_put(state, pos, acc["sum"])
-        acc["seen"] = pos
-
-    # ── cached-prefix feature memo (module docstring §1) ────────────────────
-    def _memo_key(self, state, n: int):
-        ids = getattr(state, "prompt_token_ids", None)
-        if not ids or len(ids) < n:
-            return None
-        h = hashlib.sha1()
-        h.update(b"pn119.1")
-        h.update(repr(list(ids[:n])).encode())
-        return (n, h.digest())
-
-    def _memo_put(self, state, n: int, cum: torch.Tensor) -> None:
-        key = self._memo_key(state, n)
-        if key is None:
-            return
-        if key in self._memo:
-            self._memo.move_to_end(key)
-            return
-        self._memo[key] = cum.detach().to("cpu", copy=True)
-        _bump("memo_store")
-        while len(self._memo) > self.memo_max:
-            self._memo.popitem(last=False)
-            _bump("memo_evict")
-
-    def _memo_get(self, state, n: int, device):
-        key = self._memo_key(state, n)
-        if key is None:
-            return None
-        cum = self._memo.get(key)
-        if cum is None:
-            return None
-        self._memo.move_to_end(key)
-        return cum.to(device)
+        lim = self._acc_max
+        maps = (("acc", self._acc), ("scored", self.scored),
+                ("scored_plen", self._scored_plen),
+                ("unscored", self.unscored), ("skipped", self.skipped),
+                ("h119_applied", self._h119_applied),
+                ("routes", ROUTES), ("scores", SCORES))
+        for name, m in maps:
+            over = len(m) - lim
+            if over <= 0:
+                continue
+            for key in list(itertools.islice(iter(m), over)):
+                m.pop(key, None)
+                EXPLORE.discard(key)
+            _bump(f"reaped_{name}", over)
+        over = len(EXPLORE) - lim
+        if over > 0:
+            for _ in range(over):
+                EXPLORE.pop()
+            _bump("reaped_explore", over)
 
     # ── v2 sink plumbing: no disk on the request path ───────────────────────
     # observe()/on_finish() only append to two RAM lists under a lock; a daemon
     # thread does every write()+flush().  Measured on the live btrfs sink dir
-    # (2000 rows, 61440 B feature + meta line each):
+    # (2000 rows, 61440 B feature + meta line each; last-only halved the
+    #  feature half of that to 30720 B, so these are upper bounds now):
     #   inline write+flush per request   13.66 us mean /  58 us max
     #   inline batch-of-64               (mean drops, but 1.56 ms max — the
     #                                     64th request eats the whole 3.9 MB)
@@ -1369,6 +1666,16 @@ class PN119Router:
                 "fallback_route": self.fallback_route,
                 "explore_rate": self.explore_rate,
                 "consumer_flag": _truthy(_env(_CONSUMER_FLAG, "0")),
+                # A feats-*.bin row is FEAT_DIM bf16 values and nothing on
+                # disk says which FEAT_DIM. The 30720-dim and 15360-dim eras
+                # produce files that differ only in length, so a reader that
+                # guesses wrong silently reinterprets every row.
+                "feat_dim": FEAT_DIM,
+                "blocks": list(FEAT_BLOCKS),
+                "probe_sig": self.probe_sig_short(),
+                "think_start_ids": self._think_start_ids,
+                "think_end_ids": self._think_end_ids,
+                "censor_slack": self._censor_slack,
             }) + "\n")
             self._sink_meta.flush()
         except Exception as e:  # noqa: BLE001 — a header is never worth a boot
@@ -1473,11 +1780,14 @@ class PN119Router:
             "basename": os.path.basename(self._probe_path),
             "loads": self._probe_loads,
             "fold_resid": self._probe_fold_resid,
+            "canary": self._probe_canary,
+            "feat_dim": FEAT_DIM,
+            "blocks": list(FEAT_BLOCKS),
             "readable": os.path.isfile(self._probe_path),
         }
         sig = self._probe_sig
         if sig:
-            probe["mtime_ns"], probe["size"] = sig
+            probe["size"], probe["sha256"] = sig
         cs = dict(_consumer_state)
         cs.pop("warned", None)
         consumer = {
@@ -1513,8 +1823,19 @@ class PN119Router:
             extra={"shutdown": bool(shutdown),
                    "health_path": self.health_path,
                    "warned": self._warned,
-                   "memo": {"on": self.memo_on, "unit": self.memo_unit,
-                            "max": self.memo_max, "size": len(self._memo)}},
+                   "inflight": {"acc": len(self._acc),
+                                "scored": len(self.scored),
+                                "unscored": len(self.unscored),
+                                "skipped": len(self.skipped),
+                                "routes": len(ROUTES),
+                                "pending_async": len(self._pending),
+                                "max": self._acc_max},
+                   "async_score": {"requested": self._async_want,
+                                   "ready": self._async_ready,
+                                   "slots_free": len(self._free_slots)},
+                   "think_markers": {"start": self._think_start_ids,
+                                     "end": self._think_end_ids,
+                                     "censor_slack": self._censor_slack}},
         )
 
     def _health_write(self, shutdown: bool = False, force: bool = False) -> None:
@@ -1541,7 +1862,9 @@ class PN119Router:
             # alternative is a time.time() per request, which this module
             # does not get to spend.
             scored = int(STATS.get("scored", 0))
-            decisions = scored + int(STATS.get("unscoreable", 0))
+            decisions = (scored + int(STATS.get("scored_unknown", 0))
+                         + int(STATS.get("unscoreable", 0))
+                         + int(STATS.get("skip_thinking_off", 0)))
             if scored > self._h_prev_scored:
                 if self._h_first_scored_ts is None:
                     self._h_first_scored_ts = now
@@ -1601,31 +1924,390 @@ class PN119Router:
                 "ts": time.time(), "mode": self.mode, "explore": explore,
             }) + "\n")
 
-    def _finalize(self, req_id, acc, last_rows, prompt_len) -> None:
-        mean_rows = [acc["sum"][li] / float(prompt_len) for li in range(len(LAYERS))]
-        # feature order: per layer [last, mean] (lens_pilot raw_rows order)
-        rows = []
-        for li in range(len(LAYERS)):
-            rows.append(last_rows[li])
-            rows.append(mean_rows[li])
-        x = torch.cat(rows)  # [FEAT_DIM] f32 on device
+    # ── the thinking-ON gate (module docstring §THINKING-ON GATE) ──────────
+    def _resolve_think_markers(self):
+        """Reconcile PN119_THINK_*_ID with the holder's marker SEQUENCES.
+
+        The sidecar was configured with two single token ids; the component
+        that actually forces `</think>` reads
+        `reasoning_config.reasoning_start_token_ids` / `…end_token_ids`, which
+        `initialize_token_ids` fills from `tokenizer.encode()` and which are
+        therefore LISTS of arbitrary length. Nothing checked that the two
+        agreed, and a disagreement is invisible: the sink would simply label
+        every row `thinking=None` (or, worse, `False`), the refit would train
+        on the wrong subset, and the health surface would report a happy boot.
+
+        On disagreement the HOLDER wins — it is the thing whose behaviour the
+        labels are meant to describe — and the divergence is counted so the
+        env that lied is fixed rather than silently overridden forever.
+        """
+        # Defaults are the thinkingcap-gptq-pro-v2 / Qwen3.6 ids, verified in
+        # the served tokenizer.json: <think> = 248068, </think> = 248069, both
+        # single tokens. Keeping them as the ENV DEFAULT (rather than deriving
+        # solely from the holder) means a boot with no reasoning_config still
+        # labels correctly instead of labelling nothing.
+        env_start = _env("PN119_THINK_START_ID", "248068")
+        env_end = _env("PN119_THINK_END_ID", "248069")
+        try:
+            start = [int(env_start)]
+            end = [int(env_end)]
+        except ValueError:
+            logger.error("[PN119] PN119_THINK_*_ID not integers (%r/%r) — "
+                         "using 248068/248069", env_start, env_end)
+            start, end = [248068], [248069]
+        held_start = held_end = None
+        try:
+            cfg = getattr(self.runner, "vllm_config", None)
+            rc = getattr(cfg, "reasoning_config", None) if cfg else None
+            if rc is not None:
+                held_start = list(getattr(rc, "reasoning_start_token_ids", None) or [])
+                held_end = list(getattr(rc, "reasoning_end_token_ids", None) or [])
+        except Exception as e:  # noqa: BLE001 — never brick load over a lookup
+            logger.warning("[PN119] reasoning_config unreadable (%s)", e)
+        if not held_start and not held_end:
+            # No holder to compare against (no --reasoning-parser, or a runner
+            # that does not carry vllm_config). Keep the env ids and say so:
+            # "unverified" is a different claim from "verified equal".
+            _bump("think_markers_unverified")
+            logger.warning("[PN119] reasoning_config has no marker ids — using "
+                           "PN119_THINK_*_ID unverified: start=%s end=%s",
+                           start, end)
+            return start, end
+        if start == held_start and end == held_end:
+            logger.info("[PN119] think markers agree with reasoning_config: "
+                        "start=%s end=%s", held_start, held_end)
+            return held_start, held_end
+        if not (held_start and held_end):
+            # Only ONE side is populated. Adopting that leaves the scan with an
+            # empty pattern on the other side, which silently makes every
+            # prompt read thinking-off — worse than the divergence itself.
+            # Keep the env, alarm, say why.
+            _bump("think_marker_divergence")
+            logger.error("[PN119] reasoning_config has a PARTIAL marker pair "
+                         "(start=%s end=%s) — keeping PN119_THINK_*_ID "
+                         "start=%s end=%s; an empty pattern would label every "
+                         "prompt thinking-off", held_start, held_end, start, end)
+            return start, end
+        _bump("think_marker_divergence")
+        logger.error(
+            "[PN119] THINK MARKER DIVERGENCE — env says start=%s end=%s, the "
+            "holder uses start=%s end=%s. ADOPTING THE HOLDER'S: the holder is "
+            "what forces </think>, so it defines what a thinking row IS. Every "
+            "label written under the old env values is suspect.",
+            start, end, held_start, held_end)
+        return held_start, held_end
+
+    @staticmethod
+    def _last_subseq(seq, pat) -> int:
+        """Index of the LAST occurrence of `pat` in `seq`, or -1.
+
+        Same shape as the holder's `_find_last_sequence_index`, deliberately:
+        the two must agree about where a think region opens and closes or the
+        labels describe a different model than the one being served.
+        """
+        if not pat or len(pat) > len(seq):
+            return -1
+        for i in range(len(seq) - len(pat), -1, -1):
+            if seq[i:i + len(pat)] == pat:
+                return i
+        return -1
+
+    def _prompt_thinking(self, req_state):
+        """True / False / None — does this PROMPT open a think region?
+
+        Hoisted out of `_label_fields` so `_finalize` can consult it BEFORE
+        spending a matvec and a 30,720-byte sink row on a request the router
+        has no lever on. Reads only `prompt_token_ids`, which the caller has
+        in hand.
+        """
+        prompt_ids = getattr(req_state, "prompt_token_ids", None)
+        if not prompt_ids:
+            return None
+        # LAST marker wins, not "any </think> anywhere in the window".
+        # thinking-off pre-closes the region, so the tail holds BOTH markers
+        # and </think> is last; thinking-on with a PN102 seed holds only
+        # <think>, several seed tokens back from the end.
+        tail = list(prompt_ids[-self._tail_window:])
+        last_end = self._last_subseq(tail, self._think_end_ids)
+        last_start = self._last_subseq(tail, self._think_start_ids)
+        if last_start >= 0 and last_start > last_end:
+            return True
+        if last_end >= 0:
+            return False
+        return None
+
+    # ── budget provenance (BUG-139) ───────────────────────────────────────
+    def _budget_fields(self, req_id, req_state):
+        """(budget_grant, budget_source) — the EFFECTIVE thinking budget.
+
+        `sampling_params.thinking_token_budget` is what the frontend asked
+        for. It is NOT what the request ran under when H119's consumer took
+        the row over: the consumer rewrites the holder's live state entry and
+        never touches SamplingParams, so reading the params alone reports a
+        grant the request never had. `_h119_applied` is the consumer's own
+        record and wins when present.
+        """
+        sp = getattr(req_state, "sampling_params", None)
+        budget = getattr(sp, "thinking_token_budget", None) if sp is not None else None
+        applied = self._h119_applied.get(req_id)
+        if applied is not None:
+            return int(applied[0]), applied[1]
+        if budget is None:
+            return None, "none"
+        stamp = _h119_overridable_stamp(sp)
+        # stamp == 1 means PN100 chose this budget and marked it overridable.
+        # stamp == 0 means PN100 deliberately kept out — which it does for a
+        # client-pinned numeric, so the budget on the params is the caller's.
+        return int(budget), ("pn100" if stamp == 1 else "caller")
+
+    @staticmethod
+    def _extra_arg(sp, *names):
+        """First present of `names` in SamplingParams.extra_args, else None.
+
+        `caller` / `suite` are not set by anything today; this is the plumbing
+        so a bench harness can stamp a run through `vllm_xargs` and have every
+        sink row carry it. Wire data: never raise, never coerce.
+        """
+        try:
+            xargs = getattr(sp, "extra_args", None)
+            if not xargs:
+                return None
+            for n in names:
+                v = xargs.get(n)
+                if v is not None:
+                    return v if isinstance(v, (int, float)) else str(v)[:64]
+        except (AttributeError, TypeError, ValueError):
+            return None
+        return None
+
+    def _lane_key(self, route: str, explore: bool) -> str:
+        """The treatment lane this row belongs to, as one joinable string.
+
+        A sink row is only comparable to another row that got the same
+        TREATMENT, and the treatment is (mode, route, explore, consumer-on) —
+        four fields that were previously spread across three files and a boot
+        log. Analyses that joined on `mode` alone silently mixed a shadow row
+        with an enforce row whose budget had been rewritten.
+        """
+        return "{}:{}:{}:{}".format(
+            self.mode, route, "x" if explore else "-",
+            "c" if _consumer_state.get("on") else "-")
+
+    def _pctl(self, score: float) -> float:
+        """Percentile of `score` within a bounded window of RECENT routable
+        scores. The threshold is absolute, so an operator cannot tell from a
+        score alone whether it sat at the edge of the distribution or in the
+        bulk; that is exactly the question a retune asks.
+        """
+        import bisect
+        win, srt = self._score_win, self._score_sorted
+        pos = bisect.bisect_right(srt, score)
+        pctl = pos / len(srt) if srt else 0.5
+        bisect.insort(srt, score)
+        win.append(score)
+        while len(win) > self._pctl_window:
+            old = win.popleft()
+            i = bisect.bisect_left(srt, old)
+            if i < len(srt) and srt[i] == old:
+                srt.pop(i)
+        return pctl
+
+    # ── deferred score readback (PN119_ASYNC_SCORE) ────────────────────────
+    def _async_init(self) -> bool:
+        """Allocate the pinned staging buffers once. False = stay synchronous."""
+        if self._async_ready:
+            return True
+        if not self._async_want:
+            return False
+        try:
+            dev = getattr(self.pv, "device", None)
+            if dev is None or dev.type != "cuda" or not torch.cuda.is_available():
+                self._async_want = False
+                logger.info("[PN119] PN119_ASYNC_SCORE ignored — probe is not "
+                            "on a CUDA device; scoring stays synchronous")
+                return False
+            slots = self._async_slots or max(min(self._acc_max, 128), 8)
+            self._pin_score = torch.empty(slots, dtype=torch.float32,
+                                          pin_memory=True)
+            if self._sink_feat is not None:
+                # 15360 dims x 2 B x slots — 3.9 MB at 128 slots. Halved by
+                # last-only; this is the whole reason deferring the feature
+                # copy is affordable at all.
+                self._pin_feat = torch.empty(slots, FEAT_DIM,
+                                             dtype=torch.uint16, pin_memory=True)
+            self._free_slots = list(range(slots))
+            self._async_ready = True
+            logger.info("[PN119] async score readback ON: %d pinned slots "
+                        "(%d B score + %d B feat)", slots, slots * 4,
+                        0 if self._pin_feat is None else slots * FEAT_DIM * 2)
+            return True
+        except Exception as e:  # noqa: BLE001 — never fail a step over an optimisation
+            self._async_want = False
+            self._async_ready = False
+            logger.warning("[PN119] async score init failed (%s) — synchronous", e)
+            return False
+
+    def _drain_pending(self) -> None:
+        """Resolve every deferred readback whose copy has landed.
+
+        Called from `h119_resolve_routes` (sampler time, SAME engine step as
+        the observe() that queued it) and, as a backstop, from the top of the
+        next observe(). Both are the runner thread — the flusher must never
+        touch CUDA. `event.synchronize()` on a 60 kB copy issued a forward ago
+        is expected to be already complete; the call is there for correctness,
+        not for waiting.
+        """
+        if not self._pending:
+            return
+        pend, self._pending = self._pending, []
+        for p in pend:
+            try:
+                ev = p.get("event")
+                if ev is not None:
+                    ev.synchronize()
+                score = float(self._pin_score[p["slot"]]) + self.pb
+                feat = None
+                if p["want_feat"] and self._pin_feat is not None:
+                    feat = self._pin_feat[p["slot"]].numpy().tobytes()
+            except Exception as e:  # noqa: BLE001
+                _bump("async_resolve_failed")
+                self._warned += 1
+                if self._warned <= 5:
+                    logger.warning("[PN119] async resolve failed (%s) — request "
+                                   "%s left to the fallback route", e, p["req_id"])
+                self._free_slots.append(p["slot"])
+                continue
+            self._free_slots.append(p["slot"])
+            self._publish(p["req_id"], score, p["prompt_len"], p["cached"],
+                          p["thinking"], p["budget"], p["source"],
+                          p["caller"], p["suite"], feat)
+
+    def _finalize(self, req_id, state, last_rows, prompt_len, cached) -> None:
+        # ── the thinking-ON gate ──────────────────────────────────────────
+        thinking = self._prompt_thinking(state)
+        if thinking is False:
+            # The prompt pre-closed </think>: this request will spend zero
+            # reasoning tokens whatever the probe says. Scoring it would buy a
+            # decision with no lever, a 30,720-byte sink row that can never be
+            # training data, and a place in every rate denominator. Publish the
+            # cheap side and stop.
+            self._skip_thinking_off(req_id, state, prompt_len)
+            return
+        x = torch.cat(last_rows)  # [FEAT_DIM] f32 on device
+        sp = getattr(state, "sampling_params", None)
+        budget, source = self._budget_fields(req_id, state)
+        caller = self._extra_arg(sp, "caller", "x_caller")
+        suite = self._extra_arg(sp, "suite", "bench_suite")
+        want_feat = self._sink_feat is not None
+        if self._async_init() and self._free_slots:
+            # DEFERRED PATH. `float(torch.dot(...))` is `.item()` in disguise:
+            # a full device sync in the middle of a step, on a stack vLLM keeps
+            # sync-free everywhere else. Copy into pinned host memory, record an
+            # event, and read it back at the last responsible moment — which is
+            # still inside this same engine step (h119_resolve_routes runs at
+            # sampler time, after this postprocess), so the route is on record
+            # before the sampler that emits the first token. Semantics identical,
+            # sync removed.
+            try:
+                slot = self._free_slots.pop()
+                s = torch.dot(self.pv, x)
+                self._pin_score[slot].copy_(s, non_blocking=True)
+                if want_feat and self._pin_feat is not None:
+                    self._pin_feat[slot].copy_(
+                        x.to(torch.bfloat16).view(torch.uint16),
+                        non_blocking=True)
+                ev = torch.cuda.Event()
+                ev.record()
+                self._pending.append({
+                    "req_id": req_id, "slot": slot, "event": ev,
+                    "prompt_len": prompt_len, "cached": cached,
+                    "thinking": thinking, "budget": budget, "source": source,
+                    "caller": caller, "suite": suite,
+                    "want_feat": want_feat and self._pin_feat is not None,
+                })
+                return
+            except Exception as e:  # noqa: BLE001 — fall back, never fail
+                _bump("async_enqueue_failed")
+                if self._warned <= 5:
+                    self._warned += 1
+                    logger.warning("[PN119] async enqueue failed (%s) — "
+                                   "synchronous readback", e)
+        _bump("sync_fallback_used")
         # One fused dot against the folded probe (see _load_probe): the
         # centre/scale/PCA/readout chain is pre-collapsed at load, so the whole
-        # per-request decision is a single 30,720-term reduction on device.
+        # per-request decision is a single 15,360-term reduction on device.
         score = float(torch.dot(self.pv, x)) + self.pb
-        self.scored[req_id] = score
-        cached = acc.get("cached", 0)
+        feat = None
+        if want_feat:
+            try:
+                # bf16 has no numpy dtype — reinterpret as uint16 for the raw
+                # write (reader: np.fromfile(uint16).view via torch bf16).
+                # `x` is already the concatenation of `last_rows` and is
+                # contiguous, so reuse it rather than building a second copy.
+                feat = (x.to(torch.bfloat16)
+                        .view(torch.uint16).cpu().numpy().tobytes())
+            except Exception as e:  # noqa: BLE001 — any sink failure disables it
+                logger.warning("[PN119] sink encode failed (%s) — disabling sink", e)
+                self._sink_feat = self._sink_meta = None
+        self._publish(req_id, score, prompt_len, cached, thinking, budget,
+                      source, caller, suite, feat)
+
+    def _skip_thinking_off(self, req_id, state, prompt_len) -> None:
+        """Thinking-OFF: route lean, no matvec, no feature row, out of the rates."""
+        self.skipped[req_id] = "thinking_off"
         self._acc.pop(req_id, None)
+        _bump("skip_thinking_off")
+        self._decisions += 1
+        explore = self._is_explore(req_id)
+        if self.mode == "enforce":
+            ROUTES[req_id] = ROUTE_LEAN
+            # Compatibility shim for legacy SCORES readers: a value on the
+            # lean side of tdeep. route_for() is the contract.
+            SCORES[req_id] = self.tdeep - 1.0
+            if explore:
+                EXPLORE.add(req_id)
+        if self._sink_meta is not None:
+            budget, source = self._budget_fields(req_id, state)
+            self._sink_append(None, json.dumps({
+                "req_id": req_id, "routable": False, "reason": "thinking_off",
+                "route": ROUTE_LEAN, "prompt_tok": prompt_len,
+                "ts": time.time(), "mode": self.mode, "explore": explore,
+                "budget_grant": budget, "budget_source": source,
+                "lane_key": self._lane_key(ROUTE_LEAN, explore),
+                "boot_id": self.boot_id, "pid": self._sink_pid,
+                "probe_sig": self.probe_sig_short(),
+            }) + "\n")
+
+    def _publish(self, req_id, score, prompt_len, cached, thinking, budget,
+                 source, caller, suite, feat) -> None:
+        """Everything that happens once a score EXISTS — sync or deferred."""
+        self.scored[req_id] = score
+        self._scored_plen[req_id] = prompt_len
         route = ROUTE_DEEP if score >= self.tdeep else ROUTE_LEAN
         explore = self._is_explore(req_id)
-        _bump("scored")
-        _bump(f"scored_{route}")
+        routable = bool(thinking)
+        if routable:
+            _bump("scored")
+            _bump(f"scored_{route}")
+        else:
+            # thinking is None: a raw / completion prompt with no marker
+            # either way. Still routed — the treatment might matter — but it
+            # is NOT evidence about the router's design point, so it stays out
+            # of deep_frac and out of every percentile.
+            _bump("scored_unknown")
         if cached:
-            _bump("scored_via_memo")
+            _bump("scored_prefix_cached")
         self._decisions += 1
-        logger.info("[PN119] req=%s score=%.4f route=%s explore=%s prompt_tok=%d "
-                    "cached_prefix=%d mode=%s",
-                    req_id, score, route, explore, prompt_len, cached, self.mode)
+        pctl = self._pctl(score) if routable else None
+        if logger.isEnabledFor(logging.DEBUG):
+            # DEBUG, not INFO: at 61 requests these two lines were noise, at
+            # bench rates they are the module's dominant log volume and they
+            # say nothing an operator acts on. The periodic rollup below is
+            # the line worth reading.
+            logger.debug("[PN119] req=%s score=%.4f route=%s routable=%s "
+                         "explore=%s prompt_tok=%d cached_prefix=%d mode=%s",
+                         req_id, score, route, routable, explore, prompt_len,
+                         cached, self.mode)
         if self._decisions % self._stats_every == 0:
             logger.info("[PN119] stats: %s", stats_line())
         if self.mode == "enforce":
@@ -1635,33 +2317,24 @@ class PN119Router:
                 # Consumer contract: explore requests get generous caps
                 # regardless of score (keeps v2 labels uncensored).
                 EXPLORE.add(req_id)
-        if self._sink_feat is not None:
-            try:
-                # bf16 has no numpy dtype — reinterpret as uint16 for the raw
-                # write (reader: np.fromfile(uint16).view via torch bf16).
-                # The D2H stays HERE, on the runner thread, deliberately: this
-                # runs in execute_model's postprocess, which has already
-                # synchronised for the sampled tokens, so the marginal cost is
-                # the 61 kB PCIe copy.  Deferring it to the flusher would mean
-                # issuing a CUDA copy from a non-runner thread while the runner
-                # may be replaying a cudagraph — a real hazard traded for a
-                # copy that is not the bottleneck.  (Cost if we ever do defer
-                # it: 30720 dims x 2 B x buf = 3.75 MB VRAM at the default 64,
-                # 30 MB at the 512 hard cap.)
-                # `x` is already the concatenation of `rows` and is contiguous,
-                # so reuse it: torch.stack(rows) built a second identical
-                # 122,880 B device copy purely to be cast and shipped.
-                feat = (x.to(torch.bfloat16)
-                        .view(torch.uint16).cpu().numpy().tobytes())
-            except Exception as e:  # noqa: BLE001 — any sink failure disables it
-                logger.warning("[PN119] sink encode failed (%s) — disabling sink", e)
-                self._sink_feat = self._sink_meta = None
-            else:
-                self._sink_append(feat, json.dumps({
-                    "req_id": req_id, "row": self._sink_rows, "score": score,
-                    "route": route, "prompt_tok": prompt_len, "ts": time.time(),
-                    "mode": self.mode, "explore": explore,
-                }) + "\n")
+        if self._sink_meta is not None:
+            self._sink_append(feat, json.dumps({
+                "req_id": req_id,
+                # "row" is present ONLY when a feature row was written —
+                # load_sink keys training rows on it.
+                **({"row": self._sink_rows} if feat is not None else {}),
+                "score": score, "route": route, "prompt_tok": prompt_len,
+                "ts": time.time(), "mode": self.mode, "explore": explore,
+                "routable": routable if thinking is not None else None,
+                "pctl": pctl, "T_used": self.tdeep,
+                "probe_sig": self.probe_sig_short(),
+                "lane_key": self._lane_key(route, explore),
+                "boot_id": self.boot_id, "pid": self._sink_pid,
+                "budget_grant": budget, "budget_source": source,
+                "caller": caller, "suite": suite,
+                "cached_prefix": cached,
+            }) + "\n")
+            if feat is not None:
                 self._sink_rows += 1
 
     # ── finish sink (called from _update_states removal loop) ──────────────
@@ -1669,42 +2342,69 @@ class PN119Router:
         try:
             self._acc.pop(req_id, None)
             score = self.scored.pop(req_id, None)
+            self._scored_plen.pop(req_id, None)
             reason = self.unscored.pop(req_id, None)
+            skipped = self.skipped.pop(req_id, None)
+            applied = self._h119_applied.pop(req_id, None)
             SCORES.pop(req_id, None)
             ROUTES.pop(req_id, None)
             EXPLORE.discard(req_id)
-            if reason is not None:
-                # Fallback-routed request: no score, but the finish MUST still
-                # be visible. No "row" key => load_sink never joins it into a
-                # training Row (its features do not exist).
+            if reason is not None or skipped is not None:
+                # Fallback-routed or deliberately-skipped: no score, but the
+                # finish MUST still be visible. No "row" key => load_sink never
+                # joins it into a training Row (its features do not exist).
                 if self._sink_meta is not None:
                     self._sink_append(None, json.dumps({
-                        "req_id": req_id, "finish": True, "unscoreable": True,
-                        "reason": reason, "ts": time.time(), "mode": self.mode,
+                        "req_id": req_id, "finish": True,
+                        "unscoreable": reason is not None,
+                        "routable": None if reason is not None else False,
+                        "reason": reason or skipped, "ts": time.time(),
+                        "mode": self.mode, "boot_id": self.boot_id,
                     }) + "\n")
                 return
             if score is None or req_state is None:
                 return
-            prompt_len = getattr(req_state, "num_prompt_tokens", 0) or 0
-            computed = getattr(req_state, "num_computed_tokens", 0) or 0
-            generated = max(computed - prompt_len, 0)
-            thinking, rtok, cap_hit = self._label_fields(req_state, generated)
-            logger.info("[PN119] finish req=%s score=%.4f generated=%d thinking=%s rtok=%s cap_hit=%s",
-                        req_id, score, generated, thinking, rtok, cap_hit)
+            out_ids = getattr(req_state, "output_token_ids", None)
+            # `num_computed_tokens - num_prompt_tokens` was wrong under MTP:
+            # the computed counter moves in accept/reject JUMPS (a rejected
+            # draft still advanced it, an accepted batch advances it by more
+            # than one), so `generated` drifted from the token count the label
+            # is actually about. The output list is the tokens the request
+            # kept, which is the definition.
+            generated = len(out_ids) if out_ids is not None else 0
+            if applied is not None:
+                budget, source = int(applied[0]), applied[1]
+            else:
+                budget, source = self._budget_fields(req_id, req_state)
+            thinking, rtok, cap_hit, censored = self._label_fields(
+                req_state, generated, budget)
+            if thinking:
+                _bump("finish_thinking")
+                if censored:
+                    _bump("finish_censored")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("[PN119] finish req=%s score=%.4f generated=%d "
+                             "thinking=%s rtok=%s cap_hit=%s censored=%s "
+                             "budget=%s(%s)", req_id, score, generated,
+                             thinking, rtok, cap_hit, censored, budget, source)
             if self._sink_meta is not None:
                 self._sink_append(None, json.dumps({
                     "req_id": req_id, "finish": True, "score": score,
                     "generated": generated, "ts": time.time(),
                     "thinking": thinking, "rtok": rtok, "cap_hit": cap_hit,
+                    "censored": censored, "budget_grant": budget,
+                    "budget_source": source,
+                    "routable": thinking if thinking is not None else None,
                     "explore": self._is_explore(req_id), "mode": self.mode,
+                    "boot_id": self.boot_id,
                 }) + "\n")
         except Exception as e:  # noqa: BLE001
             self._warned += 1
             if self._warned <= 5:
                 logger.warning("[PN119] finish error: %s", e)
 
-    def _label_fields(self, req_state, generated: int):
-        """v2 label plumbing (BUILD-PACK §v2 items 3+4).
+    def _label_fields(self, req_state, generated: int, budget=None):
+        """v2 label plumbing (BUILD-PACK §v2 items 3+4) + BUG-139 censoring.
 
         thinking: True  = prompt tail opens a <think> region (spend signal
                           exists — the ONLY rows the refit may learn from);
@@ -1715,43 +2415,52 @@ class PN119Router:
                   (better label than total `generated`, which includes the
                   answer). Falls back to `generated` when </think> never
                   appeared (capped inside the think region).
-        cap_hit:  spend was truncated (</think> never emitted while
-                  thinking, or generated >= max_tokens). Censoring guard:
-                  refit must treat cap_hit as positive-label evidence, and
-                  under enforce a lean-routed cap_hit is the ONE lean row
-                  that may be learned from (y=1).
+        cap_hit:  UNCHANGED, for compatibility with the sinks already on disk:
+                  </think> never emitted while thinking, or generated >=
+                  max_tokens. It is a poor censoring signal — it fired on 4 of
+                  79 thinking rows while 43 were truncated — because
+                  max_tokens is not the cap that binds. `censored` is.
+        censored: BUG-139. The request was STOPPED at its thinking budget:
+                  rtok landed within SLACK of the grant, which is the holder
+                  forcing `</think>`. rtok is then a LOWER BOUND, not a spend,
+                  and any fit that reads it as a spend inherits a ceiling.
+                  Requires a known budget — with none there is nothing that
+                  could have truncated it here.
         """
-        thinking = None
+        thinking = self._prompt_thinking(req_state)
         rtok = None
         cap_hit = False
-        prompt_ids = getattr(req_state, "prompt_token_ids", None)
-        if prompt_ids:
-            # LAST marker wins, not "any </think> anywhere in the window".
-            # thinking-off pre-closes the region, so the tail holds BOTH
-            # markers and </think> is last; thinking-on with a PN102 seed
-            # holds only <think>, several seed tokens back from the end.
-            tail = list(prompt_ids[-self._tail_window:])
-            last_end = _rindex(tail, self._think_end)
-            last_start = _rindex(tail, self._think_start)
-            if last_start is not None and (
-                    last_end is None or last_start > last_end):
-                thinking = True
-            elif last_end is not None:
-                thinking = False
+        censored = False
         out_ids = getattr(req_state, "output_token_ids", None)
         if thinking and out_ids is not None:
-            try:
-                rtok = list(out_ids).index(self._think_end)
-            except ValueError:
-                rtok = generated  # never closed the think region => capped
-                cap_hit = True
+            seq = list(out_ids)
+            # FIRST occurrence, not last: the spend ends at the first
+            # `</think>` the model emits. A later one belongs to quoted text
+            # in the answer and would inflate rtok by the whole answer.
+            idx = -1
+            pat = self._think_end_ids
+            for i in range(0, len(seq) - len(pat) + 1) if pat else ():
+                if seq[i:i + len(pat)] == pat:
+                    idx = i
+                    break
+            if idx >= 0:
+                rtok = idx
+            else:
+                rtok = generated      # never closed the think region
+                # An EMPTY output never closed anything either, but that is a
+                # request that produced nothing — an abort, a zero max_tokens,
+                # a client disconnect. Calling it a cap hit put a y=1 censoring
+                # label on a row with no evidence in it at all.
+                cap_hit = bool(seq)
         elif thinking:
             rtok = generated
         sp = getattr(req_state, "sampling_params", None)
         max_tokens = getattr(sp, "max_tokens", None) if sp is not None else None
         if max_tokens and generated >= max_tokens:
             cap_hit = True
-        return thinking, rtok, cap_hit
+        if thinking and budget and rtok is not None:
+            censored = rtok >= int(budget) - self._censor_slack
+        return thinking, rtok, cap_hit, censored
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1849,6 +2558,17 @@ H119_OVERRIDABLE = "h119_overridable"
 # unaffected. Default ON — a consumer that defers to PN100 does nothing at all.
 _OVERRIDE_PN100_FLAG = "H119_OVERRIDE_PN100"
 
+# ROUTE GRACE. A provisional row used to be committed to route_for()'s fallback
+# the instant it had produced ANY output token. That is a zero-token deadline
+# for a decision made in the same step, and it left no room at all for the
+# deferred score readback (PN119_ASYNC_SCORE) or for a chunked prefill that
+# spills one token past its last chunk. Waiting a few tokens is arithmetically
+# free: the budgets in play are 800/1600 lean and 10240 deep, and
+# `_h119_apply_budget` preserves the countdown, so applying the lean cap at
+# token 4 instead of token 0 caps the request at exactly the same place. 8 is
+# ~1% of the smallest cap under discussion.
+_ROUTE_GRACE_DEFAULT = 8
+
 # Identity witnesses recorded when we mark an entry, checked before we rewrite
 # it. `_state` is keyed by BATCH INDEX, and indices are reused as requests come
 # and go — so between marking and resolving, index i can belong to a different
@@ -1865,7 +2585,8 @@ H119_PRIOR_BUDGET = "_h119_prior_budget"
 
 _consumer_state: dict = {"checked": False, "on": False, "deep": _DEEP_DEFAULT,
                          "lean": _LEAN_DEFAULT, "warned": 0,
-                         "override_pn100": True}
+                         "override_pn100": True,
+                         "grace": _ROUTE_GRACE_DEFAULT}
 
 
 def _consumer_int(name: str, default: int) -> int:
@@ -1880,7 +2601,8 @@ def reset_consumer_cache() -> None:
     """Re-read the H119 consumer env on the next call (tests only)."""
     _consumer_state.update({"checked": False, "on": False,
                             "deep": _DEEP_DEFAULT, "lean": _LEAN_DEFAULT,
-                            "warned": 0, "override_pn100": True})
+                            "warned": 0, "override_pn100": True,
+                            "grace": _ROUTE_GRACE_DEFAULT})
 
 
 def _consumer_active() -> bool:
@@ -1901,6 +2623,8 @@ def _consumer_active() -> bool:
         st["deep"] = _consumer_int("H119_DEEP_BUDGET", _DEEP_DEFAULT)
         st["lean"] = _consumer_int("H119_LEAN_BUDGET", _LEAN_DEFAULT)
         st["override_pn100"] = _truthy(_env(_OVERRIDE_PN100_FLAG, "1"))
+        st["grace"] = max(_consumer_int("H119_ROUTE_GRACE_TOKENS",
+                                        _ROUTE_GRACE_DEFAULT), 0)
         if st["on"] and st["deep"] <= 0:
             # A non-positive deep budget would mean "install no entry", and
             # without an entry at step 1 the LEAN route can never be applied
@@ -1912,9 +2636,9 @@ def _consumer_active() -> bool:
             st["on"] = False
         if st["on"]:
             logger.info("[H119] route->budget consumer ON: deep=%d lean=%d "
-                        "(BUDGET CAP ONLY — the PN102 banner half of the "
-                        "deep/lean split is not reachable from here)",
-                        st["deep"], st["lean"])
+                        "grace=%d (BUDGET CAP ONLY — the PN102 banner half of "
+                        "the deep/lean split is not reachable from here)",
+                        st["deep"], st["lean"], st["grace"])
     if not st["on"]:
         return False
     router = ROUTER
@@ -2070,6 +2794,22 @@ def _h119_index_matches(index: int, req_id: str, state: dict) -> bool:
         return True
 
 
+def _record_applied(req_id: str, budget, source: str) -> None:
+    """Note the EFFECTIVE budget for `req_id`, if there is a router to note it on.
+
+    Deliberately defensive: this runs inside the sampler, and the only thing
+    worse than a sink row with a missing budget is an exception raised out of
+    update_state. A test harness (or a partially-constructed router) that does
+    not carry the map simply gets no record.
+    """
+    try:
+        m = getattr(ROUTER, "_h119_applied", None)
+        if isinstance(m, dict):
+            m[req_id] = (int(budget), source)
+    except (TypeError, ValueError):
+        pass
+
+
 def h119_resolve_routes(holder) -> None:
     """Called at the top of ThinkingBudgetStateHolder.update_state.
 
@@ -2079,8 +2819,20 @@ def h119_resolve_routes(holder) -> None:
     the deep budget they carry is the fail-safe. An entry that has started
     generating with no route on record is a genuine miss: it is committed to
     route_for()'s defined fallback, counted, and never revisited.
+
+    ALSO the resolution point for the deferred score readback. This runs at
+    sampler time, LATER IN THE SAME ENGINE STEP than the observe() that queued
+    it (step order: sync_batch -> forward+observe -> update_state), so draining
+    here keeps the original guarantee — a route on record before the sampler
+    that emits the first token — while removing the mid-step device sync. The
+    drain deliberately happens BEFORE `_consumer_active()`: in shadow mode, or
+    with the consumer flag off, there is still a score waiting in pinned memory
+    and a sink row that has to be written.
     """
     try:
+        router = ROUTER
+        if getattr(router, "_pending", None):
+            router._drain_pending()
         if not _consumer_active():
             return
         state_map = getattr(holder, "_state", None)
@@ -2092,6 +2844,10 @@ def h119_resolve_routes(holder) -> None:
             return
         req_ids = ROUTER.runner.input_batch.req_ids
         n = len(req_ids)
+        # Floor of 1: "no output token yet" has ALWAYS meant "still prefilling,
+        # wait", and H119_ROUTE_GRACE_TOKENS=0 must not turn that into "commit
+        # to the fallback before the request has generated anything".
+        grace = max(int(_consumer_state.get("grace", _ROUTE_GRACE_DEFAULT)), 1)
         for index, state in pending:
             if index >= n:
                 # Batch index outside the current batch: the row is mid-move.
@@ -2112,9 +2868,10 @@ def h119_resolve_routes(holder) -> None:
                 continue
             route = ROUTES.get(req_id)
             if route is None:
-                if not state.get("output_tok_ids"):
-                    # Still prefilling (chunked prefill spans steps). Expected,
-                    # not a miss — do NOT burn route_for()'s fallback here.
+                if len(state.get("output_tok_ids") or ()) < grace:
+                    # Still prefilling (chunked prefill spans steps), or inside
+                    # the grace window. Expected, not a miss — do NOT burn
+                    # route_for()'s fallback here.
                     continue
                 prior = state.get(H119_PRIOR_BUDGET)
                 if prior is not None:
@@ -2124,6 +2881,10 @@ def h119_resolve_routes(holder) -> None:
                     # never touched it, so an unrouted row costs nothing.
                     _h119_apply_budget(state, prior)
                     state[H119_PROVISIONAL] = False
+                    # The number is PN100's, not H119's — record the
+                    # provenance with it so the sink does not credit a grant
+                    # to a decision that never happened.
+                    _record_applied(req_id, prior, "pn100")
                     _bump("h119_route_missing_kept_pn100")
                     continue
                 # Generation started with no decision on record: this request
@@ -2134,6 +2895,12 @@ def h119_resolve_routes(holder) -> None:
                       else _consumer_state["deep"])
             _h119_apply_budget(state, budget)
             state[H119_PROVISIONAL] = False
+            # BUG-139: the EFFECTIVE grant, recorded where the finish line can
+            # find it. The consumer rewrites the holder's state entry and never
+            # SamplingParams, so without this the sink reports the budget the
+            # frontend asked for and the censoring test is run against a number
+            # the request never ran under.
+            _record_applied(req_id, budget, "h119")
             _bump("h119_routed_lean" if route == ROUTE_LEAN
                   else "h119_routed_deep")
     except Exception as e:  # noqa: BLE001 — never fail a sampling step

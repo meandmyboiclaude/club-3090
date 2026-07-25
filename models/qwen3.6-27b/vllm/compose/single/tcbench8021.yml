@@ -172,6 +172,26 @@ services:
       - PN119_RELOAD_S=60
       - PN119_THINK_START_ID=248068
       - PN119_THINK_END_ID=248069
+      # [PN119 last-only + latency 2026-07-26] the probe at /pn119/probe.npz is
+      # now LAST-ONLY (FEAT_DIM 15360, blocks L42/L47/L51-last). The router
+      # refuses a probe whose `blocks` key disagrees, so a rollback to the
+      # 30720-dim npz disables the router loudly rather than scoring garbage.
+      # ASYNC_SCORE=1 defers the score's device->host readback into pinned
+      # memory + a cuda.Event resolved at sampler time in the SAME engine step
+      # (h119_resolve_routes). It removes the only blocking sync this module
+      # had; any failure falls back to the blocking read and bumps
+      # sync_fallback_used. Set to 0 to revert with no other change.
+      # ROUTE_GRACE_TOKENS=8: a provisional row waits this many output tokens
+      # before being committed to the fallback route. Against the 800/10240
+      # caps below, resolving at token 4 instead of 0 caps in the same place.
+      # FULLSCAN_EVERY: steps with no new request and nothing mid-prefill skip
+      # the batch scan entirely; every Nth step scans anyway so a stuck request
+      # is still found. ACC_MAX: bound on the per-request bookkeeping maps
+      # (empty = 4x max_num_seqs); evict-oldest, counted as reaped_*.
+      - PN119_ASYNC_SCORE=${PN119_ASYNC_SCORE:-1}
+      - H119_ROUTE_GRACE_TOKENS=${H119_ROUTE_GRACE_TOKENS:-8}
+      - PN119_FULLSCAN_EVERY=${PN119_FULLSCAN_EVERY:-256}
+      - PN119_ACC_MAX=${PN119_ACC_MAX:-}
       # [H119 route-consumer 2026-07-25] the ENFORCE decision's BUDGET half.
       # DEFAULT OFF. Needs BOTH this flag AND PN119_MODE=enforce; with either
       # missing the worker-side holder behaves exactly as upstream ships it.

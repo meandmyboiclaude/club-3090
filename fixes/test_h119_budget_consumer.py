@@ -176,6 +176,14 @@ class _FakeRouter:
 
     def __init__(self, mode: str, req_ids: list[str]):
         self.mode = mode
+        # The consumer records the EFFECTIVE grant here (BUG-139) so the finish
+        # line can report the budget the request actually ran under rather than
+        # the one the frontend asked for, and drains any deferred score
+        # readback here (PN119_ASYNC_SCORE). Both are read defensively by the
+        # sidecar, but a fake router that carries neither is not the shape a
+        # real one has.
+        self._h119_applied: dict[str, tuple] = {}
+        self._pending: list = []
         self.runner = types.SimpleNamespace(
             input_batch=types.SimpleNamespace(req_ids=req_ids))
 
@@ -316,15 +324,27 @@ def run_pin(tag: str, stock_src: str, ns) -> None:
     check(f"{tag} P5 it stays provisional at the fail-safe deep budget",
           h._state[0].get(side.H119_PROVISIONAL) is True
           and h._state[0]["thinking_token_budget"] == DEEP)
+    # H119_ROUTE_GRACE_TOKENS (default 8): a row that has just started
+    # generating is given a few tokens before it is committed to the fallback.
+    # That window is what lets the deferred score readback land, and against
+    # the 1600/10240 caps in play it moves where the request is capped by
+    # nothing at all.
     h._state[0]["output_tok_ids"] = [42]        # generation started, still no route
     h.update_state([[42]], None)
+    check(f"{tag} P5 inside the grace window the miss is NOT committed",
+          "h119_route_missing" not in side.STATS
+          and h._state[0].get(side.H119_PROVISIONAL) is True, side.stats_line())
+    grace = side._ROUTE_GRACE_DEFAULT
+    h._state[0]["output_tok_ids"] = [42] * grace
+    h.update_state([[42] * grace], None)
     check(f"{tag} P5 generating-with-no-route IS counted",
           side.STATS.get("h119_route_missing") == 1
           and side.STATS.get("route_for_miss") == 1, side.stats_line())
     check(f"{tag} P5 it lands on the defined fallback route (deep)",
           h._state[0]["thinking_token_budget"] == DEEP)
     check(f"{tag} P5 the miss is committed once, not re-counted",
-          (h.update_state([[42]], None) or side.STATS.get("h119_route_missing")) == 1)
+          (h.update_state([[42] * grace], None)
+           or side.STATS.get("h119_route_missing")) == 1)
 
     # ── P6 caller explicit wins ─────────────────────────────────────────
     _reset(side, flag=True, mode="enforce", router_present=True)
