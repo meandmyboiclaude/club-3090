@@ -30,11 +30,13 @@
 # served aliases identical to old prod.
 services:
   vllm-qwen36-27b:
-    # [2026-07-13 bump candidate] nightly-9e57de71 (main 07-13) — UNPROVEN until
-    # functional + bench ±5% + TQ-KV correctness (51878e5b repacked K/V layout; also
-    # brings 481e481b hybrid partial prefix-cache). Rollback: validated dev799 image
-    # nightly-69715823... via git tag validated-qwopus-69715823.
-    image: localhost/vllm-qwen36-endgame:dev1060cherry-2204-20260713
+    # [2026-07-25 nightly bump] main @ 0ba2aa35 (tag nightly-0ba2aa35a81dcc3246b26291368b53fa2389c7d7,
+    # pushed 2026-07-25; digest-pinned amd64 — survives upstream nightly-tag purge).
+    # Replaces localhost/vllm-qwen36-endgame:dev1060cherry-2204-20260713
+    # (= stock nightly-9e57de71 + club-dev1060-cherry@3da1671f wheel, 7 picks:
+    # #48361 #45660 #48475 #46461 #47574 #48483 #48363 — triage vs new main in
+    # docs/UPSTREAM.md). Rollback: revert this image: line to the dev1060cherry tag.
+    image: docker.io/vllm/vllm-openai@sha256:e4f855492d6c95b00cdd21ec642f00d9747df43a3bbedab903316be1a5cd2207
     container_name: vllm-tcbench-8021
     restart: unless-stopped
     healthcheck:
