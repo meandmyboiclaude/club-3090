@@ -77,6 +77,32 @@ Components:
      ``FlashAttentionImpl.do_kv_cache_update`` to use ``unbind(0)``
      instead of ``unbind(1)`` on SM 8.6.
 
+.. danger::
+
+   **DO NOT ENABLE AS-IS — components 1-3 do not reach the server.**
+   (Established 2026-07-26, ledger MISSING-row pass.)
+
+   ``apply_all`` runs in its own process and the entrypoint then does
+   ``exec vllm serve``, which REPLACES that process. Components 1-3 above
+   are ``setattr`` monkey-patches, so they are discarded; only component 4
+   is a text patch and survives. The result is not "PN286 partially on" —
+   it is a **layout mismatch**: the forward path reads K/V with
+   ``unbind(0)`` (pre-#42095 "2 outer") out of a cache the allocator laid
+   out in upstream's post-#42095 ``(num_blocks, 2, ...)`` interleave,
+   because the shape and stride overrides that were supposed to change the
+   allocation are gone. Silently wrong KV bytes.
+
+   The 2026-05-29 K.1.R.R.5 A/B that justified ``default_on=True``
+   predates the P39a finding that established exec-discards-setattr for
+   this tree, so it cannot have measured this shape.
+
+   The registry row is back to ``default_on=False`` and this module keeps
+   its explicit ``GENESIS_ENABLE_PN286_FA_LAYOUT_REVERT_SM86`` gate. To
+   revive PN286, convert components 1-3 to self-install text patches (the
+   P103 / P39a ``_genesis_<id>_install_at_import(globals())`` pattern, so
+   every fresh import in every process re-installs them) and then re-run
+   the SM 8.6 A/B. Do not just flip the flag.
+
 The combination produces:
 
   * Physical KV memory layout: ``(2, N, B, H, D)`` — K bank then V bank
@@ -438,6 +464,19 @@ def apply() -> tuple[str, str]:
         )
 
     log.warning("[PN286] apply() entered — %s", desc)
+    # See the "DO NOT ENABLE AS-IS" block in the module docstring. Steps 1-3
+    # are setattr and do not survive `exec vllm serve`; step 4 does. Enabling
+    # the four together on an exec boot is a KV layout mismatch, not a
+    # partial win, so say so at the point of no return rather than leaving it
+    # to be rediscovered from garbled output.
+    log.warning(
+        "[PN286] HAZARD: steps 1-3 are setattr monkey-patches and are "
+        "DISCARDED by `exec vllm serve`; only step 4 (the unbind(0) text "
+        "patch) survives. On this boot shape that leaves the FA forward "
+        "reading pre-#42095 layout out of a post-#42095 allocation. Convert "
+        "steps 1-3 to self-install text patches (P103/P39a pattern) before "
+        "trusting any output produced with %s=1.", _ENV_ENABLE,
+    )
 
     # Step 1: shape override
     if not _install_shape_override():
