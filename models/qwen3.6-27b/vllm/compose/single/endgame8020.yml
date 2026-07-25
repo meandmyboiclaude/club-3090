@@ -173,7 +173,8 @@ services:
       - GENESIS_PROFILE_RUN_CAP_M=4128
       - GENESIS_ENABLE_P74_CHUNK_CLAMP=1
       - GENESIS_ENABLE_P94=1
-      # [2026-07-25 USER KV-headroom push] PN8 promoted (see tcbench8021.yml note).
+      # [2026-07-25 USER KV-headroom push] PN8 promoted — no-ops on this config
+      # (see tcbench8021.yml correction note); harmless, kept for parity.
       - GENESIS_ENABLE_PN8_MTP_DRAFT_ONLINE_QUANT=1
       - GENESIS_ENABLE_PN17_FA2_LSE_CLAMP=1
       - GENESIS_ENABLE_PN19_SCOPED_MAX_SPLIT=1
