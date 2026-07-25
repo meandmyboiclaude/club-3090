@@ -116,7 +116,24 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
         "category": "structured_output",
         "credit": "ZenoAFfectionate (vllm#39055)",
         "upstream_pr": 39055,
-        "applies_to": {"model_class": ["qwen3", "qwen3_5", "qwen3_moe", "qwen3_next"]},
+        "lifecycle": "retired",
+        "superseded_by": (
+            "vllm#45413 + vllm#45588 (streaming parser-engine refactor, MERGED "
+            "2026-06-15). The target reasoning/qwen3_reasoning_parser.py is "
+            "DELETED; Qwen3Parser's (REASONING, TOOL_START) FSM transition "
+            "promotes a <tool_call> emitted inside <think> into content "
+            "natively. Verified 2026-07-26 by instantiating the live "
+            "Qwen3ParserReasoningAdapter on the boot pin under the served "
+            "config (--reasoning-parser qwen3 + --tool-call-parser hermes): "
+            "extract_reasoning returned ('reasoning\\n', "
+            "'<tool_call>...</tool_call>\\ndone'), i.e. the block is stripped "
+            "out of reasoning and handed to content, which is where hermes "
+            "reads it."
+        ),
+        "applies_to": {
+            "model_class": ["qwen3", "qwen3_5", "qwen3_moe", "qwen3_next"],
+            "vllm_version_range": (">=0.20.0", "<0.23.0"),
+        },
     },
     "P60": {
         "title": "GDN+ngram state recovery (Phase 1: SSM pre-copy)",
@@ -841,7 +858,23 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
             "Genesis 27B/35B + reasoning-parser qwen3."
         ),
         "upstream_pr": 40816,
-        "applies_to": {},
+        "lifecycle": "retired",
+        "superseded_by": (
+            "vllm#45413 + vllm#45588 (streaming parser-engine refactor, MERGED "
+            "2026-06-15). Target reasoning/qwen3_reasoning_parser.py DELETED. "
+            "Absorbed STRUCTURALLY, not by a one-line guard: Qwen3Parser."
+            "__init__ passes qwen3_config(thinking=self.thinking_enabled), and "
+            "that config sets initial_state=ParserState.REASONING if thinking "
+            "else ParserState.CONTENT — with thinking off the FSM STARTS in "
+            "CONTENT so every delta is a TEXT_CHUNK, and there is an explicit "
+            "non-streaming `if not self.thinking_enabled: return None, "
+            "model_output`. Verified 2026-07-26 on the boot pin: streaming "
+            "with thinking=False gives content='Hello' reasoning=None (this "
+            "row's bug was reasoning='Hello'), non-streaming gives "
+            "(None, 'Hello world!'). lane-2's registry additionally records "
+            "vllm#40820 as the merged fix for issue #40816."
+        ),
+        "applies_to": {"vllm_version_range": (">=0.20.0", "<0.23.0")},
     },
     "PN35": {
         "title": "Skip inputs_embeds buffer for text-only models (vllm#35975 backport)",
@@ -1722,6 +1755,23 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
         "lifecycle": "legacy",
         "category": "structured_output",
         "credit": "Pre-dispatcher legacy patch. Treats <tool_call> emission as implicit </think>, fixing Qwen3 reasoning models that omit explicit </think> before tool calls. Updated v7.62.5 to FIRST-occurrence (was LAST), retiring P61.",
+        "lifecycle": "retired",
+        "superseded_by": (
+            "vllm#45413 + vllm#45588 (streaming parser-engine refactor, MERGED "
+            "2026-06-15). Target DELETED. vllm/parser/qwen3.py ships an "
+            "is_reasoning_end() that returns True on an UNPAIRED <tool_call> "
+            "(it scans forward for a matching </tool_call> and only then "
+            "continues) plus the (REASONING, TOOL_START) FSM transition. The "
+            "FIRST-vs-LAST-occurrence bug this row's v7.62.5 update fixed is "
+            "structurally impossible now: ParserEngine.extract_content_ids "
+            "slices on the </think> token only, never on <tool_call>. Verified "
+            "2026-07-26 against the live adapter on the boot pin: unpaired "
+            "<tool_call> -> is_reasoning_end True, paired -> False, and a "
+            "two-tool prompt returned BOTH calls. lane-2's twin row was "
+            "already capped <0.23.0; lane-1 was the half that never got the "
+            "verdict."
+        ),
+        "applies_to": {"vllm_version_range": (">=0.20.0", "<0.23.0")},
     },
     "P14": {
         "title": "block_table tail zero-fill",
@@ -1802,6 +1852,24 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
         "lifecycle": "legacy",
         "category": "structured_output",
         "credit": "Pre-dispatcher legacy patch. Falls back to BEFORE-THINK parsing path when Qwen3 model emits tool_call before <think>.",
+        "lifecycle": "retired",
+        "superseded_by": (
+            "vllm#45413 + vllm#45588 (streaming parser-engine refactor, MERGED "
+            "2026-06-15). Target DELETED. The DATA LOSS this patch existed to "
+            "fix is gone: the old parser did model_output.partition('<think>') "
+            "and kept only parts[2], discarding anything emitted before the "
+            "tag. The FSM starts in ParserState.REASONING and (REASONING, "
+            "THINK_START) consumes the tag with no event, so pre-<think> text "
+            "is emitted rather than dropped. Verified 2026-07-26 on the boot "
+            "pin: 'Here is my answer. <think>Let me check.</think>42' -> "
+            "('Here is my answer. Let me check.', '42'). CAVEAT, stated so it "
+            "is not rediscovered as a bug: upstream routes that text to "
+            "REASONING, P27 routed it to CONTENT. That preference, if still "
+            "wanted, is a new FSM-level patch (flush accumulated text as "
+            "TEXT_CHUNK on the THINK_START transition), not a re-anchor — "
+            "there is no line left to anchor to."
+        ),
+        "applies_to": {"vllm_version_range": (">=0.20.0", "<0.23.0")},
     },
     "P28": {
         "title": "GDN core_attn_out prealloc",
