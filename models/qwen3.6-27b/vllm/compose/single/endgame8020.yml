@@ -24,24 +24,21 @@
 #   cd <repo>/models/qwen3.6-27b/vllm/compose
 #   podman-compose -f single/tools-text-qwopus.yml up -d
 # ===========================================================================
-# [2026-07-14 END STATE] PROMOTED TO PROD :8020 (was endgame bench :8021).
+# [2026-07-14 END STATE] PROMOTED TO PROD :8020. [2026-07-25] regenerated 1:1 from tcbench8021.yml — see pin comment.
 # Rollback: systemctl disable vllm-endgame-8020 && systemctl enable --now vllm-qwen36
 # (old prod tools-text-aibox.yml + boot-guard, dev799 image). Callers untouched:
 # served aliases identical to old prod.
 services:
   vllm-qwen36-27b:
-    # [2026-07-25 prod prep — USER-ordered 1:1 with bench :8021 bump] main @
-    # 0ba2aa35 (tag nightly-0ba2aa35a81dcc3246b26291368b53fa2389c7d7, pushed
-    # 2026-07-25; digest-pinned amd64 — survives upstream nightly-tag purge).
-    # Bench gates: g1 record 142/174/0-fail (kv 125806 −4.8%, AMBER), g2 42/42,
-    # g3 GPQA 23/30 no-kill; g4/g5 in flight at prep time — DO NOT flip until
-    # gates reviewed. KNOWN LOSS vs dev1060cherry: #45660 Marlin zero-init
-    # (compiled in the old cherry wheel, still open upstream, not text-patchable).
-    # Genesis/fixes trees are dual-pin (resolve both fla homes; content-sniffed
-    # anchors) — same mounted trees serve this pin and the rollback image.
-    # Rollback: revert this image: line to
-    # localhost/vllm-qwen36-endgame:dev1060cherry-2204-20260713 (boot-guard tag
-    # validated-qwopus-3da1671f-w1).
+    # [2026-07-25 prod 1:1 sync — USER-ordered] This file is generated 1:1 from
+    # tcbench8021.yml (the gate-validated champion config) with only port
+    # (8021->8020), container/service names, and OTEL identity differing.
+    # Pin: main @ 0ba2aa35 (tag nightly-0ba2aa35a81dcc3246b26291368b53fa2389c7d7,
+    # digest-pinned amd64 — survives upstream nightly-tag purge). KNOWN LOSS vs
+    # dev1060cherry: #45660 Marlin zero-init (compiled in the old cherry wheel,
+    # open upstream). DO NOT flip until g4/g5 gates reviewed (VLLM-UPDATE-20260725.md).
+    # Rollback: revert image: to localhost/vllm-qwen36-endgame:dev1060cherry-2204-20260713
+    # (boot-guard tag validated-qwopus-3da1671f-w1).
     image: docker.io/vllm/vllm-openai@sha256:e4f855492d6c95b00cdd21ec642f00d9747df43a3bbedab903316be1a5cd2207
     container_name: vllm-qwen36-endgame
     restart: unless-stopped
@@ -92,16 +89,10 @@ services:
       # VLLM_CACHE_ROOT/startup_plan; matching-fingerprint reboots skip the profiling
       # and cudagraph-estimation passes -> faster time-to-serve. Auto-falls-back on
       # mismatch/OOM; never overrides an explicit --kv-cache-memory.
-      # [2026-07-19 BUG-078 re-class] OFF — the saved plan value is systematically
-      # ~53 MB hotter than the profiled fit on this stack (save-side formula
-      # measures the ACTUAL cudagraph pool, under-counting the estimate's
-      # reservation), so skip-profiling boots get KV 153,064 with no headroom =
-      # the 14:08 OOM storm. Fingerprint hashes config identity only; the
-      # free-memory gate is one-directional; every profiling boot re-arms the
-      # trap. The PATH is the bug, not any one plan file. Cross-container plan
-      # sharing (all composes mount the same startup_plan dir) proven live:
-      # bench boots consumed prod's plan hours before prod stormed.
-      # Detail: ~/shared/VLLM-RECREATE-SAFETY-LOOPS-20260719.md (loops 4-5).
+      # [2026-07-19 BUG-107] OFF — fingerprint-identical to endgame8020, so this
+      # bench compose consumed/armed PROD's plan via the shared startup_plan dir
+      # (proven: 12:17/13:34 bench boots ran prod's hot 153,064 plan). Skip-path
+      # design flaw = BUG-078 re-class; see endgame8020.yml + loop file 07-19.
       - VLLM_ENABLE_STARTUP_PLAN=0
       # [2026-07-13 Wave-3b] arms the torch profiler endpoints (inert until /start_profile)
       # DEV_MODE required: /start_profile //stop_profile are dev-mode-gated on dev1060.
@@ -202,6 +193,52 @@ services:
       - GENESIS_ENABLE_P78_TOLIST_CAPTURE_GUARD=1
       - GENESIS_ENABLE_PN14_TQ_DECODE_OOB_CLAMP=1
       - GENESIS_ENABLE_PN70_TOOL_SCHEMA_FILTER=1
+      # [2026-07-22 k260 repro - mainline: continuous k=260, growth OFF, PN108 shadow]
+      - GENESIS_PN100_CONTINUOUS=1
+      - GENESIS_PN100_TOK_PER_STEP=260
+      - GENESIS_ENABLE_PN108_PLATEAU_CAP=1
+      # [2026-07-23 05:58Z PN108 enforce->SHADOW for the t1.0 re-baseline:
+      # entered via ship-stack config b395669b, never solo-validated, and it
+      # FIRES live (plateau ENFORCE fire in probdraft logs). Baseline rule:
+      # only validated mechanisms in the base; discretionary = shadow/dark.]
+      - GENESIS_PN108_MODE=shadow
+      - GENESIS_PN108_GROW=0
+      # [2026-07-22 PN112 settled-stop — SHADOW first: logs would-fire + conf
+      # checkpoints for TAU calibration; zero behavioral change in shadow]
+      # [2026-07-23 SHIP-STACK confirmation boot (USER-approved contender run):
+      # PN112 enforce tau13.0/floor600 with GRACE=384 (grace-boost — 0/123
+      # fires had in-think statements, so the soft gate reduces to a bigger
+      # runway; removes the 038/042 mid-derivation kill class) + PN108 enforce
+      # (validated safe) + P-pess highstep x1.25 (never-under insurance).
+      # Projection 82-83 @ 31-32s vs banked k260 83 @ 33.9s.]
+      # [2026-07-23 R5 CONFIRM screen: grace back to 64 (its ctok savings were
+      # real; 384's relocation erased them live — shipstack2 killed n=42),
+      # marginal-band fires probe-guarded (GENESIS_PN112_CONFIRM). P-pess
+      # stays (never-under, uncontroversial).]
+      # [2026-07-23 ROUTER-PRECISION baseline reset (kickstart §8 first action):
+      # end-side lane closed at signal ceiling — PN112 back to SHADOW (free
+      # ckpt/tokstep telemetry, zero behavioral change), CONFIRM + PN114 probe
+      # lines removed (dark, available). Base = k260 + P-pess only, so router
+      # screens compare cleanly vs banked k260.]
+      - GENESIS_ENABLE_PN112_SETTLED_STOP=1
+      # [2026-07-23 04:55Z loop-6 verdict: t1.0 enforce KILLED (63% vs native 80%,
+      # 5 wrong-flips 0 good — C fires long before the productive end on tail
+      # items; close overhead 59 tok + ~560/item relocation). Back to shadow.]
+      - GENESIS_PN112_MODE=shadow
+      - GENESIS_PN112_TAU=13.0
+      - GENESIS_PN112_FLOOR=600
+      - GENESIS_PN112_GRACE=64
+      # [2026-07-23 05:50Z P-pess (HIGHSTEP) REMOVED from base — killed as
+      # blanket addon (ppess30: raised items flipped wrong). t1.0 re-baseline
+      # runs on pure k260-caps: the new banked reference differs from banked
+      # k260-0.6 by the temp knob ONLY.]
+      # [2026-07-23 ~04:00Z THINKING-END LANE CLOSED — PN114 env removed
+      # (dark, available). gate2b (shadow) 60% + pn114enf30 (enforce) 70%
+      # vs k260-same 77%: probe-induced early termination (the sound-span
+      # probe text makes the model exit thinking within ~10 tok; 43% of
+      # probed items). Terminal record + reopener gates:
+      # ~/shared/THINKING-END-CLOSEOUT-2026-07.md. Base back to
+      # k260 + P-pess + PN112 shadow for the router-precision lane.]
       # Performance
       - GENESIS_ENABLE_P40=1
       - GENESIS_ENABLE_P82=1
@@ -446,12 +483,10 @@ services:
       # framed as normal rather than as an exception.
       - GENESIS_PN100_TIER_BUDGETS=0,10240,10240,10240
       - GENESIS_PN102_STATIC_BANNER=1
-      # [v5 ADOPTED 2026-07-19, RID aibox-20260719-v5auto] floorless stop +
-      # progress-conditional continue. Paired n=100 vs bare-10240: net +7
-      # (9 conv / 2 regr), 88% @ 2867 mean rtok / 47s vs v4 80% @ 3297 / 56s —
-      # Pareto-dominates v4 on all axes; clears the pre-committed prod bar
-      # (acc up, mean rtok <= oracle's 3139). Deep band 60% -> 84.8% acc.
-      # Rollback: delete this line (v4 static banner resumes underneath).
+      # [v5 2026-07-19, BENCH ONLY] floorless stop + progress-conditional
+      # continue. v4's checkpoint delay was measured as a hard floor (0 items
+      # <500 rtok vs 36 in old auto); the unconditional keep-going fed the deep
+      # band (73.4% of spend @ 60% acc). Takes precedence over STATIC_BANNER.
       - GENESIS_PN102_BANNER_V5=1
       # Starvation backstop: one continuation resuming INSIDE the think region.
       # Non-streaming, bounded to one pass, every failure path returns the
@@ -521,6 +556,36 @@ services:
         python3 /fixes/patch_vram_tracer.py
         python3 /fixes/patch_gdn_oom_retry.py
         python3 /fixes/patch_oom_resilience.py
+        # [PN108 2026-07-20] plateau/runaway guard call-site graft into
+        # ThinkingBudgetStateHolder (BUG-107d fixed 8dabb965). Patch applies
+        # every boot; the HOOK is inert unless GENESIS_ENABLE_PN108_PLATEAU_CAP=1
+        # (shadow default). Was shipped unwired on 07-19 — this line is the fix.
+        python3 /fixes/patch_pn108_plateau_cap.py
+        # PN112 settled-stop grafts (conf tap + observe call) — MUST run after
+        # the PN108 patch (anchor B targets PN108's inserted text). Hook inert
+        # unless GENESIS_ENABLE_PN112_SETTLED_STOP=1.
+        python3 /fixes/patch_pn112_conf_tap.py
+        # [2026-07-23] PR44812 graft (tool-call implicit reasoning-end guard,
+        # slice-fixed — see docs/UPSTREAM.md row vllm#44812). DARK by default:
+        # inert unless GENESIS_ENABLE_PR44812_TOOL_GUARD=1. Runs after the
+        # PN112 patch (shares the holder file; anchors verified disjoint).
+        python3 /fixes/patch_pr44812_tool_guard.py
+        # [2026-07-23 ultra-review #1, session-4 fix wave 59fc884d] sync_batch
+        # move/swap state-leak fix — pop-both stock parity. Prod-relevant.
+        python3 /fixes/patch_holder_syncbatch_fix.py
+        # [2026-07-23] PN114 forced-span family (fixed-depth probes + R5
+        # confirm-at-fire + R1b wrap-up close). Generalizes the end-forcer to
+        # per-seq force_seq; stock-identical when no span armed. ALL DARK:
+        # GENESIS_ENABLE_PN114_PROBE / GENESIS_PN112_CONFIRM /
+        # GENESIS_PN112_WRAPUP (+ PN114_MODE/DEPTHS/STABLE_K/CMIN/GRACE).
+        # Design: ~/shared/PN114-DESIGN-probe-stability-20260723.md.
+        python3 /fixes/pn114_boot_ids.py
+        python3 /fixes/patch_pn114_forced_span.py
+        # [PN109 RETIRED 2026-07-20 BUG-107h] the 107e diagnosis was wrong —
+        # this pin's chat_completion/protocol.py carries thinking_token_budget
+        # natively (:244 -> :774); budgets were engine-enforced all along.
+        # Patch moved to /fixes/_archive/ (re-wire only if a future pin drops
+        # the protocol field): # python3 /fixes/_archive/patch_pn109_budget_bridge.py
         python3 /fixes/patch_pn71_reasoning_alias.py
         python3 /fixes/patch_pn72_streaming_toolcall_content_recover.py
         # [PN76 — 2026-06-26] Engine-level deferred tool-call commit: holds the <tool_call>
@@ -536,6 +601,10 @@ services:
         # python3 /fixes/patch_pn73t_vendor_legacy_tool_parser.py
         python3 /fixes/patch_pn74_fix_p107_serving_attr.py
         python3 /fixes/patch_pn75_embedding_neg_index_guard.py
+        # [cudagraph fix 2026-06-26] PN79: cudagraph-safe fixed-size TQ decode scratch
+        # (backport vllm#46067) — fixes the device-side-assert under load when uniform-decode
+        # cudagraphs bake in a WorkspaceManager scratch addr that later moves. Required for
+        # cudagraphs to be stable on TQ3+MTP. Retire when #46067 merges upstream.
         # [PN79 RETIRED 2026-07-23 BUG-119] anchor gone on this pin because the
         # #46067 crash class is handled IN-TREE (turboquant_attn.py pre-reserves
         # decode scratch + locks the workspace, lines ~393/~1396). The patch had
@@ -642,6 +711,7 @@ services:
       - /root/.cache/huggingface/thinkingcap-gptq-pro-v2
       - --served-model-name
       - qwen3.6
+      - thinkingcap
       - qwen3.6-autoround
       - qwen3.6-27b-autoround
       - qwen3.6-hindsight
@@ -689,13 +759,7 @@ services:
       - "${GPU_MEMORY_UTILIZATION:-0.95}"
       # [2026-07-19 corrected] The "Pin RESTORED" paragraph that stood here was
       # DANGLING — no --kv-cache-memory arg exists in this file; profiling is
-      # authoritative (07-18 entry above). Its cited evidence (22920e0e:
-      # "150,967 OOM'd under REAL traffic" via a ~1.3 GiB lazy set) predates the
-      # TC-gptq-pro-v2 promotion and the BUG-076 fix wave; profiled-150,967
-      # boots have run clean on the current stack since 07-18. 2952790016
-      # (2.75 GiB / 111,129 tok) remains the documented LAST-RESORT fallback if
-      # the lazy-set OOM class reappears (keep a 24-48 h OOM watch after each
-      # recreate). Full analysis: BUG-078/BUG-107 + the 07-19 loop file.
+      # authoritative. See endgame8020.yml's corrected note + BUG-078/BUG-107.
       # [PN83 — 2026-07-07] rerank micro-slots: PARKED after 2 OOM arms.
       # 29 seats = OOM at KV alloc (~700MB GDN/mamba state over budget);
       # 12 seats = aten::empty alloc failure during warmup (P66 capture list
@@ -746,7 +810,13 @@ services:
       - --enable-chunked-prefill
       - --enable-prefix-caching
       - --speculative-config
-      - '{"method":"mtp","num_speculative_tokens":3}'
+      # [2026-07-23 probdraft verdict: draft_sample_method=probabilistic tested
+      # (native30pd + capt10pd30): acceptance 67.2->69.5 (+2.3pt, ~2-3% tok/s),
+      # acc deltas = resampling noise (lossless confirmed). REVERTED to greedy
+      # for banked-run RNG-path comparability; keep probabilistic as a prod
+      # option for any t1.0 serving config.]
+      # [06:26Z USER: t1.0 stack everywhere — probdraft ON for the method sweep.]
+      - '{"method":"mtp","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}'
       - --config
       - /config/cache-override.yaml
       - --host
