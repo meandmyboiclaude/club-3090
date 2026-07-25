@@ -732,6 +732,14 @@ services:
         python3 /fixes/patch_pn100_auto_thinking_budget.py
         # [PN101 2026-07-18] answer-rescue call sites (inert while flag=0).
         python3 /fixes/patch_pn101_answer_rescue.py
+        # [PN71T 2026-07-25] truncation signal: a generation cut inside
+        # <think> returns 200/finish=length with an EMPTY body and nothing
+        # downstream can count it (the BUG-127 shape). Emits a structured
+        # `PN71T-TRUNC {json}` WARNING + a stop_reason stamp on the affected
+        # choice; never touches a healthy response. Kill switches:
+        # PN71T_ENABLE=0 (all of it) / PN71T_STAMP=0 (response untouched).
+        # Runs after PN101 so both serving.py hooks are already in place.
+        python3 /fixes/patch_pn71t_truncation_signal.py
         # [PN103 2026-07-18] BUG-076: spec entry vs final schedule reconcile at
         # SchedulerOutput emission (mamba block-aligned split can shrink
         # num_scheduled after the spec window is sized -> [-1,-1,-1] entry with
