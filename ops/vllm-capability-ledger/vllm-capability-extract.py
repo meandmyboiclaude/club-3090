@@ -572,20 +572,71 @@ def main() -> int:
     # points at cannot be reached by the dispatcher — real code, unreachable.
     # This is the "lost work" class (g4_upstream_tq_wip, spec_decode/probes,
     # de-duplicated standalones).  Mark it so the verifier can report it.
+    #
+    # Four filters, each of which was producing false orphans:
+    #  1. `"/patches/" in source_host` was meant to mean lane-2's own patches
+    #     directory, but EVERY path here contains it — the lane lives under
+    #     `models/qwen3.6-27b/vllm/patches/genesis/...`.  So `wiring/`,
+    #     `kernels_legacy/` and top-level helper modules were swept in.
+    #  2. `_archive/` and `_retired/` are where retired work is PARKED.  A
+    #     parked module having no registry row is the intended end state, not
+    #     unreachable work (the whole g4_upstream_tq_wip directory, G4_05).
+    #  3. `"def apply(" in src` is a substring test.  It matched
+    #     `AttributeRebinder.apply(self)`, a METHOD on the wiring framework
+    #     class, and a `def apply():` inside upstream_bindings.py's DOCSTRING.
+    #     Module-level only, via the AST that is already parsed.
+    #  4. A module another lane-2 module imports is a helper reached through
+    #     its sibling, not through the dispatcher (pn369_relaxed_acceptance is
+    #     imported by block_verify_sampler; edge_guard_reject_degenerate is
+    #     called by the registered PN387).  Moving those breaks a live import.
+    l2_src = "\n".join(
+        open(os.path.join(REPO, c["source_host"]), encoding="utf-8",
+             errors="replace").read()
+        for c in caps
+        if c["lane"] == "lane2-sndr" and c.get("source_host")
+        and os.path.isfile(os.path.join(REPO, c["source_host"])))
+    L2_PATCHES = "/sndr/engines/vllm/patches/"
     orphans = 0
     for c in caps:
-        if c["lane"] == "lane2-sndr" and c["kind"] != "registry_only" \
-                and "registry" not in c and "/patches/" in c["source_host"]:
-            src = os.path.join(REPO, c["source_host"])
-            try:
-                has_apply = "def apply(" in open(src, encoding="utf-8",
-                                                 errors="replace").read()
-            except OSError:
-                has_apply = False
-            if has_apply:
-                c["unreachable_by_dispatcher"] = True
-                c["status"] = "orphan-no-registry-row"
-                orphans += 1
+        if c["lane"] != "lane2-sndr" or c["kind"] == "registry_only" \
+                or "registry" in c or L2_PATCHES not in c["source_host"]:
+            continue
+        if "/_archive/" in c["source_host"] or "/_retired/" in c["source_host"]:
+            continue
+        # A registry row that names the id but declares no apply_module is a
+        # documentation entry the dispatcher lists and skips ("no apply_module
+        # declared") — but only when the row SAYS it is parked.  A row that
+        # still claims to be live while pointing at nothing is the same lost
+        # work wearing a registry entry (PN282's row credits a boot-apply from
+        # `sndr_core`, which does not exist in the boot image), so it stays an
+        # orphan and gets its own reason.
+        peer = next((m for k, m in reg2.items()
+                     if str(k).upper() == str(c.get("id", "")).upper()), None)
+        if peer is not None:
+            if peer.get("apply_module"):
+                # The id IS dispatchable — at a DIFFERENT module.  This file is
+                # a superseded duplicate, which the sibling's own source
+                # usually says outright ("VERBATIM from p71_block_verify.py").
+                continue
+            if peer.get("lifecycle") in ("retired",) or peer.get("retired_reason") \
+                    or peer.get("superseded_by"):
+                continue
+            c["registry_row_without_apply_module"] = True
+        src = os.path.join(REPO, c["source_host"])
+        try:
+            tree = ast.parse(open(src, encoding="utf-8", errors="replace").read())
+        except (OSError, SyntaxError):
+            continue
+        if not any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                   and n.name == "apply" for n in tree.body):
+            continue
+        stem = os.path.basename(c["source_host"])[:-3]
+        if re.search(rf"\bimport +{re.escape(stem)}\b", l2_src) or \
+                re.search(rf"\bfrom +\S*\.{re.escape(stem)} +import\b", l2_src):
+            continue
+        c["unreachable_by_dispatcher"] = True
+        c["status"] = "orphan-no-registry-row"
+        orphans += 1
     print(f"  lane-2 modules with apply() but NO registry row: {orphans}")
 
     # de-dupe ids across lanes by suffixing the lane (ids DO collide — see

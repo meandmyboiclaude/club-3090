@@ -245,6 +245,13 @@ def verify_capability(cap: dict, insp, env: dict[str, str], mode: str) -> dict:
 
     # --- structural verdicts that do not need any file read -----------------
     if cap.get("unreachable_by_dispatcher"):
+        if cap.get("registry_row_without_apply_module"):
+            return {"state": MISSING,
+                    "why": "module has apply() and the registry NAMES the id, "
+                           "but the row declares no apply_module — the "
+                           "dispatcher lists it and skips it (orphaned work "
+                           "wearing a registry entry)",
+                    "flag": fstate}
         return {"state": MISSING, "why": "module has apply() but NO registry row "
                 "— the dispatcher can never reach it (orphaned work)",
                 "flag": fstate}
