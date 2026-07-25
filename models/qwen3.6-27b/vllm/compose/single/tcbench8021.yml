@@ -847,6 +847,20 @@ services:
         # v1 scheduler (GENESIS_PN83_CHAT_SEQS); rerank fills the raised seat count.
         # FAIL-LOUD: never boot 29 seats without the chat cap.
         python3 /fixes/patch_pn83_rerank_micro_slots.py
+        # [PR#48361 / BUG-140 — 2026-07-25] P1 CORRECTNESS, DEFAULT ON.
+        # mamba_cache_mode=align hashes a block as "the SSM state at exactly
+        # (p+1)*block_size tokens", but a prefill chunk could end mid-block, so
+        # the hash advertised a state the block did not hold and a later hit
+        # resumed from the wrong recurrent state — silent output corruption.
+        # max-num-batched-tokens == block size == 4128, so any prefill sharing a
+        # step with a decode took a 4124-token first chunk: the common path.
+        # Not biting yet ONLY because BUG-131 means nothing reads the poisoned
+        # entries (0 hits) — enabling cache-override-apc.yaml starts reading
+        # them. Restored upstream tests: 20 failed before, 115 passed after.
+        # Must run after the five patches above (it re-anchors their output).
+        # Kill switch GENESIS_DISABLE_PR48361=1. No-ops on dev1060cherry, which
+        # still carries the original full #48361 pick.
+        python3 /fixes/patch_pr48361_mamba_align_split.py
         # [H119 route-API — 2026-07-25] LAST on purpose: its two anchors
         # (scheduler.py `_free_request` call, chat_completion/api_router.py
         # JSONResponse) must be counted against fully-patched content, and
