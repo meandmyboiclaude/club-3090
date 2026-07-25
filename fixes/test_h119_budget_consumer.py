@@ -54,7 +54,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PATCHER = os.path.join(HERE, "patch_h119_lens_router.py")
 SIDECAR = os.path.join(HERE, "pn119_router.py")
 TBS_REL = "/usr/local/lib/python3.12/dist-packages/vllm/v1/sample/thinking_budget_state.py"
-PINS = ("dev1060cherry-20260713", "dev1474cherry-1711-20260725")
+# 2026-07-25: the live pin (…cherrymax-1757) was MISSING here, which is half of
+# why the consumer shipped as a silent no-op — the other half being that this
+# file tested PRISTINE image content while five genesis patches rewrite the
+# holder before H119 runs at boot. Both are fixed: every pin is listed, and the
+# source under test is now BOOT-TIME content (see _boot_src).
+PINS = ("dev1060cherry-20260713", "dev1474cherry-1711-20260725",
+        "dev1474cherrymax-1757-20260725")
 
 THINK_START = [900]
 THINK_END = [901]
@@ -131,6 +137,27 @@ def _extract(tag: str) -> str | None:
     return out.stdout.decode("utf-8") if out.returncode == 0 else None
 
 
+def _boot_src(tag: str) -> str | None:
+    """The holder AS THE BOOT SEES IT: image content + the sibling patches.
+
+    Anchoring on pristine image content is what shipped the no-op — by the time
+    H119 runs, pn108/pn112/pr44812/holder_syncbatch/pn114 have all rewritten
+    this file. The replay lives in verify_h119_consumer_anchors.py so there is
+    exactly one definition of "boot-time content".
+    """
+    spec = importlib.util.spec_from_file_location(
+        "h119_verify", os.path.join(HERE, "verify_h119_consumer_anchors.py"))
+    ver = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ver)
+    root = tempfile.mkdtemp(prefix=f"h119-boot-{tag}-")
+    import pathlib as _pl
+    present = ver.extract(f"localhost/vllm-qwen36-endgame:{tag}", _pl.Path(root))
+    if not present[ver.TBS_REL]:
+        return None
+    ver.replay(_pl.Path(root))
+    return (_pl.Path(root) / ver.TBS_REL).read_text(encoding="utf-8")
+
+
 def _exec_module(source: str, name: str):
     mod = types.ModuleType(name)
     mod.__dict__["__name__"] = name
@@ -184,11 +211,15 @@ def _reset(side, *, flag, mode, router_present, deep=None, lean=None,
 def run_pin(tag: str, stock_src: str, ns) -> None:
     print(f"\n─── pin {tag} ({len(stock_src.splitlines())} lines) ───")
 
-    # P1 — anchors + byte-compile
+    # P1 — anchors + byte-compile, via the patcher's OWN site resolver so the
+    # variant selection (legacy vs relaxed add loop) is what is under test.
     text = stock_src
-    for name, old, new in (("E", ns["E_OLD"], ns["E_NEW"]),
-                           ("F", ns["F_OLD"], ns["F_NEW"]),
-                           ("G", ns["G_OLD"], ns["G_NEW"])):
+    sites, problem = ns["_resolve_consumer_sites"](text)
+    check(f"{tag} P1 consumer sites resolve on boot content",
+          problem is None, problem or "")
+    if problem:
+        return
+    for name, old, new in sites:
         c = text.count(old)
         check(f"{tag} P1 site {name} anchor count == 1", c == 1, f"count={c}")
         if c != 1:
@@ -332,7 +363,7 @@ def main() -> int:
     ns = _load_patcher_ns()
     ran = 0
     for tag in PINS:
-        src = _extract(tag)
+        src = _boot_src(tag)
         if src is None:
             check(f"{tag} image extractable", False,
                   "podman extraction failed — per-pin verification SKIPPED")
@@ -344,8 +375,27 @@ def main() -> int:
     # The patcher must survive a pin that simply has no such file.
     missing = ns["_patch_thinking_budget_state"]
     ns["TBS"] = ns["pathlib"].Path("/nonexistent/thinking_budget_state.py")
-    msg = missing()
-    check("absent-file pin soft-skips cleanly", msg.startswith("soft-skip E-G"), msg)
+    msg, ok = missing()
+    check("absent-file pin soft-skips cleanly",
+          msg.startswith("soft-skip E-G") and ok is False, msg)
+
+    # P9 — a requested-but-not-installed consumer must SHOUT, not whisper. The
+    # 07-25 no-op arm was invisible precisely because the only trace was one
+    # INFO line; this pins the escalation to stderr at ERROR.
+    import io
+    import contextlib
+    ns["os"].environ["GENESIS_ENABLE_H119_ROUTE_BUDGET"] = "1"
+    check("route-budget request detected", ns["_route_budget_requested"]())
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        ns["_shout"]("GENESIS_ENABLE_H119_ROUTE_BUDGET=1 (sites E/F/G)",
+                     "soft-skip E-G: F-add count=0")
+    shout = err.getvalue()
+    check("non-install shouts on stderr at ERROR",
+          "ERROR" in shout and "NOT INSTALLED" in shout
+          and "F-add count=0" in shout, shout.splitlines()[:2])
+    ns["os"].environ.pop("GENESIS_ENABLE_H119_ROUTE_BUDGET", None)
+    check("no request => no shout path", not ns["_route_budget_requested"]())
 
     print()
     if FAILURES:
