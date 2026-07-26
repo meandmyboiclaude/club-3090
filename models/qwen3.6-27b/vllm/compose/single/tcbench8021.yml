@@ -726,7 +726,7 @@ services:
       # identical across requests (prefix-cache can finally hit). No-op under
       # v5 (already static). QUALITY-AFFECTING (prompt order changes) ->
       # ships OFF; flip to 1 for the 30-item A/B screen.
-      - GENESIS_PN102_BANNER_STATIC_FIRST=0
+      - GENESIS_PN102_BANNER_STATIC_FIRST=${GENESIS_PN102_BANNER_STATIC_FIRST:-0}
       # Starvation backstop: one continuation resuming INSIDE the think region.
       # Non-streaming, bounded to one pass, every failure path returns the
       # original response unchanged. Reaches above the generous cap only for the
@@ -818,6 +818,14 @@ services:
         # GENESIS_ENABLE_PN114_PROBE / GENESIS_PN112_CONFIRM /
         # GENESIS_PN112_WRAPUP (+ PN114_MODE/DEPTHS/STABLE_K/CMIN/GRACE).
         # Design: ~/shared/PN114-DESIGN-probe-stability-20260723.md.
+        # [PN122 2026-07-26] structured-output force guard. The thinking-budget
+        # forcer writes a forced </think> at +1e9 AFTER apply_grammar_bitmask,
+        # so it overrides the xgrammar mask and can emit an off-grammar token
+        # into the middle of tool-call arguments (upstream #44676, unmerged).
+        # PR44812 only covers Qwen3's literal <tool_call>; guided_json never
+        # emits it. DARK: inert unless GENESIS_ENABLE_PN122_STRUCTURED_FORCE_GUARD=1.
+        # MUST run before patch_pn114_forced_span.py (reversed order exits 1).
+        python3 /fixes/patch_pn122_structured_force_guard.py
         python3 /fixes/pn114_boot_ids.py
         python3 /fixes/patch_pn114_forced_span.py
         # [PN121 2026-07-26] soft-landing grafts: N = soft-phase newline/
@@ -917,6 +925,12 @@ services:
         # spans (Phoenix per-trace prompt visibility; otelcol maps -> input.value).
         # Knob: VLLM_TRACE_CONTENT_MAX_CHARS. Self-retires if upstream re-adds.
         python3 /fixes/patch_pn99_trace_content_prompt_completion.py
+        # [PN129 2026-07-26] record gen_ai.response.finish_reason (always) and
+        # gen_ai.response.zero_output on trace spans. Zero-token completions
+        # previously carried no finish_reason and span status UNSET, so a
+        # burst of infra aborts was indistinguishable from model output.
+        # Anchors avoid PN99's region; composes in either order.
+        python3 /fixes/patch_pn129_trace_finish_reason_zero_output.py
         # [PN100 2026-07-18] await-site for the auto thinking-budget router
         # (classify pass; module rides the mounted _genesis tree).
         python3 /fixes/patch_pn100_auto_thinking_budget.py
