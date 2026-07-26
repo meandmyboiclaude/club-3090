@@ -216,10 +216,38 @@ def judge(tag: str, got: dict, want_tool: str | None, want_args: dict | None,
            f"leak={found or '-'} {'FAIL: ' + ','.join(bad) if bad else 'ok'}")
     if not bad:
         return row, None
+    # The recorded tool-call list is TRUNCATED for readability, and that used
+    # to make a failure row unreadable: n_tool_calls=8 next to a 4-entry list
+    # reads as duplicate emission, and on 2026-07-25 an hour went into a row
+    # that was actually correct (TOOLS_MANY offers exactly 8 and the prompt
+    # asked for each once). A REAL storm presents identically — big count,
+    # short list — so neither number can be trusted alone. Three additions make
+    # the two cases distinguishable from the JSON alone, with no reader
+    # arithmetic and no run of the canary:
+    #   * name_counts is the full multiset over EVERY call, so a storm shows
+    #     as {"get_weather": 19} and a breadth case as eight 1s. It is sized by
+    #     DISTINCT names, so it stays small precisely when the list does not —
+    #     which is why it beats simply raising the cap (a 26-call storm capped
+    #     at 12 distinct-looking names is still ambiguous).
+    #   * n_tools_offered is the denominator `storm` is judged against; without
+    #     it a reader cannot re-derive the verdict.
+    #   * tool_calls_recorded / _truncated make the truncation explicit, so the
+    #     list length can never again be mistaken for the count.
+    # The cap is still raised (4 -> STORM_N * 2) so the ordered sample spans a
+    # storm's threshold and keeps the arguments payloads that name_counts drops.
+    name_counts: dict[str, int] = {}
+    for t in got["tool_calls"]:
+        name_counts[t["name"]] = name_counts.get(t["name"], 0) + 1
+    sample = got["tool_calls"][:STORM_N * 2]
     return row, {"tag": tag, "why": bad, "n_tool_calls": n_tc,
+                 "n_tools_offered": n_tools_offered,
+                 "n_distinct_tools": len(name_counts),
+                 "tool_call_name_counts": name_counts,
                  "content": (got["content"] or "")[:600],
                  "reasoning": (got["reasoning"] or "")[:600],
-                 "tool_calls": got["tool_calls"][:4]}
+                 "tool_calls_recorded": len(sample),
+                 "tool_calls_truncated": n_tc - len(sample),
+                 "tool_calls": sample}
 
 
 def main() -> int:

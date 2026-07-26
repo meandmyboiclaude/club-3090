@@ -14,11 +14,23 @@ the two, so IT moved: house lane id `H119` (H = house lane, per
 Env flags:
   GENESIS_ENABLE_H119_LENS_ROUTER  — canonical, use this.
   GENESIS_ENABLE_PN119_ROUTER      — BACKWARD-COMPATIBLE ALIAS, still honored.
-The sidecar (/fixes/pn119_router.py) still reads the PN119_ROUTER name; the
-compose entrypoint resolves the canonical name onto it:
-    export GENESIS_ENABLE_PN119_ROUTER="${GENESIS_ENABLE_PN119_ROUTER:-\\
-                                         ${GENESIS_ENABLE_H119_LENS_ROUTER:-}}"
-so an operator's existing compose keeps working untouched. The sidecar module
+CORRECTED 2026-07-26. This block used to say the sidecar reads only the OLD
+PN119_ROUTER name and that a compose-entrypoint ':-' shim resolves the canonical
+name onto it. BOTH halves are now false: the sidecar resolves the flag itself in
+`_router_enabled()` (fixes/pn119_router.py:1026-1069) and the entrypoint shim was
+deleted in the same change (tcbench8021.yml:874 "DO NOT REINSTATE IT").
+The precedence is CANONICAL-FIRST, FIRST-SET-WINS:
+  1. GENESIS_ENABLE_H119_LENS_ROUTER decides whenever it is set to a non-empty
+     value — INCLUDING against a contradicting alias. `H119_LENS_ROUTER=0` with
+     a stale `PN119_ROUTER=1` is OFF. (An OR would leave the canonical
+     kill-switch inert, which is what the old shim's leftovers made likely.)
+  2. otherwise GENESIS_ENABLE_PN119_ROUTER, so an operator's existing compose
+     that sets only the old name keeps working untouched.
+  3. otherwise off.
+EMPTY counts as UNSET (a `${FOO:-}` chain yields "" on docker-compose), so an
+empty canonical falls THROUGH to the alias rather than reading as "off".
+Pinned by fixes/test_h119flag_precedence.py; fixes/pn119_doctor.py --selftest
+checks the diagnostic agrees with the router on the same table. The sidecar module
 name (vllm/_genesis_pn119.py), its class (PN119Router) and its PN119_* tuning
 knobs are deliberately NOT renamed here — see the audit §3.1 "deliberately NOT
 touched".

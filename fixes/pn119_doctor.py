@@ -34,6 +34,30 @@ only visible from OUTSIDE that process, so they are computed here:
 Stdlib only, no venv, no imports from the router module: this has to run on a
 box where the router's dependencies (torch) are absent, and it must never be
 the reason a diagnosis cannot be made.
+
+THE ENABLE FLAG IS RESOLVED THE ROUTER'S WAY, NOT THE OBVIOUS WAY
+-----------------------------------------------------------------
+`router_enabled_from()` below reimplements `pn119_router._router_enabled()`
+(canonical-first, first-SET-wins, empty == unset). It used to be a plain
+any()/OR over both names, which made the doctor report ENABLED on the one case
+that matters most — canonical `GENESIS_ENABLE_H119_LENS_ROUTER=0` plus a stale
+`GENESIS_ENABLE_PN119_ROUTER=1` left behind by the compose entrypoint shim —
+while the router itself was OFF. A diagnostic that disagrees with the thing it
+diagnoses is worse than no diagnostic.
+
+It is a REIMPLEMENTATION rather than an import for two independent reasons:
+  * the router imports torch at module scope, and this tool exists precisely
+    for hosts where torch is not installed;
+  * the router's helper reads `os.environ` — the doctor resolves the flag from
+    a CONTAINER's env, harvested via `docker inspect`, which is a different
+    mapping entirely. Even with torch present, reuse would mean mutating
+    os.environ around a call, in a `--watch` loop, to answer a question about
+    another process.
+So the copy is deliberate — and `--selftest` is the thing that stops it from
+drifting: it replays the whole precedence table against BOTH implementations
+(loading the sidecar by path behind a stub torch) and fails on the first
+disagreement. Run it after touching either side:
+    /usr/bin/python3 fixes/pn119_doctor.py --selftest
 """
 from __future__ import annotations
 
@@ -57,8 +81,45 @@ DEFAULT_CONTAINER = os.environ.get("PN119_CONTAINER", "vllm-tcbench-8021")
 STALE_TICKS = 5
 STALE_FLOOR_S = 30.0
 
-# Router-enable env names, in the order the compose resolves them.
-ENABLE_ENV = ("GENESIS_ENABLE_PN119_ROUTER", "GENESIS_ENABLE_H119_LENS_ROUTER")
+# Router-enable env names. Keep these spellings and this precedence identical
+# to pn119_router.ENABLE_FLAG / ENABLE_FLAG_LEGACY / _router_enabled().
+ENABLE_FLAG = "GENESIS_ENABLE_H119_LENS_ROUTER"          # canonical
+ENABLE_FLAG_LEGACY = "GENESIS_ENABLE_PN119_ROUTER"       # back-compat alias
+# Reported so the operator can see WHICH name decided, not just the verdict.
+ENABLE_ENV = (ENABLE_FLAG, ENABLE_FLAG_LEGACY)
+
+_TRUTHY = ("1", "true", "yes", "on")
+
+
+def router_enabled_from(env) -> bool:
+    """Resolve the router master switch out of a mapping of env vars.
+
+    Mirrors pn119_router._router_enabled() exactly — canonical-first,
+    first-SET-wins, empty == unset:
+      1. GENESIS_ENABLE_H119_LENS_ROUTER, whenever it is set to a non-empty
+         value, DECIDES — including when it contradicts the legacy alias.
+         `H119_LENS_ROUTER=0` with a stale `PN119_ROUTER=1` is OFF.
+      2. otherwise GENESIS_ENABLE_PN119_ROUTER.
+      3. otherwise off.
+    An OR over both names (what this function used to be) would make the
+    canonical kill-switch inert, because a stale legacy export is exactly what
+    the compose entrypoint shim leaves lying around on every boot.
+    Empty counts as UNSET: `${FOO:-}` yields "" under docker-compose, and that
+    must fall THROUGH to the legacy name, not read as an explicit "off".
+    """
+    for name in ENABLE_ENV:
+        raw = str(env.get(name, "") or "").strip()
+        if raw:
+            return raw.lower() in _TRUTHY
+    return False
+
+
+def enable_flag_source(env):
+    """Which env name actually decided, or None when neither is set."""
+    for name in ENABLE_ENV:
+        if str(env.get(name, "") or "").strip():
+            return name
+    return None
 
 C = {"crit": "\033[31m", "warn": "\033[33m", "ok": "\033[32m",
      "dim": "\033[2m", "b": "\033[1m", "r": "\033[0m"}
@@ -117,9 +178,8 @@ def container_facts(name: str) -> dict:
     env = _inspect(name, "{{range .Config.Env}}{{println .}}{{end}}") or ""
     kv = dict(l.split("=", 1) for l in env.splitlines() if "=" in l)
     out["env"] = kv
-    out["router_enabled"] = any(
-        str(kv.get(k, "")).strip().lower() in ("1", "true", "yes", "on")
-        for k in ENABLE_ENV)
+    out["router_enabled"] = router_enabled_from(kv)
+    out["router_enabled_by"] = enable_flag_source(kv)
     out["mode"] = kv.get("PN119_MODE", "")
     out["consumer_flag"] = str(
         kv.get("GENESIS_ENABLE_H119_ROUTE_BUDGET", "")).strip() in ("1", "true")
@@ -214,10 +274,23 @@ def render(snap, err, path, cf, alarms) -> None:
     print(f"  file       {path}")
     if cf.get("known"):
         state = "running" if cf.get("running") else "STOPPED"
+        by = cf.get("router_enabled_by")
         print(f"  container  {cf['name']} [{cf.get('cid', '?')}] {state}"
               f"  router_enabled={cf.get('router_enabled')}"
+              f" (by {by or 'neither name set'})"
               f"  mode={cf.get('mode') or '?'}"
               f"  consumer={cf.get('consumer_flag')}")
+        # The contested case. Both names set and disagreeing is not an error —
+        # the canonical one wins by design — but it is the exact shape that
+        # reads as "the flag is on" to every grep, so name it out loud.
+        env = cf.get("env") or {}
+        vals = {k: str(env.get(k, "") or "").strip() for k in ENABLE_ENV}
+        if all(vals.values()) and len({v.lower() in _TRUTHY
+                                       for v in vals.values()}) > 1:
+            print(paint(f"             NOTE {ENABLE_FLAG}={vals[ENABLE_FLAG]!r} "
+                        f"overrides stale "
+                        f"{ENABLE_FLAG_LEGACY}={vals[ENABLE_FLAG_LEGACY]!r} "
+                        f"— canonical-first, the router agrees", "warn"))
     else:
         print(f"  container  {cf['name']} (not inspectable — "
               "container checks skipped)")
@@ -297,6 +370,138 @@ def render(snap, err, path, cf, alarms) -> None:
     print()
 
 
+# ───────────────────────────────────────────────────────────────── self-test
+# Pure stdlib, no pytest, no GPU, no container, no vllm/torch: runnable as
+#     /usr/bin/python3 fixes/pn119_doctor.py --selftest
+# on the bare host. It is the anti-drift gate for router_enabled_from(): the
+# precedence rule exists in two places by necessity (see the module docstring),
+# so it is replayed against BOTH and any disagreement is a failure.
+_FLAG_VALUES = (None, "", "   ", "0", "1", "true", "TRUE", "True", "yes",
+                "on", "off", "no", "false", "2", "banana")
+
+
+def _load_router():
+    """Import fixes/pn119_router.py by path behind a stub torch, or None.
+
+    Same trick fixes/test_h119flag_precedence.py uses. Confined to --selftest:
+    the doctor's normal path must never import the sidecar (torch-free hosts).
+    """
+    import contextlib
+    import importlib.util
+    import pathlib
+    import types
+
+    path = pathlib.Path(__file__).resolve().parent / "pn119_router.py"
+    if not path.is_file():
+        return None, f"sidecar not present at {path}"
+    if "torch" not in sys.modules:
+        torch = types.ModuleType("torch")
+        torch.Tensor = type("Tensor", (), {})
+        torch.float32 = "float32"
+        torch.no_grad = contextlib.nullcontext
+        sys.modules["torch"] = torch
+    try:
+        spec = importlib.util.spec_from_file_location("_h119doctor_router", path)
+        mod = importlib.util.module_from_spec(spec)
+        # In sys.modules BEFORE exec: @dataclass resolves its owning module out
+        # of sys.modules on py3.12+ and raises AttributeError if it is absent.
+        sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+    except Exception as e:                                     # noqa: BLE001
+        return None, f"sidecar present but failed to import: {e!r}"
+    return mod, None
+
+
+def selftest() -> int:
+    fails = []
+
+    def check(cond, msg):
+        if not cond:
+            fails.append(msg)
+
+    # ── 1. the doctor's own precedence table ────────────────────────────────
+    E = router_enabled_from
+    check(E({ENABLE_FLAG: "1"}) is True, "canonical alone must enable")
+    check(E({ENABLE_FLAG: "0"}) is False, "canonical alone must disable")
+    check(E({ENABLE_FLAG_LEGACY: "1"}) is True,
+          "legacy alone must still enable (back-compat)")
+    check(E({ENABLE_FLAG_LEGACY: "0"}) is False, "legacy alone must disable")
+    check(E({}) is False, "neither name set must be off")
+    check(E({"GENESIS_ENABLE_PN119": "1"}) is False,
+          "GENESIS_ENABLE_PN119 is lane-2's TurboQuant kernel, not this router")
+    # THE CONTESTED CASE — the whole reason this function replaced any().
+    check(E({ENABLE_FLAG: "0", ENABLE_FLAG_LEGACY: "1"}) is False,
+          "canonical=0 with a stale legacy=1 must resolve OFF "
+          "(an OR here made the kill-switch inert)")
+    check(E({ENABLE_FLAG: "1", ENABLE_FLAG_LEGACY: "0"}) is True,
+          "canonical=1 must win over legacy=0")
+    # EMPTY == UNSET: `${FOO:-}` yields "" under docker-compose.
+    check(E({ENABLE_FLAG: "", ENABLE_FLAG_LEGACY: "1"}) is True,
+          "empty canonical must fall THROUGH to legacy, not read as off")
+    check(E({ENABLE_FLAG: "   ", ENABLE_FLAG_LEGACY: "1"}) is True,
+          "whitespace-only canonical must fall through to legacy")
+    check(E({ENABLE_FLAG: "", ENABLE_FLAG_LEGACY: "0"}) is False,
+          "empty canonical + legacy=0 is off")
+    # And the reported source has to agree with the verdict's provenance.
+    check(enable_flag_source({ENABLE_FLAG: "0", ENABLE_FLAG_LEGACY: "1"})
+          == ENABLE_FLAG, "canonical must be reported as the deciding name")
+    check(enable_flag_source({ENABLE_FLAG: "", ENABLE_FLAG_LEGACY: "1"})
+          == ENABLE_FLAG_LEGACY, "an empty canonical does not decide")
+    check(enable_flag_source({}) is None, "neither set has no deciding name")
+
+    n_doctor = 14
+    print(f"doctor precedence table   {n_doctor - len(fails)}/{n_doctor} ok")
+
+    # ── 2. parity against the router's own helper ───────────────────────────
+    mod, why = _load_router()
+    if mod is None:
+        print(f"router parity             SKIPPED — {why}")
+        # A sidecar that is present but unimportable is a regression, not an
+        # environment quirk: fail loudly rather than pass a half-run gate.
+        if "failed to import" in (why or ""):
+            fails.append(f"router parity leg could not run: {why}")
+    else:
+        check(getattr(mod, "ENABLE_FLAG", None) == ENABLE_FLAG,
+              f"router ENABLE_FLAG={getattr(mod, 'ENABLE_FLAG', None)!r} "
+              f"!= doctor {ENABLE_FLAG!r}")
+        check(getattr(mod, "ENABLE_FLAG_LEGACY", None) == ENABLE_FLAG_LEGACY,
+              f"router ENABLE_FLAG_LEGACY="
+              f"{getattr(mod, 'ENABLE_FLAG_LEGACY', None)!r} "
+              f"!= doctor {ENABLE_FLAG_LEGACY!r}")
+        saved = {k: os.environ.get(k) for k in ENABLE_ENV}
+        n = 0
+        try:
+            for canon in _FLAG_VALUES:
+                for legacy in _FLAG_VALUES:
+                    env = {}
+                    for k in ENABLE_ENV:
+                        os.environ.pop(k, None)
+                    if canon is not None:
+                        env[ENABLE_FLAG] = canon
+                        os.environ[ENABLE_FLAG] = canon
+                    if legacy is not None:
+                        env[ENABLE_FLAG_LEGACY] = legacy
+                        os.environ[ENABLE_FLAG_LEGACY] = legacy
+                    n += 1
+                    mine, theirs = router_enabled_from(env), mod._router_enabled()
+                    check(mine == theirs,
+                          f"DISAGREE {ENABLE_FLAG}={canon!r} "
+                          f"{ENABLE_FLAG_LEGACY}={legacy!r}: "
+                          f"doctor={mine} router={theirs}")
+        finally:
+            for k, v in saved.items():
+                os.environ.pop(k, None)
+                if v is not None:
+                    os.environ[k] = v
+        print(f"router parity             {n} env combinations, "
+              f"{'MISMATCHES' if fails else 'all agree'}")
+
+    for f in fails:
+        print(f"  FAIL {f}")
+    print("FAILED" if fails else "PASSED", f"({len(fails)} failure(s))")
+    return 1 if fails else 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         prog="pn119-doctor", description=__doc__,
@@ -312,10 +517,16 @@ def main(argv=None) -> int:
                     help="alarms and verdict only")
     ap.add_argument("--watch", type=float, metavar="SECS",
                     help="re-render every SECS until interrupted")
+    ap.add_argument("--selftest", action="store_true",
+                    help="replay the enable-flag precedence table against the "
+                         "router's own helper and exit (no container, no GPU)")
     try:
         args = ap.parse_args(argv)
     except SystemExit as e:      # argparse already printed
         return 3 if e.code else 0
+
+    if args.selftest:
+        return selftest()
 
     while True:
         now = time.time()

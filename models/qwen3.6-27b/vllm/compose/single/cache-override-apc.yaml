@@ -1,26 +1,109 @@
 # Opt-in variant of cache-override.yaml that actually lets prefix caching hit.
 # Engage with: CACHE_OVERRIDE=cache-override-apc.yaml (see tcbench8021.yml).
 #
-# BUG-131: with mamba_cache_mode=align + turboquant_3bit_nc, vLLM raises the
-# attention block_size to 4128 tokens so the attention page matches the GDN
-# mamba page (vllm/platforms/interface.py:903). resolve_kv_cache_block_sizes()
-# then derives hash_block_size = gcd(4128, 4128) = 4128, and
-# get_request_block_hasher() only emits a hash per FULL block -> any request
-# under 4129 tokens produces zero block hashes and can never hit.
+# BUG-131: vLLM raises the attention block_size until the attention page is >=
+# the GDN mamba page (platforms/interface.py:895-909). resolve_kv_cache_block_
+# sizes() then derives hash_block_size = gcd(block_size, block_size) = block_size
+# (v1/core/kv_cache_utils.py:678), and get_request_block_hasher() only emits a
+# hash per FULL block -> any request under block_size+1 tokens produces zero
+# block hashes and can never hit.
 #
 # prefix_match_unit sets hash_block_size independently of the physical block
-# size (vllm/config/cache.py:61). It must divide every group's block_size;
-# 4128 = 2^5 * 3 * 43, so 16 / 32 / 48 / 96 / 129 / 172 / 258 are all legal
-# (256 is NOT a divisor of 4128).
+# size (config/cache.py:61-72). It is MATCHING GRANULARITY ONLY — it does not
+# change how often state is stored, only the finest token boundary a hit can
+# land on. Every KV cache group's block_size must be divisible by it, or
+# kv_cache_utils.py:683 raises ValueError at boot.
 #
-# Setting it < block_size also flips two upstream paths on:
+# ---------------------------------------------------------------------------
+# BUG-159 — THE BLOCK SIZE IS DERIVED, SO THE UNIT CANNOT BE A MAGIC CONSTANT
+# ---------------------------------------------------------------------------
+# This file used to ship `prefix_match_unit: 258` against a hardcoded block
+# size of 4128. 258 divides 4128 and was correct — but only for ONE point in a
+# geometry this compose exposes as switchable env knobs. It is worth writing
+# the derivation down rather than another number.
+#
+# interface.py's else-branch (the one taken for mamba_cache_mode none AND
+# align; only "all" differs) computes:
+#
+#   attn_block_size = K * cdiv(mamba_page_size, K * attn_page_size_1_token)
+#
+# with, on this rig (tp=1, Qwen3_5ForConditionalGeneration, no --block-size):
+#   K                    = 16    max(min(TQ backend kernel sizes [16,32,64,128]),
+#                                cache_config.block_size=16)
+#   attn_page_1_token    = 792 B turboquant_3bit_nc, 4 kv heads x head 256
+#                                (4128 * 792 = 3,269,376 = the banked page size)
+#   mamba_page_size            = conv (10240 x (3 + n)) bf16 + ssm (48,128,128) fp32
+#                                where n = num_speculative_tokens
+#
+# n is `NUM_SPEC_TOKENS` in tcbench8021.yml (default 3, swept 3/4/5/6), and it
+# enters the conv state shape as `conv_kernel_size - 1 + num_spec`
+# (mamba_utils.py:443). So the block size — and therefore the set of legal
+# units — MOVES WITH THE DRAFT DEPTH:
+#
+#   n   mamba_page   attn block_size   258 legal?
+#   0    3,207,168        4064            no
+#   1    3,227,648        4080            no
+#   2    3,248,128        4112            no
+#   3    3,268,608        4128            YES  <- and only here
+#   4    3,289,088        4160            no
+#   5    3,309,568        4192            no
+#   6    3,330,048        4208            no
+#
+# gcd(4064..4208) = 16. There is NO unit above 16 that survives the ladder:
+# 4112 = 2^4 * 257 and 4208 = 2^4 * 263 are 16 x a prime, so they share nothing
+# else with 4128 = 2^5 * 3 * 43. Hence the value below.
+#
+#   prefix_match_unit: 16
+#     * legal at EVERY rung of the exposed NUM_SPEC_TOKENS ladder, so flipping
+#       to this override can never ValueError at boot on a draft-depth arm;
+#     * finest possible granularity, which is the entire point of the rung —
+#       BUG-131 was zero hits, and a hit can now land every 16 tokens instead
+#       of once per 4128-token block;
+#     * it is K itself and vLLM's DEFAULT_BLOCK_SIZE, not an exotic number.
+#   COST, and the thing to measure on the first boot: hashes per request go
+#   from ceil(len/4128) to ceil(len/16) — a 12K prompt hashes 750 chained
+#   blocks instead of 3. That is CPU on the prefill path and a longer
+#   Request.block_hashes list; it is cheap per hash, but it has never been
+#   measured here. If it proves material, 258 is legal again — but ONLY while
+#   NUM_SPEC_TOKENS stays at 3, and that precondition then has to be enforced
+#   somewhere, because nothing in vLLM ties the two together.
+#
+# NOT the reason for any of this: 4800. The current boot logs "Setting
+# attention block size to 4800 tokens", and 43 does not divide 4800, which
+# looks like this file is already broken. It is not — 4800 belongs to a
+# geometry this file cannot be in. It comes from cache-override-replayssm.yaml's
+# `use_replayssm_spec: true`, which switches the model's state shape to
+# gated_delta_net_replayssm_spec_state_shape (qwen3_5.py:557) and adds the
+# d/k/g ring caches — (48,32,128) fp16 + (16,32,128) fp16 + (48,32) fp32 =
+# 530,432 B — lifting the mamba page to 3,799,040 and the block to 4800.
+# `mamba_cache_mode: none` is NOT the cause: none and align take the identical
+# else-branch above. And CACHE_OVERRIDE is a single mount slot (one --config
+# file), so replayssm and this file can never both be loaded — engaging APC
+# puts use_replayssm_spec back to false and the block back on the table above.
+#
+# Setting the unit < block_size also flips two upstream paths on:
 #   - HybridKVCacheCoordinator.enable_partial_hash_hits -> True
 #     (needs mamba block_size > hash_block_size), which drops cache-hit
-#     alignment from 4128 tokens to prefix_match_unit
+#     alignment from a full block to prefix_match_unit
 #   - Scheduler.mamba_partial_cache_hit -> True, adding the prompt-tail stop
 #     that registers the mamba partial entry
+# The second one is BUG-149: without fixes/patch_pr48361_mamba_align_split.py
+# the tail_boundary stop gets re-floored off the hash grid and prefills stall
+# at 0% GPU forever. That patch IS applied by the tcbench8021 entrypoint —
+# verify it is still there before booting this override.
 #
 # UNVALIDATED: this has not been booted. Needs a boot + verify-full + a
-# prefix-cache hit probe before it goes anywhere near prod :8020.
+# prefix-cache hit probe before it goes anywhere near prod :8020. Check the
+# derivation against the boot instead of trusting this comment: the engine logs
+# "Setting attention block size to <N> tokens" — N must be divisible by
+# prefix_match_unit, and N must match the table above for the NUM_SPEC_TOKENS
+# in use. If it does not, the geometry moved again; re-derive, do not guess.
+#
+# mamba_block_size below is inherited byte-identical from cache-override.yaml.
+# It is inert on this path: prefix caching forces mamba_cache_mode=align for
+# Qwen3.5/3.6 (models/config.py:558-566) and interface.py:911-912 then
+# overwrites it with the derived block_size. It is left in place only so this
+# file stays a pure delta on the baseline override — but note it carries the
+# same n=3 assumption, so do not read it as an authority on the block size.
 mamba_block_size: 4128
-prefix_match_unit: 258
+prefix_match_unit: 16
