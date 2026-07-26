@@ -510,7 +510,15 @@ services:
       # OTEL tracing -> Phoenix (host net, gRPC OTLP :4317). Lands in "vllm" project.
       - OTEL_RESOURCE_ATTRIBUTES=openinference.project.name=vllm,service.name=vllm-qwen36
       # [PN99 2026-07-17] prompt/completion text on llm_request spans (0 = off).
-      - VLLM_TRACE_CONTENT_MAX_CHARS=8192
+      # [2026-07-26] RAISED 8192 -> 65536, and interpolated. The truncation is
+      # MIDDLE-OUT (patch_pn99_trace_content_prompt_completion.py:41-49), so at
+      # 8192 a long request's span shows head and tail with the middle silently
+      # elided — you cannot tell which MESSAGES it carried. Prod is where that
+      # bit: it manufactured a confident "83% of prod calls are missing the JSON
+      # directive" finding that took an agent to demolish; production sends the
+      # directive on every call (consolidator.py:2296-2299 always sends
+      # [system, user]). Token counts and timings were never affected.
+      - VLLM_TRACE_CONTENT_MAX_CHARS=${VLLM_TRACE_CONTENT_MAX_CHARS:-65536}
       # [PN100 2026-07-18] auto thinking-budget router: engine self-classifies
       # difficulty 0-3 per budget-less request -> thinking_token_budget tier
       # (0=off,1024,4096,10240). Explicit client params always win; requests
