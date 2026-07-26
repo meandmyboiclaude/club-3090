@@ -27,7 +27,7 @@
 # use_replayssm_spec requires mamba_cache_mode=none (config/vllm.py:2407-2410),
 # and prefix caching force-sets that mode to "align" for Qwen3.5/3.6
 # (models/config.py:558-566, the arch lacks supports_mamba_prefix_caching).
-# Per BUG-130 that feature currently returns zero hits anyway — hash_block_size
+# Per BUG-131 that feature currently returns zero hits anyway — hash_block_size
 # resolves to 4128, so nothing under 4129 prompt tokens can produce a block
 # hash — but prompts ABOVE 4128 can hash, and this file gives that up for good.
 # mamba_block_size is therefore omitted, not set to 4128: with prefix caching

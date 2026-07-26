@@ -1,7 +1,7 @@
 # Opt-in variant of cache-override.yaml that actually lets prefix caching hit.
 # Engage with: CACHE_OVERRIDE=cache-override-apc.yaml (see tcbench8021.yml).
 #
-# BUG-130: with mamba_cache_mode=align + turboquant_3bit_nc, vLLM raises the
+# BUG-131: with mamba_cache_mode=align + turboquant_3bit_nc, vLLM raises the
 # attention block_size to 4128 tokens so the attention page matches the GDN
 # mamba page (vllm/platforms/interface.py:903). resolve_kv_cache_block_sizes()
 # then derives hash_block_size = gcd(4128, 4128) = 4128, and

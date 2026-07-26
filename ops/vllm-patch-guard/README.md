@@ -68,7 +68,9 @@ shows up in a pairwise diff, but it shows up here.
 ```sql
 -- when did a specific patch last apply?
 SELECT b.started_at FROM boot_patches p JOIN boots b ON b.id=p.boot_id
-WHERE p.patch='PN96' AND p.status='applied' ORDER BY 1 DESC LIMIT 1;
+WHERE p.patch='PN16' AND p.status='applied' ORDER BY 1 DESC LIMIT 1;
+-- (example patch swapped off PN96 2026-07-26: PN96's /fixes row was a
+--  false positive from a log line that lied — see the baseline note below)
 
 -- total over time
 SELECT started_at, total_active, drift_skipped FROM boots ORDER BY 1 DESC LIMIT 20;
@@ -86,8 +88,20 @@ SELECT started_at, total_active, drift_skipped FROM boots ORDER BY 1 DESC LIMIT 
 | DRIFT | 4 — P3, P62, P67, P87 |
 | hard failures | 0 |
 
-DRIFT is expected, not breakage: P62 is superseded by PN96 (applied), P87/P3/P67
-are upstream anchor drift. Also deliberately off: PN54 (cudaErrorAssert crash),
+DRIFT is expected, not breakage: P62 is superseded by **upstream** (`vllm#44993`,
+merged `0416dab27`, ancestor of the boot pin), P87/P3/P67 are upstream anchor
+drift. **CORRECTED 2026-07-26 — this line used to read "superseded by PN96
+(applied)". PN96's `/fixes` patch is NOT applied and was not applied on this
+baseline either**: both its sub-patches take the self-retire path, but its
+closing log line said `applied:` unconditionally, so this table (and the DB
+behind it) banked a house row that never existed. Fixed in `d6c72abd`; the
+`pn96-structured-output-marker-step-fsm` house row stops appearing in
+`boot_patches` after the 2026-07-26 00:26:55 boot. Ledger verdict:
+`PN96@fixes` = absorbed upstream (`ops/vllm-capability-ledger/`, `ba60b600`).
+**The `house /fixes 31 of 36` and `total active 134` counts above are therefore
+one too high for PN96 on this baseline — re-baseline before quoting them.**
+
+Also deliberately off: PN54 (cudaErrorAssert crash),
 P67 (BUG-028 asserts), P78 (needs cudagraphs), P82 (research-only), PN61
 (`qwen3_vl` only — model is `qwen3_5`), P60/P60B (ngram target files absent; we
 run MTP). PN19 is `upstream_merged` — retired by success.
