@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Offline tests for PN118 — premature-close gate (answer_rescue.py Leg 3).
+"""Offline tests for PN123 (fka PN118) — premature-close gate, answer_rescue
+Leg 3.
 
 The engine round-trip (does an unclosed <think> partial survive template render
 + vLLM's continue_final_message containment check?) needs a GPU. Everything
@@ -10,7 +11,26 @@ else is pure Python and a bug in any of it would waste a bench window:
   - the continuation budget arithmetic (leftover clamped to [512, 6144])
   - the first-person cue text present in the continuation request
 
-Run: python3 test_pn118_logic.py
+[BUG-144, 2026-07-26] The leg was renumbered PN118 -> PN123 (lane-2 already
+owned the number; the boot recorder truncates PN118_V2_MD5_* to "PN118"). The
+rename is PARTIAL BY DESIGN and this file tests BOTH halves:
+
+  * canonical — GENESIS_ENABLE_PN123_CLOSEGATE and GENESIS_PN123_* drive every
+    behavioural test below;
+  * legacy — GENESIS_ENABLE_PN118_CLOSEGATE and GENESIS_PN118_* must keep
+    working (existing composes/env set them), and three wire strings are FROZEN
+    on the old spelling on purpose: the ctk marker "pn118_internal", the
+    `_STATS["pn118_*"]` telemetry keys, and the `_PN118_*` / `_pn118_*` module
+    aliases. `test_legacy_*` below pins all of that, so a later "finish the
+    rename" pass has to break a test rather than break a live deployment.
+
+The FILE NAME stays `test_pn118_logic.py`: answer_rescue.py's own BUG-144 note,
+fixes/test_bug157_autosplit.py and the ops capability ledger all reference it by
+that path.
+
+No GPU, no vllm/torch import, no pytest needed.
+
+Run: python3 fixes/test_pn118_logic.py
 """
 
 import asyncio
@@ -36,11 +56,18 @@ def check(name: str, cond: bool, detail: str = "") -> None:
         FAILURES.append(name)
 
 
+MASTER = "GENESIS_ENABLE_PN123_CLOSEGATE"
+LEGACY_MASTER = "GENESIS_ENABLE_PN118_CLOSEGATE"
+
+
 def reset_env() -> None:
+    # Both spellings, both the master flag and every sub-knob: a leftover
+    # legacy var would silently satisfy a canonical-name test via `_cg`.
     for k in list(os.environ):
-        if k.startswith("GENESIS_PN118") or k == "GENESIS_ENABLE_PN118_CLOSEGATE":
+        if (k.startswith("GENESIS_PN123") or k.startswith("GENESIS_PN118")
+                or k in (MASTER, LEGACY_MASTER)):
             del os.environ[k]
-    # PN101 master OFF so we isolate PN118 behaviour in maybe_rescue_answer.
+    # PN101 master OFF so we isolate PN123 behaviour in maybe_rescue_answer.
     os.environ.pop("GENESIS_ENABLE_PN101_ANSWER_RESCUE", None)
     for k in list(ar._STATS):
         ar._STATS[k] = 0
@@ -212,8 +239,8 @@ def test_disabled():
 def test_early_weak_fires():
     print("\ntruth-table: early close + weak answer → FIRES (enforce)")
     reset_env()
-    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
-    os.environ["GENESIS_PN118_MODE"] = "enforce"
+    os.environ["GENESIS_ENABLE_PN123_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN123_MODE"] = "enforce"
     s = Serving(margin_letters=WEAK, cont_content="Actually the answer is C.")
     res = make_result(content="The answer is B.", spent=1000)  # 1000/8000 = 12.5%
     run(s, Request(budget=8000), res)
@@ -226,8 +253,8 @@ def test_early_weak_fires():
 def test_early_confident_no_fire():
     print("\ntruth-table: early close + confident answer → NO fire")
     reset_env()
-    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
-    os.environ["GENESIS_PN118_MODE"] = "enforce"
+    os.environ["GENESIS_ENABLE_PN123_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN123_MODE"] = "enforce"
     s = Serving(margin_letters=STRONG, cont_content="changed")
     res = make_result(content="The answer is B.", spent=1000)
     run(s, Request(budget=8000), res)
@@ -240,8 +267,8 @@ def test_early_confident_no_fire():
 def test_late_no_fire():
     print("\ntruth-table: late close (spent > FRAC*budget) → NO fire, no self-call")
     reset_env()
-    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
-    os.environ["GENESIS_PN118_MODE"] = "enforce"
+    os.environ["GENESIS_ENABLE_PN123_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN123_MODE"] = "enforce"
     s = Serving(margin_letters=WEAK, cont_content="changed")
     res = make_result(content="The answer is B.", spent=6000)  # 6000/8000 = 75% > 0.6
     run(s, Request(budget=8000), res)
@@ -252,9 +279,9 @@ def test_late_no_fire():
 def test_capbound_no_fire():
     print("\ntruth-table: cap-bound close (no leftover) → NO fire")
     reset_env()
-    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
-    os.environ["GENESIS_PN118_MODE"] = "enforce"
-    os.environ["GENESIS_PN118_FRAC"] = "0.99"  # would pass frac gate; grace must catch it
+    os.environ["GENESIS_ENABLE_PN123_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN123_MODE"] = "enforce"
+    os.environ["GENESIS_PN123_FRAC"] = "0.99"  # would pass frac gate; grace must catch it
     s = Serving(margin_letters=WEAK, cont_content="changed")
     res = make_result(content="The answer is B.", spent=7900)  # 8000-7900=100 < grace 256
     run(s, Request(budget=8000), res)
@@ -265,8 +292,8 @@ def test_capbound_no_fire():
 def test_unbounded_no_fire():
     print("\ntruth-table: no thinking budget → NO fire")
     reset_env()
-    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
-    os.environ["GENESIS_PN118_MODE"] = "enforce"
+    os.environ["GENESIS_ENABLE_PN123_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN123_MODE"] = "enforce"
     s = Serving(margin_letters=WEAK, cont_content="changed")
     run(s, Request(budget=0), make_result(spent=1000))
     check("no fire when unbounded", ar._STATS["pn118_fires"] == 0)
@@ -276,14 +303,14 @@ def test_unbounded_no_fire():
 def test_second_fire_blocked():
     print("\ntruth-table: one fire per request — re-invocation blocked")
     reset_env()
-    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
-    os.environ["GENESIS_PN118_MODE"] = "enforce"
+    os.environ["GENESIS_ENABLE_PN123_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN123_MODE"] = "enforce"
     s = Serving(margin_letters=WEAK, cont_content="Actually the answer is C.")
     res = make_result(spent=1000)
     req = Request(budget=8000)
     run(s, req, res)
     calls_after_first = len(s.calls)
-    run(s, req, res)  # same result object → _pn118_seen guard
+    run(s, req, res)  # same result object → _pn123_seen guard
     check("fired only once", ar._STATS["pn118_fires"] == 1)
     check("no extra self-calls on 2nd pass", len(s.calls) == calls_after_first)
 
@@ -291,8 +318,8 @@ def test_second_fire_blocked():
 def test_tool_and_structured_skip():
     print("\ntruth-table: tools / structured output → NO fire")
     reset_env()
-    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
-    os.environ["GENESIS_PN118_MODE"] = "enforce"
+    os.environ["GENESIS_ENABLE_PN123_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN123_MODE"] = "enforce"
     s = Serving(margin_letters=WEAK, cont_content="changed")
     run(s, Request(budget=8000, tools=[{"type": "function"}]), make_result(spent=1000))
     check("tools → no self-call", len(s.calls) == 0)
@@ -304,8 +331,8 @@ def test_tool_and_structured_skip():
 def test_shadow_mode():
     print("\nshadow mode: computes margin, logs would-fire, changes NOTHING")
     reset_env()
-    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
-    os.environ["GENESIS_PN118_MODE"] = "shadow"
+    os.environ["GENESIS_ENABLE_PN123_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN123_MODE"] = "shadow"
     s = Serving(margin_letters=WEAK, cont_content="changed")
     res = make_result(content="The answer is B.", spent=1000)
     run(s, Request(budget=8000), res)
@@ -319,7 +346,7 @@ def test_shadow_mode():
 def test_shadow_default():
     print("\nshadow is the default mode (enabling master alone does not enforce)")
     reset_env()
-    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"  # no MODE set
+    os.environ["GENESIS_ENABLE_PN123_CLOSEGATE"] = "1"  # no MODE set
     s = Serving(margin_letters=WEAK, cont_content="changed")
     res = make_result(spent=1000)
     run(s, Request(budget=8000), res)
@@ -333,8 +360,8 @@ def test_shadow_default():
 def test_failopen_margin_raise():
     print("\nfail-open: margin echo call raises → original kept")
     reset_env()
-    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
-    os.environ["GENESIS_PN118_MODE"] = "enforce"
+    os.environ["GENESIS_ENABLE_PN123_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN123_MODE"] = "enforce"
     s = Serving(raise_on_margin=RuntimeError("boom"))
     res = make_result(content="The answer is B.", spent=1000)
     run(s, Request(budget=8000), res)
@@ -346,8 +373,8 @@ def test_failopen_margin_raise():
 def test_failopen_cont_raise():
     print("\nfail-open: continuation call raises → original kept")
     reset_env()
-    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
-    os.environ["GENESIS_PN118_MODE"] = "enforce"
+    os.environ["GENESIS_ENABLE_PN123_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN123_MODE"] = "enforce"
     s = Serving(margin_letters=WEAK, raise_on_cont=RuntimeError("boom"))
     res = make_result(content="The answer is B.", spent=1000)
     run(s, Request(budget=8000), res)
@@ -359,8 +386,8 @@ def test_failopen_cont_raise():
 def test_failopen_empty_continuation():
     print("\nfail-open: continuation returns empty → original kept")
     reset_env()
-    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
-    os.environ["GENESIS_PN118_MODE"] = "enforce"
+    os.environ["GENESIS_ENABLE_PN123_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN123_MODE"] = "enforce"
     s = Serving(margin_letters=WEAK, cont_content="", cont_reasoning="")
     res = make_result(content="The answer is B.", spent=1000)
     run(s, Request(budget=8000), res)
@@ -371,8 +398,8 @@ def test_failopen_empty_continuation():
 def test_no_letter_margin_skip():
     print("\nopen-ended answer (no letter mass) → skip, no continuation")
     reset_env()
-    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
-    os.environ["GENESIS_PN118_MODE"] = "enforce"
+    os.environ["GENESIS_ENABLE_PN123_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN123_MODE"] = "enforce"
     s = Serving(margin_letters=[("The", -0.1), ("answer", -2.0)], cont_content="changed")
     res = make_result(content="It is a long prose answer.", spent=1000)
     run(s, Request(budget=8000), res)
@@ -386,8 +413,8 @@ def test_no_letter_margin_skip():
 def test_continuation_budget_and_cue():
     print("\ncontinuation: leftover budget clamped [512,6144] + cue present")
     reset_env()
-    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
-    os.environ["GENESIS_PN118_MODE"] = "enforce"
+    os.environ["GENESIS_ENABLE_PN123_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN123_MODE"] = "enforce"
 
     # leftover = 8000-1000 = 7000 → clamp to 6144
     s = Serving(margin_letters=WEAK, cont_content="Actually C.")
@@ -397,17 +424,17 @@ def test_continuation_budget_and_cue():
     check("total = spent + room(clamped 6144)", cont.thinking_token_budget == 1000 + 6144,
           str(cont.thinking_token_budget))
     txt = cont.messages[-1]["content"]
-    check("cue text present in continuation", ar._PN118_DEFAULT_CUE in txt)
+    check("cue text present in continuation", ar._PN123_DEFAULT_CUE in txt)
     check("resumes inside think (open <think>, no close)",
           txt.startswith("<think>") and "</think>" not in txt)
     check("original think content carried", "Step 1:" in txt)
 
     # leftover small → clamp UP to 512.  spent=4700, budget=5000, frac 0.99, grace 50
     reset_env()
-    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
-    os.environ["GENESIS_PN118_MODE"] = "enforce"
-    os.environ["GENESIS_PN118_FRAC"] = "0.99"
-    os.environ["GENESIS_PN118_GRACE"] = "50"
+    os.environ["GENESIS_ENABLE_PN123_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN123_MODE"] = "enforce"
+    os.environ["GENESIS_PN123_FRAC"] = "0.99"
+    os.environ["GENESIS_PN123_GRACE"] = "50"
     s2 = Serving(margin_letters=WEAK, cont_content="Actually C.")
     run(s2, Request(budget=5000), make_result(spent=4700))
     check("total = spent + room(min 512)",
@@ -416,8 +443,8 @@ def test_continuation_budget_and_cue():
 
     # mid leftover unclamped: 8000-3000 = 5000
     reset_env()
-    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
-    os.environ["GENESIS_PN118_MODE"] = "enforce"
+    os.environ["GENESIS_ENABLE_PN123_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN123_MODE"] = "enforce"
     s3 = Serving(margin_letters=WEAK, cont_content="Actually C.")
     run(s3, Request(budget=8000), make_result(spent=3000))
     check("total = spent + mid room (3000+5000)",
@@ -426,11 +453,11 @@ def test_continuation_budget_and_cue():
 
 
 def test_custom_cue_env():
-    print("\ncustom cue via GENESIS_PN118_CUE")
+    print("\ncustom cue via GENESIS_PN123_CUE")
     reset_env()
-    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
-    os.environ["GENESIS_PN118_MODE"] = "enforce"
-    os.environ["GENESIS_PN118_CUE"] = "Hold on, let me reconsider the other options."
+    os.environ["GENESIS_ENABLE_PN123_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN123_MODE"] = "enforce"
+    os.environ["GENESIS_PN123_CUE"] = "Hold on, let me reconsider the other options."
     s = Serving(margin_letters=WEAK, cont_content="Actually C.")
     run(s, Request(budget=8000), make_result(spent=1000))
     check("custom cue used",
@@ -449,11 +476,11 @@ def test_reasoning_tokens_fallback():
           ar._reasoning_tokens(res2, "x" * 400) == 2222)
 
 
-# ─── PN118 c_mean gate (engine→serving bridge) ───────────────────────────────
-# GENESIS_PN118_GATE = margin (default) | cmean | both. cmean reads pn112's
+# ─── PN123 c_mean gate (engine→serving bridge) ───────────────────────────────
+# GENESIS_PN123_GATE = margin (default) | cmean | both. cmean reads pn112's
 # exported rolling confidence from the /tmp bridge file instead of the letter-
 # margin echo self-call. Calibration: wrong items c_mean ~9.16 vs 11.37 right;
-# threshold GENESIS_PN118_CMEAN default 10.0 → fire (rescue) iff c_last < 10.0.
+# threshold GENESIS_PN123_CMEAN default 10.0 → fire (rescue) iff c_last < 10.0.
 
 import json as _json  # noqa: E402
 import time as _time  # noqa: E402
@@ -474,9 +501,9 @@ def _write_conf(entries: dict) -> str:
 
 
 def _cmean_env(gate="cmean", mode="enforce"):
-    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
-    os.environ["GENESIS_PN118_MODE"] = mode
-    os.environ["GENESIS_PN118_GATE"] = gate
+    os.environ["GENESIS_ENABLE_PN123_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN123_MODE"] = mode
+    os.environ["GENESIS_PN123_GATE"] = gate
 
 
 def test_cmean_below_fires_no_echo():
@@ -522,7 +549,7 @@ def test_cmean_stale_no_fire():
     print("\ncmean gate: stale entry (ts older than TTL) → NO fire")
     reset_env()
     _cmean_env()
-    os.environ["GENESIS_PN118_CMEAN_TTL_S"] = "600"
+    os.environ["GENESIS_PN123_CMEAN_TTL_S"] = "600"
     _write_conf({"chatcmpl-3": (9.0, 128, 1200.0)})  # 1200s old > 600 TTL
     s = Serving(cont_content="changed")
     res = make_result(content="The answer is B.", spent=1000, rid="chatcmpl-3")
@@ -535,7 +562,7 @@ def test_cmean_minn_no_fire():
     print("\ncmean gate: n < MINN (too few samples) → NO fire")
     reset_env()
     _cmean_env()
-    os.environ["GENESIS_PN118_CMEAN_MINN"] = "64"
+    os.environ["GENESIS_PN123_CMEAN_MINN"] = "64"
     _write_conf({"chatcmpl-4": (9.0, 40, 1.0)})  # 40 < 64
     s = Serving(cont_content="changed")
     res = make_result(content="The answer is B.", spent=1000, rid="chatcmpl-4")
@@ -619,8 +646,8 @@ def test_both_gate_and_semantics():
 def test_margin_mode_ignores_conf_file():
     print("\ndefault margin gate: conf file never read (echo path unchanged)")
     reset_env()
-    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
-    os.environ["GENESIS_PN118_MODE"] = "enforce"  # no GATE set → margin default
+    os.environ["GENESIS_ENABLE_PN123_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN123_MODE"] = "enforce"  # no GATE set → margin default
     _write_conf({"chatcmpl-10": (11.4, 128, 1.0)})  # confident — would block cmean
     s = Serving(margin_letters=WEAK, cont_content="Actually C.")  # but margin is weak
     res = make_result(content="The answer is B.", spent=1000, rid="chatcmpl-10")
@@ -630,8 +657,8 @@ def test_margin_mode_ignores_conf_file():
     check("margin gate did the echo (2 calls)", len(s.calls) == 2, f"{len(s.calls)}")
 
 
-# ─── PN118 adjudicated rerun action (Fable R2) ───────────────────────────────
-# GENESIS_PN118_ACTION = continue (default) | rerun. rerun does ONE fresh
+# ─── PN123 adjudicated rerun action (Fable R2) ───────────────────────────────
+# GENESIS_PN123_ACTION = continue (default) | rerun. rerun does ONE fresh
 # v5-shape solve of the original request and keeps the original answer unless
 # the rerun DISAGREES and its own c_last (exported by its engine pass) is >= the
 # original's. gate=cmean so no margin echo — only the rerun self-call fires.
@@ -654,11 +681,11 @@ class RerunServing:
 
 
 def _rerun_env(mode="enforce"):
-    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
-    os.environ["GENESIS_PN118_MODE"] = mode
-    os.environ["GENESIS_PN118_GATE"] = "cmean"
-    os.environ["GENESIS_PN118_ACTION"] = "rerun"
-    os.environ["GENESIS_PN118_RERUN_CONF_WAIT_S"] = "0"
+    os.environ["GENESIS_ENABLE_PN123_CLOSEGATE"] = "1"
+    os.environ["GENESIS_PN123_MODE"] = mode
+    os.environ["GENESIS_PN123_GATE"] = "cmean"
+    os.environ["GENESIS_PN123_ACTION"] = "rerun"
+    os.environ["GENESIS_PN123_RERUN_CONF_WAIT_S"] = "0"
 
 
 def test_action_default_is_continue():
@@ -672,14 +699,14 @@ def test_action_default_is_continue():
     check("fired", ar._STATS["pn118_fires"] == 1, str(ar._STATS))
     txt = s.calls[-1].messages[-1]["content"]
     check("continue path: <think> prefill with cue", txt.startswith("<think>")
-          and ar._PN118_DEFAULT_CUE in txt, txt[:40])
+          and ar._PN123_DEFAULT_CUE in txt, txt[:40])
 
 
 def test_rerun_request_shape():
     print("\nrerun: fresh solve — original messages, v5 forced, markers, budget")
     reset_env()
     _rerun_env()
-    os.environ["GENESIS_PN118_RERUN_BUDGET"] = "10240"
+    os.environ["GENESIS_PN123_RERUN_BUDGET"] = "10240"
     _write_conf({"chatcmpl-o": (9.0, 128, 1.0), "chatcmpl-rr": (12.0, 20, 0.0)})
     s = RerunServing(rerun_content="Actually the answer is C.", rerun_rid="chatcmpl-rr")
     res = make_result(content="The answer is B.", spent=1000, rid="chatcmpl-o")
@@ -688,7 +715,8 @@ def test_rerun_request_shape():
     ctk = syn.chat_template_kwargs
     check("v5 forced via ctk key", ctk.get("pn102_force_v5") is True, str(ctk))
     check("PN101 marker carried (no re-entry)", ctk.get("pn101_internal") is True)
-    check("PN118 marker carried (no re-entry)", ctk.get("pn118_internal") is True)
+    # ctk marker value frozen on the old spelling — see the BUG-144 note.
+    check("PN123 marker carried (no re-entry)", ctk.get("pn118_internal") is True)
     check("rerun budget = 10240", syn.thinking_token_budget == 10240,
           str(syn.thinking_token_budget))
     check("original messages, NO <think> prefill",
@@ -712,7 +740,7 @@ def test_rerun_agree_keeps_original():
 def test_rerun_disagree_more_confident_swaps():
     print("\nrerun: DISAGREE + rerun more confident → SWAP")
     reset_env()
-    os.environ["GENESIS_PN118_ADJUDICATE"] = "confidence"
+    os.environ["GENESIS_PN123_ADJUDICATE"] = "confidence"
     _rerun_env()
     # orig c_last 9.0, rerun c_last 12.0 (>= orig) → prefer rerun
     _write_conf({"chatcmpl-o": (9.0, 128, 1.0), "chatcmpl-rr": (12.0, 20, 0.0)})
@@ -728,7 +756,7 @@ def test_rerun_disagree_more_confident_swaps():
 def test_rerun_disagree_less_confident_keeps():
     print("\nrerun: DISAGREE + rerun less confident → keep original")
     reset_env()
-    os.environ["GENESIS_PN118_ADJUDICATE"] = "confidence"
+    os.environ["GENESIS_PN123_ADJUDICATE"] = "confidence"
     _rerun_env()
     _write_conf({"chatcmpl-o": (9.0, 128, 1.0), "chatcmpl-rr": (7.0, 20, 0.0)})
     s = RerunServing(rerun_content="Actually the answer is C.", rerun_rid="chatcmpl-rr")
@@ -742,7 +770,7 @@ def test_rerun_disagree_less_confident_keeps():
 def test_rerun_confmiss_keeps():
     print("\nrerun: DISAGREE but rerun conf entry missing → keep original")
     reset_env()
-    os.environ["GENESIS_PN118_ADJUDICATE"] = "confidence"
+    os.environ["GENESIS_PN123_ADJUDICATE"] = "confidence"
     _rerun_env()
     # no entry for chatcmpl-rr → conf lookup miss
     _write_conf({"chatcmpl-o": (9.0, 128, 1.0)})
@@ -795,13 +823,132 @@ def test_rerun_shadow_no_call():
 
 def test_answer_key_extraction():
     print("\nanswer-key: last letter-answer wins; prose falls back to normalized text")
-    check("letter extracted", ar._pn118_answer_key("So the answer is B.") == "B")
+    check("letter extracted", ar._pn123_answer_key("So the answer is B.") == "B")
     check("last letter wins",
-          ar._pn118_answer_key("First A, but actually the answer is D.") == "D")
+          ar._pn123_answer_key("First A, but actually the answer is D.") == "D")
     check("prose fallback equality",
-          ar._pn118_answer_key("It is blue.") == ar._pn118_answer_key(" it  IS blue. "))
+          ar._pn123_answer_key("It is blue.") == ar._pn123_answer_key(" it  IS blue. "))
     check("different prose differ",
-          ar._pn118_answer_key("blue") != ar._pn118_answer_key("red"))
+          ar._pn123_answer_key("blue") != ar._pn123_answer_key("red"))
+
+
+def test_rerun_disagree_default_rerun_wins():
+    print("\nrerun disagree: default rule = rerun wins (R1 asymmetric escalation)")
+    reset_env()
+    os.environ[MASTER] = "1"
+    os.environ["GENESIS_PN123_MODE"] = "enforce"
+    os.environ["GENESIS_PN123_ACTION"] = "rerun"   # no ADJUDICATE → rerun_wins
+    # margin gate (default): echo self-call, then the rerun self-call.
+    s1 = Serving(margin_letters=WEAK, cont_content="The answer is (C).")
+    res = make_result(spent=500, content="The answer is (B).")
+    run(s1, Request(budget=3000), res)
+    check("swap happened without any conf lookup",
+          "(C)" in (res.choices[0].message.content or ""),
+          str(res.choices[0].message.content)[:60])
+    check("swap counted", ar._STATS.get("pn118_rerun_swap") == 1, str(ar._STATS))
+    # rerun_wins is an escalation, not a confidence fire — it books attempts,
+    # not fires (only the confidence-adjudicated swap increments pn118_fires).
+    check("attempt counted", ar._STATS["pn118_attempts"] == 1, str(ar._STATS))
+    check("echo + rerun = 2 self-calls", len(s1.calls) == 2, f"{len(s1.calls)}")
+
+
+# ─── legacy PN118 aliases — BUG-144 back-compat, deliberately kept ───────────
+# The rename is PARTIAL on purpose: live composes/env set the old names and
+# three wire strings are frozen on the old spelling. Everything below asserts
+# the OLD spelling still drives the NEW code, so a later "finish the rename"
+# pass has to break a test rather than break a deployment.
+
+
+def test_legacy_master_and_mode_still_work():
+    print("\nlegacy: GENESIS_ENABLE_PN118_CLOSEGATE + GENESIS_PN118_MODE still fire")
+    reset_env()
+    os.environ[LEGACY_MASTER] = "1"                 # canonical NOT set
+    os.environ["GENESIS_PN118_MODE"] = "enforce"    # canonical NOT set
+    s = Serving(margin_letters=WEAK, cont_content="Actually the answer is C.")
+    res = make_result(content="The answer is B.", spent=1000)
+    run(s, Request(budget=8000), res)
+    check("legacy names fire the gate", ar._STATS["pn118_fires"] == 1, str(ar._STATS))
+    check("two self-calls (margin + continuation)", len(s.calls) == 2, f"{len(s.calls)}")
+    check("answer spliced from continuation",
+          res.choices[0].message.content == "Actually the answer is C.")
+
+
+def test_legacy_master_off_value_respected():
+    print("\nlegacy: GENESIS_ENABLE_PN118_CLOSEGATE=0 keeps the gate OFF")
+    reset_env()
+    os.environ[LEGACY_MASTER] = "0"
+    os.environ["GENESIS_PN123_MODE"] = "enforce"
+    s = Serving(margin_letters=WEAK, cont_content="changed")
+    res = make_result(content="The answer is B.", spent=1000)
+    run(s, Request(budget=8000), res)
+    check("legacy '0' is honoured as OFF", ar._STATS["pn118_fires"] == 0)
+    check("no self-call", len(s.calls) == 0, f"{len(s.calls)}")
+
+
+def test_canonical_master_wins_over_legacy():
+    print("\nprecedence: canonical master beats a contradicting legacy master")
+    reset_env()
+    os.environ[MASTER] = "0"          # canonical says OFF
+    os.environ[LEGACY_MASTER] = "1"   # legacy says ON — canonical is checked first
+    os.environ["GENESIS_PN123_MODE"] = "enforce"
+    s = Serving(margin_letters=WEAK, cont_content="changed")
+    res = make_result(content="The answer is B.", spent=1000)
+    run(s, Request(budget=8000), res)
+    check("canonical OFF wins", ar._STATS["pn118_fires"] == 0)
+    check("no self-call", len(s.calls) == 0, f"{len(s.calls)}")
+
+
+def test_legacy_subknob_and_canonical_precedence():
+    print("\nlegacy sub-knob: GENESIS_PN118_CUE honoured; canonical wins when both set")
+    reset_env()
+    os.environ[MASTER] = "1"
+    os.environ["GENESIS_PN118_MODE"] = "enforce"
+    os.environ["GENESIS_PN118_CUE"] = "LEGACY CUE."
+    s = Serving(margin_letters=WEAK, cont_content="Actually C.")
+    run(s, Request(budget=8000), make_result(spent=1000))
+    check("legacy cue used", "LEGACY CUE." in s.calls[-1].messages[-1]["content"])
+
+    reset_env()
+    os.environ[MASTER] = "1"
+    os.environ["GENESIS_PN123_MODE"] = "enforce"
+    os.environ["GENESIS_PN118_CUE"] = "LEGACY CUE."
+    os.environ["GENESIS_PN123_CUE"] = "CANONICAL CUE."
+    s2 = Serving(margin_letters=WEAK, cont_content="Actually C.")
+    run(s2, Request(budget=8000), make_result(spent=1000))
+    txt = s2.calls[-1].messages[-1]["content"]
+    check("canonical cue wins over legacy",
+          "CANONICAL CUE." in txt and "LEGACY CUE." not in txt, txt[:80])
+
+
+def test_legacy_gate_knobs_drive_cmean():
+    print("\nlegacy: GENESIS_PN118_GATE/_CMEAN* still select the cmean discriminator")
+    reset_env()
+    os.environ[LEGACY_MASTER] = "1"
+    os.environ["GENESIS_PN118_MODE"] = "enforce"
+    os.environ["GENESIS_PN118_GATE"] = "cmean"
+    os.environ["GENESIS_PN118_CMEAN"] = "10.0"
+    _write_conf({"chatcmpl-legacy": (9.0, 128, 1.0)})
+    s = Serving(margin_letters=STRONG, cont_content="Actually the answer is C.")
+    res = make_result(content="The answer is B.", spent=1000, rid="chatcmpl-legacy")
+    run(s, Request(budget=8000), res)
+    check("legacy GATE=cmean fired", ar._STATS["pn118_fires"] == 1, str(ar._STATS))
+    check("cmean path: continuation only, no echo", len(s.calls) == 1, f"{len(s.calls)}")
+
+
+def test_frozen_wire_names():
+    print("\nfrozen wire names: module aliases, ctk marker, _STATS keys")
+    check("_PN118_MARKER aliases _PN123_MARKER", ar._PN118_MARKER is ar._PN123_MARKER)
+    check("ctk marker value frozen as pn118_internal",
+          ar._PN123_MARKER == "pn118_internal", ar._PN123_MARKER)
+    check("_PN118_DEFAULT_CUE alias", ar._PN118_DEFAULT_CUE is ar._PN123_DEFAULT_CUE)
+    check("_PN118_LETTERS alias", ar._PN118_LETTERS is ar._PN123_LETTERS)
+    check("_pn118_answer_key alias", ar._pn118_answer_key is ar._pn123_answer_key)
+    check("_pn118_master_on alias", ar._pn118_master_on is ar._pn123_master_on)
+    for key in ("pn118_skips", "pn118_shadow_would_fire", "pn118_attempts",
+                "pn118_fires", "pn118_errors"):
+        check(f"_STATS key {key} frozen", key in ar._STATS, str(sorted(ar._STATS)))
+    check("no pn123_* telemetry key leaked in",
+          not any(k.startswith("pn123_") for k in ar._STATS), str(sorted(ar._STATS)))
 
 
 def main():
@@ -823,28 +970,22 @@ def main():
               test_rerun_disagree_more_confident_swaps,
               test_rerun_disagree_less_confident_keeps, test_rerun_confmiss_keeps,
               test_rerun_failopen, test_rerun_empty_keeps, test_rerun_shadow_no_call,
-              test_answer_key_extraction):
+              test_rerun_disagree_default_rerun_wins,
+              test_answer_key_extraction,
+              # BUG-144 back-compat — the legacy PN118 spellings stay tested.
+              test_legacy_master_and_mode_still_work,
+              test_legacy_master_off_value_respected,
+              test_canonical_master_wins_over_legacy,
+              test_legacy_subknob_and_canonical_precedence,
+              test_legacy_gate_knobs_drive_cmean,
+              test_frozen_wire_names):
         t()
     print()
     if FAILURES:
         print(f"FAILED ({len(FAILURES)}): {', '.join(FAILURES)}")
         sys.exit(1)
-    print("ALL PN118 TESTS PASSED")
+    print("ALL PN123 TESTS PASSED")
 
 
 if __name__ == "__main__":
     main()
-
-
-def test_rerun_disagree_default_rerun_wins():
-    print("\nrerun disagree: default rule = rerun wins (R1 asymmetric escalation)")
-    reset_env()
-    os.environ["GENESIS_ENABLE_PN118_CLOSEGATE"] = "1"
-    os.environ["GENESIS_PN118_MODE"] = "enforce"
-    os.environ["GENESIS_PN118_ACTION"] = "rerun"
-    s1 = Serving(margin_letters=WEAK, rerun_content="The answer is (C).")
-    res = make_result(spent=500, content="The answer is (B).")
-    fired = run(s1, Request(budget=3000), res)
-    check("swap happened without any conf lookup",
-          "(C)" in (res.choices[0].message.content or ""),
-          str(res.choices[0].message.content)[:60])

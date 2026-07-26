@@ -20,6 +20,18 @@ gate. Three rules, one per failure mode the audit found:
      the BUG-122 shape, where a patch gates on the wrong var and still
      reports "applied".
 
+  D. **No CROSS-LANE env_flag collision.** Rule A is per-lane, so it cannot
+     see the failure the audit actually feared: two *different* patches, in
+     *different* lanes, canonically declaring one flag. That is the BUG-122
+     shape with teeth — the operator sets one var and two unrelated patches
+     arm. Cross-lane reuse of a flag by the SAME id is not a collision (lane-2
+     is a vendored copy of that patch and `sndr_lane.apply_policy` step 1
+     suppresses it); reuse by different ids is. The two pre-existing pairs are
+     frozen into `LANE2_DUP_FLAG_BASELINE` alongside the per-lane ones.
+     Alias-level couplings (a lane-1 flag listed in an unrelated lane-2 row's
+     `env_flag_aliases`) are recorded as notes with their shadow status, since
+     splitting one is a behaviour change, not a naming fix.
+
   C. **Recorder-legal id shape.** `ops/vllm-patch-guard/vllm-patch-record.py`
      extracts dispatcher ids with ``[A-Za-z]+\\d+[a-zA-Z]*`` and house slugs
      with ``^\\[([a-z0-9_-]+)\\]``. An id that does not FULL-match its lane's
@@ -113,6 +125,28 @@ HOUSE_IDS_OUTSIDE_FIXES: dict[str, tuple[str, str]] = {
         "answer_rescue.py",
         "GENESIS_ENABLE_PN102_CONTRACT",
     ),
+    # answer_rescue.py Leg 3 — the premature-close gate. Renumbered
+    # PN118 -> PN123 on 2026-07-26 (BUG-144): lane-2 owns a bare `PN118` row
+    # plus PN118_V2_MD5_* which the boot recorder truncates to `PN118`, so the
+    # old number could never be observed distinctly in `vllmops.boot_patches`.
+    # PN123 is the canonical id and flag.
+    "PN123": (
+        "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/middleware/"
+        "answer_rescue.py",
+        "GENESIS_ENABLE_PN123_CLOSEGATE",
+    ),
+    # The old number stays REGISTERED, deliberately, because the rename is
+    # partial by design: `GENESIS_ENABLE_PN118_CLOSEGATE` is still a working
+    # legacy alias, so the house really does still claim the number PN118.
+    # Keeping the row is what makes two things stay true:
+    #   * rule B keeps pairing house PN118 with lane-2's PN118 and reporting it
+    #     as guarded by `_HOUSE_COLLIDING_IDS` (dropping the row would instead
+    #     emit a "no house patch claims that number — remove the entry" note,
+    #     which would be wrong advice while the alias is live), and
+    #   * the marker check pins the alias itself: if the legacy flag is ever
+    #     deleted from answer_rescue.py this row goes red, which is the signal
+    #     to retire the `_HOUSE_COLLIDING_IDS["PN118"]` guard in the same edit.
+    # This is an alias registration, not a second patch: same file, same leg.
     "PN118": (
         "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/middleware/"
         "answer_rescue.py",
@@ -308,6 +342,111 @@ def _check_id_shape(
         )
 
 
+def _house_declared_flags(fixes_dir: Path) -> dict[str, str]:
+    """Flags a house `/fixes` patch declares as ITS OWN gate → declaring id.
+
+    A house patch mentions plenty of flags it merely READS (patch_pn100 reads
+    `GENESIS_ENABLE_PN16_LAZY_REASONER` to see whether the lazy reasoner is on).
+    Only a flag whose id segment matches the patch's own id token is a
+    declaration — `patch_pn122_structured_force_guard.py` declaring
+    `GENESIS_ENABLE_PN122_STRUCTURED_FORCE_GUARD`. That is exactly the segment
+    a cross-lane id collision puts at risk, so it is the one rule D must see.
+    """
+    out: dict[str, str] = {}
+    for path in sorted(fixes_dir.glob("patch_*.py")):
+        m = HOUSE_ID_TOKEN.match(path.stem[len("patch_"):])
+        if not m:
+            continue
+        pid = m.group(1).upper()
+        src = path.read_text(encoding="utf-8")
+        own = re.compile(
+            r"\b(?:GENESIS|SNDR)_ENABLE_" + re.escape(pid) + r"(?:_[A-Z0-9_]+)?\b"
+        )
+        for flag in sorted(set(own.findall(src))):
+            out.setdefault(flag, pid)
+    return out
+
+
+def _check_cross_lane_env_flags(
+    lane1: dict[str, dict[str, Any]], lane2: dict[str, dict[str, Any]],
+    house_flags: dict[str, str], report: LintReport,
+    baseline: frozenset = frozenset(),
+) -> None:
+    """Rule D — one env_flag canonically declared by two DIFFERENT ids.
+
+    Same id in both lanes is the vendored-copy case and is fine. Different ids
+    means one operator switch arms two unrelated patches.
+    """
+    canon: dict[str, set[tuple[str, str]]] = {}
+    alias: dict[str, set[tuple[str, str]]] = {}
+    for lane, registry in (("lane-1", lane1), ("lane-2", lane2)):
+        for pid, meta in registry.items():
+            flag = meta.get("env_flag")
+            if isinstance(flag, str) and flag:
+                canon.setdefault(flag, set()).add((lane, pid))
+            for a in _coerce_list(meta.get("env_flag_aliases")):
+                alias.setdefault(a, set()).add((lane, pid))
+    for flag, pid in house_flags.items():
+        canon.setdefault(flag, set()).add(("/fixes", pid))
+
+    for flag, rows in sorted(canon.items()):
+        ids = sorted({pid for _, pid in rows})
+        lanes = {lane for lane, _ in rows}
+        # Same id in lane-1 AND lane-2 is the vendored-copy case and is fine.
+        # A house patch is NEVER a vendored copy of a dispatcher patch, so
+        # house-meets-lane on one flag is a collision even at the same number
+        # — otherwise an id already parked in `_HOUSE_COLLIDING_IDS` (rule B
+        # satisfied) could still adopt the lane's exact flag unnoticed, which
+        # is the very convergence the audit named.
+        house_meets_lane = "/fixes" in lanes and len(lanes) > 1
+        if len(ids) < 2 and not house_meets_lane:
+            continue
+        if (flag, tuple(ids)) in baseline:
+            report.notes.append(
+                f"[cross-lane] env_flag {flag} canonically declared by "
+                f"{ids} — frozen baseline (vendored tree, not renameable)"
+            )
+            continue
+        where = sorted(f"{lane}:{pid}" for lane, pid in rows)
+        why = (
+            "a house /fixes patch and a dispatcher-lane patch declare it "
+            "canonically — house is never a vendored copy, so these are two "
+            "unrelated patches on one switch"
+            if house_meets_lane else
+            f"{len(ids)} different ids declare it canonically across lanes"
+        )
+        report.violations.append(
+            f"[cross-lane] DUPLICATE env_flag {flag!r} ({', '.join(where)}): "
+            f"{why} — the BUG-122 shape, where one patch gates on the wrong "
+            f"var and still reports 'applied'. Give the newer patch a flag "
+            f"carrying its own id, or fold it into the other as an "
+            f"`env_flag_aliases` entry so the coupling is declared."
+        )
+
+    # Alias-level couplings: recorded, not failed. Splitting one changes
+    # behaviour (audit §4) and needs a bench, so the gate only keeps them visible.
+    lane1_ids, lane2_ids = set(lane1), set(lane2)
+    for flag, rows in sorted(alias.items()):
+        holders = {pid for _, pid in rows} | {
+            pid for _, pid in canon.get(flag, set())
+        }
+        if len(holders) < 2:
+            continue
+        for lane, pid in sorted(rows):
+            if lane != "lane-2" or pid in canon.get(flag, set()):
+                continue
+            shared = pid in lane1_ids and pid in lane2_ids
+            report.notes.append(
+                f"[cross-lane] {flag} is an alias on lane-2 {pid} while "
+                f"{sorted(holders - {pid})} declare it canonically — "
+                + ("lane-2 side is a SHARED id, suppressed by "
+                   "apply_policy step 1, so lane-1 stays authoritative"
+                   if shared else
+                   "lane-2 side is NET-NEW and NOT suppressed: setting the "
+                   "flag arms BOTH patches")
+            )
+
+
 def _check_cross_lane(
     house_ids: set[str], lane1_ids: set[str], lane2_ids: set[str],
     house_colliding: set[str], report: LintReport,
@@ -432,6 +571,14 @@ def run(genesis_root: Optional[Path] = None) -> LintReport:
         for pid, (rel, marker) in sorted(HOUSE_IDS_OUTSIDE_FIXES.items()):
             target = (repo_root / rel) if repo_root else None
             if target is None or not target.is_file():
+                # In-container the genesis tree is overlaid onto site-packages
+                # and `/fixes` is a bind-mount, so `repo_root` is `/` and the
+                # repo-relative path resolves nowhere. Re-anchor on the genesis
+                # package itself before calling the table stale.
+                _, _, tail = rel.partition("_genesis/")
+                if tail and (gen / tail).is_file():
+                    target = gen / tail
+            if target is None or not target.is_file():
                 report.violations.append(
                     f"[/fixes] HOUSE_IDS_OUTSIDE_FIXES[{pid}] points at "
                     f"{rel} which does not exist — update the table."
@@ -450,6 +597,13 @@ def run(genesis_root: Optional[Path] = None) -> LintReport:
     _check_cross_lane(
         report.house_ids, report.lane1_ids, report.lane2_ids,
         house_colliding, report,
+    )
+
+    # ── rule D — cross-lane env_flag collisions ──────────────────────────
+    _check_cross_lane_env_flags(
+        lane1, lane2,
+        _house_declared_flags(fixes_dir) if fixes_dir is not None else {},
+        report, baseline=LANE2_DUP_FLAG_BASELINE,
     )
 
     # ── guard-table consistency ──────────────────────────────────────────

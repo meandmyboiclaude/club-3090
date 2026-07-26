@@ -138,10 +138,23 @@ _SUB_PATCH_RE = re.compile(r"sub-patch ['\"]([^'\"]+)['\"]")
 # model_config (grepped), so no boot ever resolved through it. Rule B in
 # patch_id_lint is the safety net: if a house patch ever re-claims a bare
 # PN79, the lint FAILS (not notes) and tells you to re-add it here.
+#
+# PN122 / PN129 added 2026-07-26 (BUG-133). Two house patches minted that day —
+# fixes/patch_pn122_structured_force_guard.py (03:48) and
+# fixes/patch_pn129_trace_finish_reason_zero_output.py (03:52) — took numbers
+# lane-2 already holds (PN122 = CG dispatch trace, renamed there 2026-05-14;
+# PN129 = slot-mapping warmup, live via GENESIS_ENABLE_PN129_SLOT_MAPPING_WARMUP
+# in 5 composes). Neither is an EXACT env collision — the descriptive suffixes
+# differ and boot_patches keys house rows by log slug, not by id — so this is
+# the same latent shape as the six 2026-07-25 audit rows above, and gets the
+# same treatment: the S-alias, not a rename. Renaming the house side (H122/H129,
+# the H119 precedent) would have to edit the entrypoints in endgame8020.yml and
+# tcbench8021.yml, which is a larger blast radius than the risk warrants.
 _HOUSE_COLLIDING_IDS = {
     "PN71", "PN72", "PN73", "PN80", "PN82", "PN90", "PN91", "PN92",
     "PN95", "PN96",
     "PN102", "PN104", "PN105", "PN106", "PN108", "PN118",
+    "PN122", "PN129",
 }
 
 # Shared ids that LANE-1 hard-owns and applies (its wiring is the live form
