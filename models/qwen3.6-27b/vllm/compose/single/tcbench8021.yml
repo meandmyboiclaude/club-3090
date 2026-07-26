@@ -328,17 +328,23 @@ services:
       # [cudagraph 2026-06-26] capture-safety for cudagraphs + MTP + TQ3 (+ PN79 fix in entrypoint):
       - GENESIS_ENABLE_P66_CUDAGRAPH_SIZE_FILTER=1
       # [endgame FULL_AND_PIECEWISE cluster — Sander v12] PN125 flips cudagraph_mode
-      # to FULL_AND_PIECEWISE (attn FULL, GDN piecewise); warmups pre-compile every
-      # JIT kernel so FULL capture never hits an uncompiled kernel (the historical crash);
+      # to FULL_AND_PIECEWISE (attn FULL, GDN piecewise);
       # PN358 refreshes forward-ctx tensors before replay (MTP correctness).
+      # [2026-07-26] The JIT/decode-warmup family that used to sit here — PN126,
+      # PN128, PN129, PN130, PN364, PN522 — was RETIRED (exec-discard triage,
+      # BUG-128). Their env lines are removed rather than commented because a
+      # retired id skips regardless: each module's apply() returns "skipped" on
+      # its first statement unless GENESIS_ALLOW_RETIRED is truthy, and that is
+      # off here (line ~494). Confirmed on the live boot of this file — the
+      # dispatcher logged SKIP ... LIFECYCLE: lifecycle=retired for all six with
+      # the flags still set to 1. Nothing else reads those names: the only other
+      # hits are registry env_flag metadata, dispatch docstrings, and
+      # composes_with edges consumed by retire_impact.py (an analysis tool, not
+      # a boot path). Removing them only drops a dead "we enable these" signal.
+      # NOTE: PN125 keeps FULL capture WITHOUT those warmups now. That is the
+      # shipped, benched configuration — do not re-add a warmup to "protect" it.
       - GENESIS_ENABLE_PN125_HYBRID_FULL_AND_PIECEWISE=1
-      - GENESIS_ENABLE_PN126_V1_DECODE_WARMUP=1
-      - GENESIS_ENABLE_PN128_SPEC_DECODE_WARMUP=1
-      - GENESIS_ENABLE_PN129_SLOT_MAPPING_WARMUP=1
-      - GENESIS_ENABLE_PN130_TQ_DECODE_WARMUP=1
-      - GENESIS_ENABLE_PN364_HYBRID_GDN_WARMUP=1
       - GENESIS_ENABLE_PN521_TQ_RAW_TAIL_VERIFY=1
-      - GENESIS_ENABLE_PN522_TQ_RAW_TAIL_WARMUP=1
       - GENESIS_ENABLE_PN358_FULL_CG_CONTEXT_REFRESH=1
       - GENESIS_PN358_MODE=fallback
       - GENESIS_ENABLE_P78_TOLIST_CAPTURE_GUARD=1
