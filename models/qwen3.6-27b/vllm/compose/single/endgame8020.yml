@@ -626,6 +626,16 @@ services:
         # inert unless GENESIS_ENABLE_PR44812_TOOL_GUARD=1. Runs after the
         # PN112 patch (shares the holder file; anchors verified disjoint).
         python3 /fixes/patch_pr44812_tool_guard.py
+        # [2026-07-26 leak-path audit L6] PN122: the budget holder writes the
+        # forced </think> at +1e9 AFTER apply_grammar_bitmask, so it overrides
+        # the xgrammar mask and can emit an off-grammar token into the middle
+        # of tool-call arguments. PR44812 above only covers Qwen3's literal
+        # <tool_call>; guided_json / response_format never emit it. DARK by
+        # default: inert unless GENESIS_ENABLE_PN122_STRUCTURED_FORCE_GUARD=1.
+        # MUST run before patch_pn114_forced_span.py (PN114 graft F2 rewrites
+        # this patch's anchor; reversed order exits 1). See
+        # ~/shared/AUDIT-leak-paths-20260726.md and fixes/test_pn122_logic.py.
+        python3 /fixes/patch_pn122_structured_force_guard.py
         # [2026-07-23 ultra-review #1, session-4 fix wave 59fc884d] sync_batch
         # move/swap state-leak fix — pop-both stock parity. Prod-relevant.
         python3 /fixes/patch_holder_syncbatch_fix.py
