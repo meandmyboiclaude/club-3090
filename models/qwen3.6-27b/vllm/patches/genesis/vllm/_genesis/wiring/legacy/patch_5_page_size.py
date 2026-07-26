@@ -101,6 +101,24 @@ UPSTREAM_DRIFT_MARKERS = [
     # per-group block pools — would skip page unification entirely.
     "_has_mixed_mamba_attention",
     "mamba_num_blocks",
+    # 2026-07-26 boot triage: the real upstream resolution shipped in a
+    # different shape than the two guesses above. `unify_kv_cache_spec_page_
+    # size` now pads rather than fails for the two cases P5 existed to cover —
+    # MambaSpec pages (`replace(layer_spec, page_size_padded=max_page_size)`)
+    # and attention layers whose page does not divide the max but whose
+    # backend opts in via `AttentionSpec.indexes_kv_by_block_stride`. Verified
+    # present (count == 1) on cherrymax-1757 AND on both rollback pins
+    # dev1060cherry-20260713 / dev1474cherry-1711, where P5's `_BASELINE_FN`
+    # anchor already matched 0 times — i.e. P5 has been inert on every pin we
+    # can boot, and this marker only makes the boot log say so honestly
+    # ("upstream_merged" instead of two "anchor not found" lines plus
+    # "no_applicable_sub_patches"). Behaviourally a no-op.
+    #
+    # RESIDUAL GAP (not covered upstream, left as a tracker item): a layer
+    # whose page is indivisible AND whose backend does NOT set
+    # indexes_kv_by_block_stride still raises NotImplementedError, where P5 v1
+    # would have LCM-padded it. No live config hits that today.
+    "and layer_spec.indexes_kv_by_block_stride",
 ]
 
 

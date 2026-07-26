@@ -124,6 +124,48 @@ _NEW_FP8_CFG = (
 )
 
 
+# Anchor 1b: cherry-max re-anchor of the SAME fp8_w8a8 block-quant config
+# dict (2026-07-26 boot triage). On dev1474cherrymax-1757-20260725 upstream
+# hoisted the block-N choice and the pipeline depth out of the dict literal
+# into `block_n` / `num_stages` locals computed by an M<=8 ladder just above,
+# so `_OLD_FP8_CFG` matches 0 times and the fp8 half of P24 silently stopped
+# landing while the general half kept applying (boot log reported only
+# "anchor not found — soft skip"). DUAL-PIN, not an in-place re-anchor:
+# `_OLD_FP8_CFG` still matches the older pins we can roll back to, and only
+# one of the two can match a given file, so both stay non-required.
+# Byte-verified count == 1 in the pristine cherry-max image.
+_OLD_FP8_CFG_CHERRYMAX = (
+    "        config = {\n"
+    "            \"BLOCK_SIZE_M\": 16 if M <= 64 else 64,\n"
+    "            \"BLOCK_SIZE_N\": block_n,\n"
+    "            \"BLOCK_SIZE_K\": block_shape[1],\n"
+    "            \"GROUP_SIZE_M\": 1 if M <= 16 else 32,\n"
+    "            \"SPLIT_K\": 1,\n"
+    "            \"num_warps\": 4,\n"
+    "            \"num_stages\": num_stages,\n"
+    "        }"
+)
+
+_NEW_FP8_CFG_CHERRYMAX = (
+    _OLD_FP8_CFG_CHERRYMAX
+    + "\n"
+    "        # [Genesis P24] per-SM / env override for num_warps + num_stages\n"
+    "        try:\n"
+    "            from vllm._genesis.kernels.marlin_tuning import (\n"
+    "                get_num_warps_override as _genesis_num_warps_override,\n"
+    "                get_num_stages_override as _genesis_num_stages_override,\n"
+    "            )\n"
+    "            _nw = _genesis_num_warps_override()\n"
+    "            _ns = _genesis_num_stages_override()\n"
+    "            if _nw is not None:\n"
+    "                config[\"num_warps\"] = _nw\n"
+    "            if _ns is not None:\n"
+    "                config[\"num_stages\"] = _ns\n"
+    "        except Exception:\n"
+    "            pass"
+)
+
+
 # Anchor 2: general-default config block (lines 1310-1318 in baseline).
 _OLD_GEN_CFG = (
     "        config = {\n"
@@ -181,6 +223,12 @@ def _make_patcher() -> TextPatcher | None:
                 replacement=_NEW_FP8_CFG,
                 required=False,  # soft: only one of the two configs may
                                  # match if upstream refactors one branch.
+            ),
+            TextPatch(
+                name="p24_fp8_cfg_overlay_cherrymax",
+                anchor=_OLD_FP8_CFG_CHERRYMAX,
+                replacement=_NEW_FP8_CFG_CHERRYMAX,
+                required=False,
             ),
             TextPatch(
                 name="p24_general_cfg_overlay",
