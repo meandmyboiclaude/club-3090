@@ -20,10 +20,21 @@ serving-layer, both fail-open, master flag DEFAULT OFF (behavioral patch):
 Env: GENESIS_ENABLE_PN101_ANSWER_RESCUE (master, default OFF),
      GENESIS_PN101_HINT / GENESIS_PN101_REPAIR (sub-toggles, default ON under
      master), GENESIS_PN101_REPAIR_TOKENS (16), GENESIS_PN101_TIMEOUT_S (15).
+
+Other legs living in this module (each with its own master flag, all OFF by
+default):
+  PN102  Leg 1  — the envelope-contract banner (GENESIS_ENABLE_PN102_CONTRACT)
+  PN102  Leg 1b — server-side deep/lean BANNER autosplit, BUG-157
+                  (GENESIS_ENABLE_PN102_ROUTE_AUTOSPLIT)
+  PN102  Leg 4  — output-side banner-echo net, BUG-156
+                  (GENESIS_PN102_STRIP_ECHO / _STRIP_STEP_ECHO)
+  PN123  Leg 3  — premature-close gate (GENESIS_ENABLE_PN123_CLOSEGATE; fka
+                  PN118, renumbered 2026-07-26 for BUG-144 — see Leg 3's header)
 """
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import math
@@ -76,11 +87,25 @@ _STATS: dict[str, int] = {
     "escalations_attempted": 0,
     "escalations_succeeded": 0,
     "escalation_errors": 0,
+    # Leg 3 counters keep their pn118_* spelling on purpose — see the BUG-144
+    # note in Leg 3's header: they are the recorded telemetry names and the
+    # assertion surface of fixes/test_pn118_logic.py. Only the patch ID, its
+    # env flags and its log lines were renumbered to PN123.
     "pn118_skips": 0,
     "pn118_shadow_would_fire": 0,
     "pn118_attempts": 0,
     "pn118_fires": 0,
     "pn118_errors": 0,
+    # Leg 1b — server-side route→banner autosplit (BUG-157).
+    "autosplit_probes": 0,
+    "autosplit_deep": 0,
+    "autosplit_lean": 0,
+    "autosplit_unavailable": 0,
+    "autosplit_errors": 0,
+    # Leg 4 — output-side banner echo net (BUG-156).
+    "banner_echo_stripped": 0,
+    "banner_step_echo_seen": 0,
+    "banner_step_echo_stripped": 0,
 }
 
 
@@ -563,13 +588,20 @@ def maybe_add_answer_hint(request: Any) -> None:
     if not _env_bool("GENESIS_ENABLE_PN102_CONTRACT"):
         return
     ctk = dict(getattr(request, "chat_template_kwargs", None) or {})
-    # [PN118 rerun 2026-07-23] a rerun forces the v5-shape banner for THIS one
+    # [PN123 rerun 2026-07-23] a rerun forces the v5-shape banner for THIS one
     # synthetic call regardless of the live banner-version env chain. The
     # dispatch below reads env, not ctk, so this ctk key is the override seam.
-    # Checked before the skip/marker gates: the rerun carries the PN118/PN101
+    # Checked before the skip/marker gates: the rerun carries the PN123/PN101
     # markers (to suppress post-response re-entry), and those would otherwise
     # trip _skip_common and drop the banner it specifically needs.
     force_v5 = bool(ctk.pop("pn102_force_v5", False))
+    # [BUG-157 2026-07-26] the ROUTE-driven promotion (Leg 1b below) is a
+    # SEPARATE key on purpose. `pn102_force_v5` bypasses _skip_common because a
+    # PN123 rerun is a synthetic call that carries the suppression
+    # markers; an automatic promotion must NOT inherit that bypass, or it would
+    # re-open BUG-156 by putting the banner back on tools/structured requests.
+    # So `pn102_auto_v5` is popped here but only consulted after the gates.
+    auto_v5 = bool(ctk.pop("pn102_auto_v5", False))
     if not _bounded(request) or (not force_v5 and _skip_common(request)):
         return
     if ctk.get("pn_env_banner"):
@@ -594,7 +626,9 @@ def maybe_add_answer_hint(request: Any) -> None:
     # live path until a bench window says so. It is also COUPLED to the
     # generous-budget env (see the v4 note above) — enable both or neither.
     if force_v5:
-        _contract_v5_settled(ctk, budget)  # PN118 rerun: v5-shape, this call only
+        _contract_v5_settled(ctk, budget)  # PN123 rerun: v5-shape, this call only
+    elif auto_v5:
+        _contract_v5_settled(ctk, budget)  # Leg 1b: the H119 route said "deep"
     elif _env_bool("GENESIS_PN102_BANNER_V8", False):
         _contract_v8_hybrid(ctk, budget)
     elif _env_bool("GENESIS_PN102_BANNER_V7", False):
@@ -611,6 +645,399 @@ def maybe_add_answer_hint(request: Any) -> None:
         _contract_v3_sized(ctk, budget)
     request.chat_template_kwargs = ctk
     _STATS["hints_added"] += 1
+
+
+# ─── Leg 1b: server-side deep/lean BANNER autosplit (BUG-157) ────────────────
+# House-original, 2026-07-26. Master flag GENESIS_ENABLE_PN102_ROUTE_AUTOSPLIT,
+# DEFAULT OFF: with it unset this whole leg is bytes on disk and nothing about
+# the current behaviour changes.
+#
+# THE BUG. The design contract is two modes and no client cooperation: a normal
+# request runs the FULL chain (route + auto-sized cap), or thinking is off and
+# the machinery is bypassed. The BUDGET half honours that — PN100 sizes every
+# request and the H119 consumer modulates it in-engine. The BANNER half did
+# NOT: `pn102_force_v5` is written by production code in exactly one place
+# (_pn123_rerun, the adjudicated-rerun path), and `maybe_add_answer_hint` only
+# ever POPS it back out of the caller's chat_template_kwargs. So the deep/lean
+# banner split existed only for a client that called /v1/h119/score itself,
+# rendered its own banner, and sent it back — which is how the 07-24 champion
+# was produced and why it was never reproducible from a plain request.
+#
+# THE ORDERING PROBLEM, AND WHY THE FIX HAS TO LIVE HERE. The lens route is
+# derived FROM the prefill; the banner has to be in the prompt BEFORE prefill.
+# One pass cannot do both (patch_h119_route_api.py, "THE HARD PART"). The only
+# resolution is two passes, and the only question is who pays for the second
+# one. Today it is the caller. This leg moves it into the server: score the
+# request the caller actually sent, at max_tokens=1, read the route off the
+# response, then run the real request with the banner that route implies. Same
+# cost as the client-side protocol (one extra prefill, ~0.26 s measured, and
+# APC makes the real request's prefill nearly free afterwards) — but universal
+# and invisible, which is the whole point of the bug.
+#
+# WHY A WRAPPER AND NOT AN INLINE CALL. `maybe_add_answer_hint` is the only
+# pre-render seat, and its call site (fixes/patch_pn101_answer_rescue.py, HINT
+# site) is `_pn101_hint(request)` — SYNCHRONOUS, un-awaited, inside the running
+# event loop. A probe from there cannot be awaited, cannot be run with
+# `run_until_complete` (the loop is already running) and cannot be blocked on
+# from another thread (we ARE the loop thread — the probe would need the loop
+# we are blocking). So the probe has to happen one frame OUT, before
+# `create_chat_completion` is entered, and this module reaches that frame by
+# wrapping the bound method on the serving class the first time it is handed a
+# serving instance. The wrap is installed at REQUEST time inside the live
+# server process, not at patch time — the failure mode the h119 sidecar warns
+# about ("apply_all runs standalone and then execs, so setattr is gone") does
+# not apply here.
+#
+# COST OF THAT CHOICE, STATED NOT HIDDEN: the FIRST non-internal chat
+# completion after a boot runs before the wrapper exists and is therefore never
+# split. It is logged at INFO when the install lands. Everything after it is.
+#
+# WHAT IT DOES NOT DO. It does not touch the budget — PN100 keeps ownership of
+# sizing and the H119 in-engine consumer keeps ownership of modulating it
+# (H119_*_MULT=1.0 today = exact passthrough). This leg only chooses the
+# BANNER, which is precisely the half that was missing.
+#
+# Env:
+#   GENESIS_ENABLE_PN102_ROUTE_AUTOSPLIT   master, default OFF
+#   GENESIS_PN102_AUTOSPLIT_V5_ROUTE       route that earns the v5 banner
+#                                          (default "deep"; the other route
+#                                          falls through to the normal env
+#                                          dispatch chain, i.e. v3 in prod)
+#   GENESIS_PN102_AUTOSPLIT_TIMEOUT_S      probe timeout (default 60)
+# Requires (all live on :8021 today): GENESIS_ENABLE_PN102_CONTRACT=1,
+# GENESIS_ENABLE_H119_LENS_ROUTER=1 and GENESIS_ENABLE_H119_ROUTE_API=1 — the
+# route API bridge is what publishes the route into kv_transfer_params, and it
+# works with PN119_MODE=shadow as well as enforce.
+
+_AUTOSPLIT_MARKER = "pn102_autosplit_probe"
+_AUTOSPLIT_INSTALLED_ATTR = "_pn102_autosplit_wrapped"
+
+# Mirrors patch_h119_route_api.py::_H119_PROBE_OVERRIDES. Filtered against the
+# request model's fields, so a pin that renames one degrades to "not
+# overridden" rather than raising.
+_AUTOSPLIT_PROBE_OVERRIDES = {
+    "stream": False,
+    "stream_options": None,
+    "n": 1,
+    "max_tokens": 1,
+    "max_completion_tokens": 1,
+    "logprobs": False,
+    "top_logprobs": 0,
+    "prompt_logprobs": None,
+    "echo": False,
+    "kv_transfer_params": None,
+}
+
+_H119_BRIDGE: Any = None
+
+
+def _autosplit_on() -> bool:
+    return _env_bool("GENESIS_ENABLE_PN102_ROUTE_AUTOSPLIT", False)
+
+
+def _h119_bridge() -> Any:
+    """`vllm._genesis_h119_api`, or None. Resolved once; False caches absence.
+
+    This is the first import this module has ever taken from the H119 lane —
+    BUG-157's evidence line "answer_rescue.py imports nothing from pn119/h119,
+    so the banner code cannot see the route" names exactly this gap. Lazy and
+    guarded: the bridge is written by /fixes/patch_h119_route_api.py and is
+    simply absent on a boot where that patch soft-skipped.
+    """
+    global _H119_BRIDGE
+    if _H119_BRIDGE is None:
+        try:
+            from vllm import _genesis_h119_api as _m
+
+            _H119_BRIDGE = _m
+        except Exception:
+            _H119_BRIDGE = False
+    return _H119_BRIDGE or None
+
+
+def _autosplit_candidate(request: Any) -> bool:
+    """Cheap pre-filters, evaluated BEFORE any GPU work is spent on a probe.
+
+    NB `thinking_token_budget` is assigned by PN100's hook INSIDE
+    `_create_chat_completion`, i.e. after this point, so `_bounded()` cannot be
+    used here — a request that PN100 has not sized yet looks unbounded. These
+    gates are the subset that is already decided at the API boundary.
+    """
+    ctk = getattr(request, "chat_template_kwargs", None) or {}
+    if not isinstance(ctk, dict):
+        return False
+    # internal calls (PN101 repair/escalate, PN123 margin/continue/rerun, and
+    # this leg's own probe) — never re-enter.
+    if (ctk.get(_MARKER_KEY) or ctk.get(_PN100_MARKER_KEY)
+            or ctk.get(_AUTOSPLIT_MARKER)):
+        return False
+    # mode (b): thinking off bypasses the thinking machinery entirely.
+    if ctk.get("enable_thinking") is False:
+        return False
+    # the caller already made the decision itself — do not overrule it.
+    if ctk.get("pn102_force_v5") or ctk.get("pn102_auto_v5"):
+        return False
+    if ctk.get("pn_env_banner"):
+        return False
+    # the same gates Leg 1 applies: a banner these never receive is a banner
+    # not worth a probe (and structured/tool requests are BUG-156's fix).
+    if getattr(request, "tools", None) or _has_structured_output(request):
+        return False
+    # n>1 parallel sampling publishes one of n routes, not a summary
+    # (patch_h119_route_api.py, KNOWN WEAKNESSES) — do not act on it.
+    n = getattr(request, "n", None)
+    if isinstance(n, int) and n > 1:
+        return False
+    # a 1-token request has no reasoning to shape, and skipping it is also what
+    # keeps /v1/h119/score's own probe from recursing back through here.
+    cap = _completion_cap(request)
+    if cap is not None and cap <= 1:
+        return False
+    return True
+
+
+def _build_probe(request: Any) -> Any:
+    """A max_tokens=1 copy of `request` — the prefill IS the score."""
+    req_cls = type(request)
+    fields = set(getattr(req_cls, "model_fields", {}) or {})
+    ctk = dict(getattr(request, "chat_template_kwargs", None) or {})
+    ctk[_MARKER_KEY] = True          # suppress Leg 1's banner on the probe
+    ctk[_AUTOSPLIT_MARKER] = True    # and this leg, belt-and-braces
+    update = {k: v for k, v in _AUTOSPLIT_PROBE_OVERRIDES.items()
+              if k in fields}
+    update["chat_template_kwargs"] = ctk
+    copy = getattr(request, "model_copy", None)
+    if callable(copy):
+        return copy(update=update)
+    raise TypeError("request model has no model_copy()")
+
+
+async def _h119_route(orig: Any, serving: Any, request: Any,
+                      raw_request: Any) -> str | None:
+    """Score the prompt and return "deep"/"lean", or None if unavailable.
+
+    Calls the UNWRAPPED `create_chat_completion` directly, so the probe cannot
+    re-enter this leg no matter what the marker gates do.
+    """
+    bridge = _h119_bridge()
+    if bridge is None:
+        _STATS["autosplit_unavailable"] += 1
+        log.info("PN102: autosplit — H119 route bridge not installed on this "
+                 "boot (need /fixes/patch_h119_route_api.py); banner unchanged")
+        return None
+    try:
+        if not bridge.enabled():
+            _STATS["autosplit_unavailable"] += 1
+            log.info("PN102: autosplit — H119 route API disabled "
+                     "(GENESIS_ENABLE_H119_ROUTE_API=1 required); "
+                     "banner unchanged")
+            return None
+    except Exception:
+        pass
+    probe = _build_probe(request)
+    timeout = _env_int("GENESIS_PN102_AUTOSPLIT_TIMEOUT_S", 60)
+    _STATS["autosplit_probes"] += 1
+    resp = await asyncio.wait_for(orig(serving, probe, raw_request), timeout)
+    payload = bridge.payload(resp)
+    if not payload:
+        _STATS["autosplit_unavailable"] += 1
+        log.info("PN102: autosplit — probe returned no route (router not live "
+                 "in the engine process, or it refused this prompt); "
+                 "banner unchanged")
+        return None
+    route = str(payload.get("route") or "").strip().lower()
+    if not route:
+        _STATS["autosplit_unavailable"] += 1
+        return None
+    log.info("PN102: autosplit probe route=%s score=%s source=%s req=%s",
+             route, payload.get("score"), payload.get("source"),
+             payload.get("req_id"))
+    return route
+
+
+def _autosplit_wrapper(orig: Any) -> Any:
+    """Wrap `OpenAIServingChat.create_chat_completion` with score-then-generate.
+
+    Fail-open by construction: every failure path falls through to `orig` with
+    the request unmodified, so the worst case is exactly today's behaviour plus
+    one wasted prefill.
+    """
+
+    @functools.wraps(orig)
+    async def _pn102_autosplit(serving, *args, **kwargs):
+        request = kwargs.get("request") if "request" in kwargs else (
+            args[0] if args else None)
+        raw_request = kwargs.get("raw_request") if "raw_request" in kwargs else (
+            args[1] if len(args) > 1 else None)
+        try:
+            if (request is not None and _autosplit_on()
+                    and _env_bool("GENESIS_ENABLE_PN102_CONTRACT")
+                    and _autosplit_candidate(request)):
+                route = await _h119_route(orig, serving, request, raw_request)
+                if route:
+                    v5_route = (os.environ.get(
+                        "GENESIS_PN102_AUTOSPLIT_V5_ROUTE", "")
+                        or "deep").strip().lower()
+                    if route == v5_route:
+                        ctk = dict(
+                            getattr(request, "chat_template_kwargs", None) or {})
+                        ctk["pn102_auto_v5"] = True
+                        request.chat_template_kwargs = ctk
+                        _STATS["autosplit_deep"] += 1
+                        log.info("PN102: autosplit route=%s → v5 banner "
+                                 "(server-side, no client involvement)", route)
+                    else:
+                        _STATS["autosplit_lean"] += 1
+                        log.info("PN102: autosplit route=%s → default banner "
+                                 "chain", route)
+        except Exception as exc:
+            _STATS["autosplit_errors"] += 1
+            log.warning("PN102: autosplit failed (%s) — request served "
+                        "unsplit", exc)
+        return await orig(serving, *args, **kwargs)
+
+    return _pn102_autosplit
+
+
+def install_route_autosplit(serving: Any) -> bool:
+    """Install the wrapper on `type(serving)`. Idempotent; True iff it landed.
+
+    Deliberately installed even when the master flag is OFF: the wrapper is
+    inert in that case (it re-reads the flag per request), and installing
+    unconditionally means flipping the flag needs no redeploy — only that the
+    process has served one request, which by construction it has.
+    """
+    try:
+        cls = type(serving)
+        current = getattr(cls, "create_chat_completion", None)
+        if current is None or getattr(current, _AUTOSPLIT_INSTALLED_ATTR, False):
+            return False
+        wrapped = _autosplit_wrapper(current)
+        setattr(wrapped, _AUTOSPLIT_INSTALLED_ATTR, True)
+        cls.create_chat_completion = wrapped
+        log.info("PN102: autosplit wrapper installed on %s.%s "
+                 "(master flag %s) — the request that installed it is the one "
+                 "request this boot that cannot be split",
+                 cls.__module__, cls.__name__,
+                 "ON" if _autosplit_on() else "OFF")
+        return True
+    except Exception as exc:
+        log.warning("PN102: autosplit wrapper install failed (%s) — the "
+                    "deep/lean banner split stays client-only this boot", exc)
+        return False
+
+
+# ─── Leg 4: output-side banner echo net (BUG-156) ────────────────────────────
+# The PN102 banner is scaffolding for the THINK channel. Two measured shapes
+# leak it into the ANSWER channel instead: a reply that opens with the literal
+# "[envelope]" marker (2/40 prod, 1/101 on one gpqa arm), and a reply that
+# emits the banner's numbered steps ahead of the real answer ("Step 1: …" …
+# "Step 12: Assemble JSON…"). `_has_structured_output` already suppresses the
+# banner entirely for requests carrying response_format/guided_* — a guided arm
+# measured 0/40 of either shape — but the prod caller asks for JSON in PROSE,
+# so that guard never fires for it.
+#
+# The banner TEXT is not touched here: it was A/B-tuned and nothing in
+# production reads the "[envelope]" token. This is a net under the answer
+# channel, and it is deliberately narrow:
+#
+#   * it fires only when THIS request carried a banner WE injected, and only
+#     strips the marker that banner itself opens with (read off the banner, not
+#     hardcoded) — so a caller whose legitimate answer starts with "[envelope]"
+#     is only ever touched on a request we were injecting into anyway;
+#   * the numbered-step shape is DETECTED and counted but NOT stripped by
+#     default. A leading "Step 1: … Step N: …" block is indistinguishable from
+#     a caller legitimately asking for worked steps, and this net has no way to
+#     tell the two apart. GENESIS_PN102_STRIP_STEP_ECHO=1 opts in for callers
+#     that know they never want it.
+#
+# Env: GENESIS_PN102_STRIP_ECHO (default ON — it can only fire on a request we
+#      injected into), GENESIS_PN102_STRIP_STEP_ECHO (default OFF).
+
+_BANNER_MARKER_RE = re.compile(r"^\s*(\[[a-z][a-z0-9 _-]{0,30}\])")
+_STEP_LINE_RE = re.compile(r"^\s*Step\s+(\d+)\s*[:.\-]", re.IGNORECASE)
+
+
+def _injected_banner_marker(request: Any) -> str | None:
+    """The leading "[…]" token of the banner WE put on this request, if any."""
+    ctk = getattr(request, "chat_template_kwargs", None) or {}
+    if not isinstance(ctk, dict):
+        return None
+    banner = ctk.get("pn_env_banner")
+    if not isinstance(banner, str) or not banner:
+        return None
+    m = _BANNER_MARKER_RE.match(banner)
+    return m.group(1) if m else None
+
+
+def _strip_leading_steps(content: str) -> str | None:
+    """Drop a leading contiguous block of numbered "Step N:" lines.
+
+    Returns None unless the block is >= 2 steps AND real content survives it —
+    a reply that is ONLY numbered steps is the answer, however unwelcome its
+    shape, and discarding it would be exactly the silent data loss this module
+    exists to prevent.
+    """
+    lines = content.splitlines()
+    i = 0
+    steps = 0
+    while i < len(lines):
+        if not lines[i].strip():
+            i += 1
+            continue
+        if _STEP_LINE_RE.match(lines[i]):
+            steps += 1
+            i += 1
+            continue
+        break
+    if steps < 2:
+        return None
+    rest = "\n".join(lines[i:]).strip()
+    return rest or None
+
+
+def _maybe_strip_banner_echo(request: Any, result: Any) -> None:
+    """Remove PN102 scaffolding that landed on the answer side of </think>."""
+    marker = _injected_banner_marker(request)
+    if marker is None:
+        return
+    choice = _extract_choice(result)
+    message = getattr(choice, "message", None) if choice is not None else None
+    if message is None:
+        return
+    content = getattr(message, "content", None)
+    if not isinstance(content, str) or not content.strip():
+        return
+
+    if _env_bool("GENESIS_PN102_STRIP_ECHO", True):
+        stripped = content.lstrip()
+        if stripped.startswith(marker):
+            new = stripped[len(marker):].lstrip()
+            if new:
+                try:
+                    message.content = new
+                    _STATS["banner_echo_stripped"] += 1
+                    log.info("PN102: stripped echoed banner marker %s from the "
+                             "served answer (BUG-156)", marker)
+                    content = new
+                except Exception:  # pragma: no cover - frozen models
+                    return
+
+    rest = _strip_leading_steps(content)
+    if rest is not None:
+        _STATS["banner_step_echo_seen"] += 1
+        if not _env_bool("GENESIS_PN102_STRIP_STEP_ECHO", False):
+            log.info("PN102: banner numbered-steps echoed into the served "
+                     "answer (BUG-156, detect-only — set "
+                     "GENESIS_PN102_STRIP_STEP_ECHO=1 to strip)")
+            return
+        try:
+            message.content = rest
+            _STATS["banner_step_echo_stripped"] += 1
+            log.info("PN102: stripped echoed numbered-step block from the "
+                     "served answer (BUG-156)")
+        except Exception:  # pragma: no cover - frozen models
+            pass
 
 
 # ─── Leg 2: post-hoc repair pass (async, post-response) ──────────────────────
@@ -828,9 +1255,34 @@ async def _maybe_escalate(serving: Any, request: Any, result: Any) -> bool:
         return False
 
 
-# ─── Leg 3: PN118 premature-close gate (async, post-response) ────────────────
+# ─── Leg 3: PN123 premature-close gate (async, post-response) ────────────────
+# [BUG-144, renumbered 2026-07-26] This leg shipped as "PN118". That number was
+# already taken: the vendored lane-2 sndr registry owns PN118_V2_MD5_WORKSPACE
+# and PN118_V2_MD5_TURBOQUANT_ATTN (TurboQuant), which the boot recorder
+# truncates to "PN118", and the live container also sets a bare
+# GENESIS_ENABLE_PN118=1 for that lane. PN119 is NOT the escape (it is lane-2's
+# TurboQuant k8v4 GQA kernel — which is why the lens router had to become
+# H119), so this leg takes PN123: unclaimed in lane-1, lane-2, /fixes and the
+# tracker, and legal under `_genesis/utils/patch_id_lint.py`'s recorder shape.
+#
+# What was renamed: the patch id, its env flags and its log lines. What was
+# NOT, and why — three strings are load-bearing outside this file and this
+# change is meant to be cosmetic, not a live-behaviour change:
+#   * GENESIS_ENABLE_PN118_CLOSEGATE stays a working LEGACY ALIAS. It is the
+#     marker `patch_id_lint.py::HOUSE_IDS_OUTSIDE_FIXES["PN118"]` asserts is
+#     present in this file — dropping it turns a green gate red — and it is
+#     what any existing compose/env would set. Same for every GENESIS_PN118_*
+#     sub-knob: canonical name first, legacy honoured when the canonical one is
+#     unset (see `_cg`).
+#   * the ctk marker value "pn118_internal" (a private tag, never read back
+#     outside this module, asserted by fixes/test_pn118_logic.py:691).
+#   * the `_STATS` keys pn118_* (the recorded telemetry names, asserted
+#     throughout fixes/test_pn118_logic.py).
+# Finishing the rename means editing patch_id_lint.py's table and that test —
+# both outside this file's ownership.
+#
 # House-original, 2026-07-23. The INVERSE of the dead ending-detection lane
-# (which CUT thinking early — never rebuild that): PN118 catches the model
+# (which CUT thinking early — never rebuild that): PN123 catches the model
 # VOLUNTARILY closing </think> far under its assigned budget (obeying the
 # announced step number in the v3-sized banner) and answering with weak
 # confidence — the premature-commit class that owns 5-7 of the 12 accuracy
@@ -848,16 +1300,42 @@ async def _maybe_escalate(serving: Any, request: Any, result: Any) -> bool:
 # One fire per request. Modes: shadow (log would-fire incl. margin, change
 # nothing) | enforce (splice the continuation). Master default OFF.
 
-_PN118_MARKER = "pn118_internal"
-_PN118_DEFAULT_CUE = (
+_PN123_MARKER = "pn118_internal"  # wire value frozen — see the BUG-144 note
+_PN123_DEFAULT_CUE = (
     "Wait — that felt too quick; let me actually check the remaining cases "
     "before I commit."
 )
-_PN118_LETTERS = "ABCDEFGHIJ"
+_PN123_LETTERS = "ABCDEFGHIJ"
+
+# Legacy aliases for fixes/test_pn118_logic.py, which imports these by name.
+_PN118_MARKER = _PN123_MARKER
+_PN118_DEFAULT_CUE = _PN123_DEFAULT_CUE
+_PN118_LETTERS = _PN123_LETTERS
 
 
-def _pn118_master_on() -> bool:
-    return _env_bool("GENESIS_ENABLE_PN118_CLOSEGATE", False)
+def _cg(suffix: str) -> str:
+    """Close-gate env NAME: canonical GENESIS_PN123_<suffix>, falling back to
+    the legacy GENESIS_PN118_<suffix> when the canonical one is unset.
+
+    Returns a name rather than a value so the existing `_env_bool/_env_int/
+    _env_float` readers (and their defaults) keep owning the parsing.
+    """
+    new = "GENESIS_PN123_" + suffix
+    if os.environ.get(new, "").strip():
+        return new
+    old = "GENESIS_PN118_" + suffix
+    return old if os.environ.get(old, "").strip() else new
+
+
+def _pn123_master_on() -> bool:
+    for name in ("GENESIS_ENABLE_PN123_CLOSEGATE",
+                 "GENESIS_ENABLE_PN118_CLOSEGATE"):  # legacy, still honoured
+        if os.environ.get(name, "").strip():
+            return _env_bool(name, False)
+    return False
+
+
+_pn118_master_on = _pn123_master_on  # legacy alias
 
 
 def _reasoning_tokens(result: Any, reasoning: str) -> int:
@@ -885,7 +1363,7 @@ def _letter_posterior_margin(choice: Any) -> float | None:
     probs: list[float] = []
     for t in top:
         tok = (getattr(t, "token", "") or "").strip()
-        if len(tok) == 1 and tok.upper() in _PN118_LETTERS:
+        if len(tok) == 1 and tok.upper() in _PN123_LETTERS:
             probs.append(math.exp(getattr(t, "logprob", -99.0)))
     if not probs:
         return None
@@ -919,7 +1397,7 @@ async def _letter_margin(serving: Any, request: Any, content: str) -> float | No
         "chat_template_kwargs": {
             "enable_thinking": False,
             _MARKER_KEY: True,
-            _PN118_MARKER: True,
+            _PN123_MARKER: True,
         },
     }
     cap_field = (
@@ -932,7 +1410,7 @@ async def _letter_margin(serving: Any, request: Any, content: str) -> float | No
         else:
             kwargs["chat_template_kwargs"][fname] = val
     synthetic = req_cls(**kwargs)
-    timeout = _env_int("GENESIS_PN118_MARGIN_TIMEOUT_S", 30)
+    timeout = _env_int(_cg("MARGIN_TIMEOUT_S"), 30)
     resp = await asyncio.wait_for(
         serving.create_chat_completion(synthetic, raw_request=None), timeout
     )
@@ -942,13 +1420,13 @@ async def _letter_margin(serving: Any, request: Any, content: str) -> float | No
     return _letter_posterior_margin(choice)
 
 
-# ─── PN118 gate mode: engine-side c_mean bridge (2026-07-23) ─────────────────
+# ─── PN123 gate mode: engine-side c_mean bridge (2026-07-23) ─────────────────
 # The letter-margin echo call (above) is a post-close OUTPUT signal; every
 # post-close output signal measured AUC ~0.5. The ONLY signal that discriminates
 # premature-vs-settled is pn112's per-step sampling confidence C — but that is
 # computed in the EngineCore process. pn112_export.py drops each request's
 # rolling C mean into /tmp/genesis_pn112_conf.json; this reads it back and uses
-# it as an alternative close-gate. GENESIS_PN118_GATE = margin|cmean|both.
+# it as an alternative close-gate. GENESIS_PN123_GATE = margin|cmean|both.
 #
 # Join key: the engine keys the file by its InputBatch req_id — vLLM's request
 # id string, form "chatcmpl-<uuid>". The serving layer sees that identical
@@ -967,7 +1445,7 @@ def _normalize_req_id(rid: Any) -> str:
     return _PARALLEL_SUFFIX_RE.sub("", str(rid))
 
 
-def _pn118_join_id(request: Any, result: Any) -> Any:
+def _pn123_join_id(request: Any, result: Any) -> Any:
     """The id to look up in the conf file: the ChatCompletionResponse.id, which
     equals the engine's InputBatch req_id. request.request_id is a defensive
     fallback (it is usually absent → id(request), which will simply miss)."""
@@ -1007,46 +1485,46 @@ def _pn112_conf_lookup(join_id: Any) -> dict[str, Any] | None:
     return entry if isinstance(entry, dict) else None
 
 
-def _pn118_cmean_decision(entry: dict[str, Any] | None, req_id: Any,
+def _pn123_cmean_decision(entry: dict[str, Any] | None, req_id: Any,
                           join_id: Any) -> tuple[bool, float | None]:
     """Truth table for the c_mean gate. Fire iff entry exists AND n >= MINN AND
     NOT stale (ts within TTL) AND c_last < CMEAN. Every miss → (False, c_last).
     Conservative by construction: missing/stale/low-n never fires."""
     if not entry:
-        log.info("PN118: cmean skip req=%s — no conf entry (join=%s)", req_id, join_id)
+        log.info("PN123: cmean skip req=%s — no conf entry (join=%s)", req_id, join_id)
         return False, None
     # [2026-07-23 field fix] flush-on-close made c_last = the COMMITMENT-moment
     # window, which is high for everyone (the model commits confidently; the
     # 9-vs-11 discrimination lives mid-trace). Default gate field is therefore
     # c_trace (whole-trace mean, flush-proof); c_last remains selectable.
-    field = os.environ.get("GENESIS_PN118_CMEAN_FIELD", "c_trace").strip() or "c_trace"
+    field = os.environ.get(_cg("CMEAN_FIELD"), "c_trace").strip() or "c_trace"
     c_last = entry.get(field, entry.get("c_last"))
     n = entry.get("n")
     ts = entry.get("ts")
     if not isinstance(c_last, (int, float)) or not isinstance(n, int):
-        log.info("PN118: cmean skip req=%s — malformed entry %r", req_id, entry)
+        log.info("PN123: cmean skip req=%s — malformed entry %r", req_id, entry)
         return False, c_last if isinstance(c_last, (int, float)) else None
     if not isinstance(ts, (int, float)):
-        log.info("PN118: cmean skip req=%s — entry has no ts (conservative)", req_id)
+        log.info("PN123: cmean skip req=%s — entry has no ts (conservative)", req_id)
         return False, c_last
-    ttl = _env_float("GENESIS_PN118_CMEAN_TTL_S", 600.0)
+    ttl = _env_float(_cg("CMEAN_TTL_S"), 600.0)
     age = time.monotonic() - ts
     if age > ttl:
-        log.info("PN118: cmean skip req=%s — stale (age=%.1fs > %.1fs)", req_id, age, ttl)
+        log.info("PN123: cmean skip req=%s — stale (age=%.1fs > %.1fs)", req_id, age, ttl)
         return False, c_last
-    minn = _env_int("GENESIS_PN118_CMEAN_MINN", 64)
+    minn = _env_int(_cg("CMEAN_MINN"), 64)
     if n < minn:
-        log.info("PN118: cmean skip req=%s — n=%d < MINN=%d", req_id, n, minn)
+        log.info("PN123: cmean skip req=%s — n=%d < MINN=%d", req_id, n, minn)
         return False, c_last
-    thr = _env_float("GENESIS_PN118_CMEAN", 10.0)
+    thr = _env_float(_cg("CMEAN"), 10.0)
     if c_last >= thr:
-        log.info("PN118: cmean skip req=%s — confident (c_last=%.3f >= %.3f)",
+        log.info("PN123: cmean skip req=%s — confident (c_last=%.3f >= %.3f)",
                  req_id, c_last, thr)
         return False, c_last
     return True, c_last
 
 
-async def _pn118_continue(serving: Any, request: Any, result: Any, message: Any,
+async def _pn123_continue(serving: Any, request: Any, result: Any, message: Any,
                           choice: Any, reasoning: str, spent: int, budget: int,
                           req_id: Any, signal: float) -> bool:
     """The action leg: ONE continuation resuming inside the think region with the
@@ -1056,9 +1534,9 @@ async def _pn118_continue(serving: Any, request: Any, result: Any, message: Any,
     try:
         req_cls = type(request)
         fields = getattr(req_cls, "model_fields", {}) or {}
-        cue = os.environ.get("GENESIS_PN118_CUE", "").strip() or _PN118_DEFAULT_CUE
-        min_c = _env_int("GENESIS_PN118_MIN_CONT", 512)
-        max_c = _env_int("GENESIS_PN118_MAX_CONT", 6144)
+        cue = os.environ.get(_cg("CUE"), "").strip() or _PN123_DEFAULT_CUE
+        min_c = _env_int(_cg("MIN_CONT"), 512)
+        max_c = _env_int(_cg("MAX_CONT"), 6144)
         # [REVIEW C1 2026-07-23] the prefilled reasoning is RE-CHARGED against
         # the continuation's budget by the engine (same double-subtraction the
         # PN101 escalate leg fixed, ultra-review #4): pass spent + room as the
@@ -1080,7 +1558,7 @@ async def _pn118_continue(serving: Any, request: Any, result: Any, message: Any,
             "thinking_token_budget": cont_budget,
             "chat_template_kwargs": dict(
                 getattr(request, "chat_template_kwargs", None) or {},
-                **{_MARKER_KEY: True, _PN118_MARKER: True},
+                **{_MARKER_KEY: True, _PN123_MARKER: True},
             ),
         }
         for sf in ("top_p", "top_k", "min_p", "presence_penalty",
@@ -1101,19 +1579,19 @@ async def _pn118_continue(serving: Any, request: Any, result: Any, message: Any,
             else:
                 kwargs["chat_template_kwargs"][fname] = val
         synthetic = req_cls(**kwargs)
-        timeout = _env_int("GENESIS_PN118_TIMEOUT_S", 180)
+        timeout = _env_int(_cg("TIMEOUT_S"), 180)
         resp = await asyncio.wait_for(
             serving.create_chat_completion(synthetic, raw_request=None), timeout
         )
         rchoice = _extract_choice(resp)
         rmsg = getattr(rchoice, "message", None) if rchoice else None
         if rmsg is None:
-            log.info("PN118: continuation returned no choice req=%s — original kept", req_id)
+            log.info("PN123: continuation returned no choice req=%s — original kept", req_id)
             return False
         new_content = (getattr(rmsg, "content", None) or "").strip()
         new_reasoning = _read_reasoning(rmsg)
         if not new_content and not new_reasoning.strip():
-            log.info("PN118: continuation returned empty req=%s — original kept", req_id)
+            log.info("PN123: continuation returned empty req=%s — original kept", req_id)
             return False
         # Fold the continuation's reasoning onto the original think content.
         for attr in ("reasoning", "reasoning_content"):
@@ -1125,7 +1603,7 @@ async def _pn118_continue(serving: Any, request: Any, result: Any, message: Any,
                 break
         if not new_content:
             # Continuation itself ended still inside think — no answer to splice.
-            log.info("PN118: continuation ended in-think req=%s — original kept", req_id)
+            log.info("PN123: continuation ended in-think req=%s — original kept", req_id)
             return False
         message.content = new_content
         try:
@@ -1135,18 +1613,18 @@ async def _pn118_continue(serving: Any, request: Any, result: Any, message: Any,
         _sum_usage(getattr(result, "usage", None), getattr(resp, "usage", None))
         _STATS["pn118_fires"] += 1
         log.info(
-            "PN118: FIRED req=%s spent=%d budget=%d signal=%.3f +cont_budget=%d",
+            "PN123: FIRED req=%s spent=%d budget=%d signal=%.3f +cont_budget=%d",
             req_id, spent, budget, signal, cont_budget,
         )
         return True
     except Exception as exc:
         _STATS["pn118_errors"] += 1
-        log.warning("PN118: continuation failed req=%s (%s) — original kept", req_id, exc)
+        log.warning("PN123: continuation failed req=%s (%s) — original kept", req_id, exc)
         return False
 
 
-# ─── PN118 action: adjudicated rerun (Leg 3b, Fable R2) ──────────────────────
-# GENESIS_PN118_ACTION = continue (default, current behaviour) | rerun.
+# ─── PN123 action: adjudicated rerun (Leg 3b, Fable R2) ──────────────────────
+# GENESIS_PN123_ACTION = continue (default, current behaviour) | rerun.
 # rerun does ONE fresh solve of the ORIGINAL request under the v5-shape banner
 # (no poisoned-trace inheritance) and keeps the original answer UNLESS the rerun
 # disagrees AND is the more confident trace (its own c_last, exported by its
@@ -1154,30 +1632,33 @@ async def _pn118_continue(serving: Any, request: Any, result: Any, message: Any,
 # now needs disagree AND rerun-wrong AND rerun-more-confident. Fail-open at
 # every step to the original response.
 
-_PN118_ANS_RE = re.compile(
+_PN123_ANS_RE = re.compile(
     r"(?:answer|option|choice)\b[^A-Za-z0-9]{0,6}(?:is|:|=|\bis\b)?[^A-Za-z0-9(]{0,4}"
     r"\(?\s*([A-J])\b",
     re.IGNORECASE,
 )
 
 
-def _pn118_answer_key(content: str) -> str:
+def _pn123_answer_key(content: str) -> str:
     """Normalized answer for agreement comparison. Prefer the LAST letter-answer
     (MCQ final commit); else the whitespace-normalized lowercased content."""
     if not content:
         return ""
     last = None
-    for last in _PN118_ANS_RE.finditer(content):
+    for last in _PN123_ANS_RE.finditer(content):
         pass
     if last is not None:
         return last.group(1).upper()
     return " ".join(content.lower().split())
 
 
-async def _pn118_conf_wait(join_id: Any) -> dict[str, Any] | None:
+_pn118_answer_key = _pn123_answer_key  # legacy alias (test_pn118_logic.py)
+
+
+async def _pn123_conf_wait(join_id: Any) -> dict[str, Any] | None:
     """Look up the rerun's exported conf entry, retrying ≤ WAIT_S for the
     engine-side flush to land (the rerun's </think> flush races this read)."""
-    wait_s = _env_float("GENESIS_PN118_RERUN_CONF_WAIT_S", 2.0)
+    wait_s = _env_float(_cg("RERUN_CONF_WAIT_S"), 2.0)
     deadline = time.monotonic() + max(0.0, wait_s)
     while True:
         entry = _pn112_conf_lookup(join_id)
@@ -1188,7 +1669,7 @@ async def _pn118_conf_wait(join_id: Any) -> dict[str, Any] | None:
         await asyncio.sleep(0.2)
 
 
-async def _pn118_rerun(serving: Any, request: Any, result: Any, message: Any,
+async def _pn123_rerun(serving: Any, request: Any, result: Any, message: Any,
                        choice: Any, content: str, spent: int, budget: int,
                        req_id: Any, signal: float,
                        c_last_orig: float | None) -> bool:
@@ -1199,17 +1680,17 @@ async def _pn118_rerun(serving: Any, request: Any, result: Any, message: Any,
     try:
         req_cls = type(request)
         fields = getattr(req_cls, "model_fields", {}) or {}
-        rerun_budget = _env_int("GENESIS_PN118_RERUN_BUDGET", 10240)
+        rerun_budget = _env_int(_cg("RERUN_BUDGET"), 10240)
         # Fresh solve: ORIGINAL messages (no <think> prefill), v5 banner forced
         # for this call only. Strip any banner the first pass injected so
         # maybe_add_answer_hint re-applies v5 (it early-returns on a present
-        # pn_env_banner). Markers suppress PN118/PN101 re-entry.
+        # pn_env_banner). Markers suppress PN123/PN101 re-entry.
         base_ctk = dict(getattr(request, "chat_template_kwargs", None) or {})
         base_ctk.pop("pn_env_banner", None)
         base_ctk.pop("pn_env_seed", None)
         base_ctk["pn102_force_v5"] = True
         base_ctk[_MARKER_KEY] = True
-        base_ctk[_PN118_MARKER] = True
+        base_ctk[_PN123_MARKER] = True
         messages = list(getattr(request, "messages", None) or [])
         kwargs: dict[str, Any] = {
             "model": getattr(request, "model", None),
@@ -1232,24 +1713,24 @@ async def _pn118_rerun(serving: Any, request: Any, result: Any, message: Any,
         original_cap = _completion_cap(request)
         kwargs[cap_field] = max(original_cap or 0, rerun_budget + 512)
         synthetic = req_cls(**kwargs)
-        timeout = _env_int("GENESIS_PN118_TIMEOUT_S", 180)
+        timeout = _env_int(_cg("TIMEOUT_S"), 180)
         resp = await asyncio.wait_for(
             serving.create_chat_completion(synthetic, raw_request=None), timeout
         )
         rchoice = _extract_choice(resp)
         rmsg = getattr(rchoice, "message", None) if rchoice else None
         if rmsg is None:
-            log.info("PN118: rerun returned no choice req=%s — original kept", req_id)
+            log.info("PN123: rerun returned no choice req=%s — original kept", req_id)
             return False
         new_content = (getattr(rmsg, "content", None) or "").strip()
         if not new_content:
-            log.info("PN118: rerun produced no answer req=%s — original kept", req_id)
+            log.info("PN123: rerun produced no answer req=%s — original kept", req_id)
             return False
 
         # ADJUDICATION. Agree → keep original (cheap, done).
-        if _pn118_answer_key(content) == _pn118_answer_key(new_content):
+        if _pn123_answer_key(content) == _pn123_answer_key(new_content):
             _STATS["pn118_rerun_agree"] = _STATS.get("pn118_rerun_agree", 0) + 1
-            log.info("PN118: rerun AGREES req=%s — original kept (no swap)", req_id)
+            log.info("PN123: rerun AGREES req=%s — original kept (no swap)", req_id)
             return False
 
         # [2026-07-23 R1 fold] On GPQA-class MCQ, confidence-comparing two
@@ -1257,10 +1738,10 @@ async def _pn118_rerun(serving: Any, request: Any, result: Any, message: Any,
         # 10/10 split; every training-free selector net-negative). Our case
         # is asymmetric — the rerun is the STRONGER config on a wrong-enriched
         # pool — so the default rule is rerun-wins-on-disagree. The
-        # confidence-compare survives behind GENESIS_PN118_ADJUDICATE=confidence.
-        if os.environ.get("GENESIS_PN118_ADJUDICATE", "rerun_wins").strip() \
+        # confidence-compare survives behind GENESIS_PN123_ADJUDICATE=confidence.
+        if os.environ.get(_cg("ADJUDICATE"), "rerun_wins").strip() \
                 != "confidence":
-            log.info("PN118: rerun DISAGREES req=%s — rerun wins (asymmetric "
+            log.info("PN123: rerun DISAGREES req=%s — rerun wins (asymmetric "
                      "escalation, R1 rule)", req_id)
             for attr in ("reasoning", "reasoning_content"):
                 if getattr(rmsg, attr, None) is not None:
@@ -1279,22 +1760,22 @@ async def _pn118_rerun(serving: Any, request: Any, result: Any, message: Any,
             return True
 
         # Disagree → prefer the rerun only if its trace is >= as confident.
-        rerun_join = _pn118_join_id(synthetic, resp)
-        rerun_entry = await _pn118_conf_wait(rerun_join)
+        rerun_join = _pn123_join_id(synthetic, resp)
+        rerun_entry = await _pn123_conf_wait(rerun_join)
         c_last_rerun = (rerun_entry or {}).get("c_last")
         if c_last_orig is None:
-            orig_entry = _pn112_conf_lookup(_pn118_join_id(request, result))
+            orig_entry = _pn112_conf_lookup(_pn123_join_id(request, result))
             c_last_orig = (orig_entry or {}).get("c_last")
         if not isinstance(c_last_rerun, (int, float)) or \
                 not isinstance(c_last_orig, (int, float)):
             _STATS["pn118_rerun_confmiss"] = _STATS.get("pn118_rerun_confmiss", 0) + 1
-            log.info("PN118: rerun DISAGREES req=%s but conf lookup missed "
+            log.info("PN123: rerun DISAGREES req=%s but conf lookup missed "
                      "(orig=%s rerun=%s) — original kept",
                      req_id, c_last_orig, c_last_rerun)
             return False
         if c_last_rerun < c_last_orig:
             _STATS["pn118_rerun_keep"] = _STATS.get("pn118_rerun_keep", 0) + 1
-            log.info("PN118: rerun DISAGREES req=%s but less confident "
+            log.info("PN123: rerun DISAGREES req=%s but less confident "
                      "(c_last rerun=%.3f < orig=%.3f) — original kept",
                      req_id, c_last_rerun, c_last_orig)
             return False
@@ -1315,18 +1796,18 @@ async def _pn118_rerun(serving: Any, request: Any, result: Any, message: Any,
         _sum_usage(getattr(result, "usage", None), getattr(resp, "usage", None))
         _STATS["pn118_fires"] += 1
         _STATS["pn118_rerun_swap"] = _STATS.get("pn118_rerun_swap", 0) + 1
-        log.info("PN118: rerun SWAP req=%s — rerun more confident "
+        log.info("PN123: rerun SWAP req=%s — rerun more confident "
                  "(c_last rerun=%.3f >= orig=%.3f, budget=%d)",
                  req_id, c_last_rerun, c_last_orig, rerun_budget)
         return True
     except Exception as exc:
         _STATS["pn118_errors"] += 1
-        log.warning("PN118: rerun failed req=%s (%s) — original kept", req_id, exc)
+        log.warning("PN123: rerun failed req=%s (%s) — original kept", req_id, exc)
         return False
 
 
-async def _maybe_pn118_closegate(serving: Any, request: Any, result: Any) -> bool:
-    """PN118 premature-close gate. Returns True iff a continuation was spliced
+async def _maybe_pn123_closegate(serving: Any, request: Any, result: Any) -> bool:
+    """PN123 premature-close gate. Returns True iff a continuation was spliced
     in (enforce mode). Shadow mode logs the would-fire and returns False."""
     if _skip_common(request) or not _bounded(request):
         return False
@@ -1334,10 +1815,10 @@ async def _maybe_pn118_closegate(serving: Any, request: Any, result: Any) -> boo
     if choice is None:
         return False
     # One fire per request: mark the choice so a re-invocation short-circuits.
-    if getattr(choice, "_pn118_seen", False):
+    if getattr(choice, "_pn123_seen", False):
         return False
     try:
-        setattr(choice, "_pn118_seen", True)
+        setattr(choice, "_pn123_seen", True)
     except Exception:  # pragma: no cover - frozen models
         pass
     message = getattr(choice, "message", None)
@@ -1356,35 +1837,35 @@ async def _maybe_pn118_closegate(serving: Any, request: Any, result: Any) -> boo
         return False
     spent = _reasoning_tokens(result, reasoning)
     # (2) NOT a force/cap-bound close — a cap-bound close has no leftover budget.
-    grace = _env_int("GENESIS_PN118_GRACE", 256)
+    grace = _env_int(_cg("GRACE"), 256)
     if spent >= budget - grace:
-        log.info("PN118: skip req=%s cap-bound close (spent=%d budget=%d grace=%d)",
+        log.info("PN123: skip req=%s cap-bound close (spent=%d budget=%d grace=%d)",
                  req_id, spent, budget, grace)
         _STATS["pn118_skips"] += 1
         return False
     # (3) premature — spent well under the assigned budget.
-    frac = _env_float("GENESIS_PN118_FRAC", 0.6)
+    frac = _env_float(_cg("FRAC"), 0.6)
     if spent >= frac * budget:
-        log.info("PN118: skip req=%s not premature (spent=%d >= %.2f*%d)",
+        log.info("PN123: skip req=%s not premature (spent=%d >= %.2f*%d)",
                  req_id, spent, frac, budget)
         _STATS["pn118_skips"] += 1
         return False
-    # (4) WEAK-confidence gate. GENESIS_PN118_GATE selects the discriminator:
+    # (4) WEAK-confidence gate. GENESIS_PN123_GATE selects the discriminator:
     #   margin (default) — the post-close letter-margin echo self-call (current)
     #   cmean            — pn112's engine-side rolling confidence via the /tmp
     #                      bridge; NO echo call. The only signal with AUC > 0.5.
     #   both             — cmean AND margin must both pass.
-    gate = (os.environ.get("GENESIS_PN118_GATE", "margin") or "margin").strip().lower()
+    gate = (os.environ.get(_cg("GATE"), "margin") or "margin").strip().lower()
     if gate not in ("margin", "cmean", "both"):
         gate = "margin"
 
     c_last: float | None = None
     if gate in ("cmean", "both"):
-        join_id = _pn118_join_id(request, result)
+        join_id = _pn123_join_id(request, result)
         entry = _pn112_conf_lookup(join_id)
-        cmean_ok, c_last = _pn118_cmean_decision(entry, req_id, join_id)
+        cmean_ok, c_last = _pn123_cmean_decision(entry, req_id, join_id)
         # shadow-log the looked-up c_last either way (calibration visibility).
-        log.info("PN118: cmean lookup req=%s join=%s c_last=%s n=%s pass=%s",
+        log.info("PN123: cmean lookup req=%s join=%s c_last=%s n=%s pass=%s",
                  req_id, join_id,
                  ("%.3f" % c_last) if c_last is not None else "na",
                  (entry or {}).get("n", "na"), cmean_ok)
@@ -1397,17 +1878,17 @@ async def _maybe_pn118_closegate(serving: Any, request: Any, result: Any) -> boo
         try:
             margin = await _letter_margin(serving, request, content)
         except Exception as exc:
-            log.warning("PN118: margin read failed req=%s (%s) — skip (fail-open)",
+            log.warning("PN123: margin read failed req=%s (%s) — skip (fail-open)",
                         req_id, exc)
             _STATS["pn118_errors"] += 1
             return False
         if margin is None:
-            log.info("PN118: skip req=%s no letter margin (open-ended answer)", req_id)
+            log.info("PN123: skip req=%s no letter margin (open-ended answer)", req_id)
             _STATS["pn118_skips"] += 1
             return False
-        margin_thr = _env_float("GENESIS_PN118_MARGIN", 0.5)
+        margin_thr = _env_float(_cg("MARGIN"), 0.5)
         if margin >= margin_thr:
-            log.info("PN118: skip req=%s confident (margin=%.3f >= %.3f)",
+            log.info("PN123: skip req=%s confident (margin=%.3f >= %.3f)",
                      req_id, margin, margin_thr)
             _STATS["pn118_skips"] += 1
             return False
@@ -1415,33 +1896,53 @@ async def _maybe_pn118_closegate(serving: Any, request: Any, result: Any) -> boo
     # the fire signal logged / passed downstream: margin when read, else c_last.
     signal = margin if margin is not None else (c_last if c_last is not None else -1.0)
 
-    mode = (os.environ.get("GENESIS_PN118_MODE", "shadow") or "shadow").strip().lower()
+    mode = (os.environ.get(_cg("MODE"), "shadow") or "shadow").strip().lower()
     if mode != "enforce":
         _STATS["pn118_shadow_would_fire"] += 1
-        log.info("PN118: WOULD-FIRE (shadow) req=%s gate=%s spent=%d budget=%d signal=%.3f",
+        log.info("PN123: WOULD-FIRE (shadow) req=%s gate=%s spent=%d budget=%d signal=%.3f",
                  req_id, gate, spent, budget, signal)
         return False
 
     _STATS["pn118_attempts"] += 1
-    action = (os.environ.get("GENESIS_PN118_ACTION", "continue")
+    action = (os.environ.get(_cg("ACTION"), "continue")
               or "continue").strip().lower()
     if action == "rerun":
-        return await _pn118_rerun(serving, request, result, message, choice,
+        return await _pn123_rerun(serving, request, result, message, choice,
                                   content, spent, budget, req_id, signal, c_last)
-    return await _pn118_continue(serving, request, result, message, choice,
+    return await _pn123_continue(serving, request, result, message, choice,
                                  reasoning, spent, budget, req_id, signal)
 
 
 async def maybe_rescue_answer(serving: Any, request: Any, result: Any) -> Any:
-    # PN118 premature-close gate: an independent leg in the same post-response
+    # [BUG-157] This is the only seat in the module that is handed the serving
+    # instance, so it is where Leg 1b's wrapper gets installed. Unconditional
+    # and idempotent; it runs before every master-flag gate below because the
+    # wrapper it installs has its OWN flag and must be armable without a
+    # redeploy. Cannot help the request that installs it (that request is
+    # already inside create_chat_completion) — every later one, yes.
+    install_route_autosplit(serving)
+    # PN123 premature-close gate: an independent leg in the same post-response
     # seat, its own master flag, unaffected by the PN101 master/repair toggles.
-    if (_pn118_master_on() and not hasattr(result, "__aiter__")
+    if (_pn123_master_on() and not hasattr(result, "__aiter__")
             and not getattr(request, "stream", False)):
         try:
-            await _maybe_pn118_closegate(serving, request, result)
+            await _maybe_pn123_closegate(serving, request, result)
         except Exception as exc:  # pragma: no cover - belt-and-suspenders fail-open
             _STATS["pn118_errors"] += 1
-            log.warning("PN118: closegate failed (%s) — original kept", exc)
+            log.warning("PN123: closegate failed (%s) — original kept", exc)
+    # [BUG-156] Output-side banner-echo net. Non-streaming only (a streaming
+    # splice would mean owning SSE framing) and independent of the PN101 master
+    # flag: the banner it cleans up after is PN102's, not PN101's.
+    # Placed AFTER the close gate (whose rerun/continue can replace `content`
+    # wholesale) and BEFORE the PN101 legs (escalate only fires on EMPTY
+    # content, and repair APPENDS to content this has already cleaned) — so
+    # every path that can put text in the answer channel is covered exactly
+    # once.
+    if not hasattr(result, "__aiter__") and not getattr(request, "stream", False):
+        try:
+            _maybe_strip_banner_echo(request, result)
+        except Exception as exc:  # pragma: no cover - fail-open
+            log.warning("PN102: banner-echo net failed (%s) — original kept", exc)
     if not _master_on() or not _env_bool("GENESIS_PN101_REPAIR", True):
         return result
     if hasattr(result, "__aiter__"):  # streaming generator — cannot repair
