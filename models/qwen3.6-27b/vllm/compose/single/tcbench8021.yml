@@ -1187,7 +1187,12 @@ services:
       # for banked-run RNG-path comparability; keep probabilistic as a prod
       # option for any t1.0 serving config.]
       # [06:26Z USER: t1.0 stack everywhere — probdraft ON for the method sweep.]
-      - '{"method":"mtp","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}'
+      # [2026-07-26] draft depth switchable so the 3/4/5/6 ladder is a unit
+      # drop-in. Per-position acceptance at n=3 is 0.87 / 0.71 / 0.54, so each
+      # extra draft token buys less while costing the same verify compute —
+      # this exists to measure that, not because deeper is assumed better.
+      # Default is byte-identical to the hardcoded 3 it replaces.
+      - '{"method":"mtp","num_speculative_tokens":${NUM_SPEC_TOKENS:-3},"draft_sample_method":"probabilistic"}'
       - --config
       - /config/cache-override.yaml
       - --host
