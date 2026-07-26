@@ -182,7 +182,11 @@ def case8_pn100_stamps_every_site() -> None:
     lines = src.splitlines()
     sets = [i for i, ln in enumerate(lines)
             if re.search(r"^\s*request\.thinking_token_budget = ", ln)]
-    check("case8: three budget-setting sites", len(sets) == 3,
+    # 4 since 2026-07-26: the explicit-thinking-off bypass CLEARS a zero budget
+    # (`= None`) so no holder state entry is ever built for it, and stamps 0 in
+    # the same breath. The invariant the loop below asserts — every assignment
+    # site stamps — is the thing that matters; the count is a drift tripwire.
+    check("case8: four budget-setting sites", len(sets) == 4,
           f"found {len(sets)}")
     for i in sets:
         window = "\n".join(lines[i:i + 6])

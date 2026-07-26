@@ -20,6 +20,53 @@ Trigger policy — explicit intent always wins, auto covers the rest:
   - explicit chat_template_kwargs.enable_thinking=False    -> untouched
     (covers PN16 variant-1 decisions too)
   - chat_template_kwargs.thinking_budget: "off" | 0        -> untouched
+
+EXPLICIT THINKING-OFF IS A HARD BYPASS (2026-07-26, USER directive)
+-------------------------------------------------------------------
+"prompts with reasoning / thinking off in request correctly bypasses all
+thinking things while something that doesnt have that runs on thinking."
+
+A request that ASKS for thinking off must exit every thinking layer, not just
+this one. `_decide_mode` already returned "skip" for all five off-forms, so
+PN100 itself never classified them and never budgeted them — but "skip" is
+silence, and three layers downstream read silence as "nothing was decided":
+
+  1. `chat_template_kwargs.thinking_budget: "off"` and `reasoning: off` left
+     `enable_thinking` UNSET. The Qwen3.6 template defaults it ON, so the
+     caller's off-intent never reached the render — the model thought, with
+     no budget at all (the worst of both).
+  2. `thinking_token_budget: 0` (the house-preferred off form — callers use
+     `thinking_token_budget: N`, NEVER `reasoning_effort`) reached the worker
+     as a REAL budget: ThinkingBudgetStateHolder built a state entry for it,
+     PN108's plateau cap and the forced-`</think>` machinery attached to that
+     entry, and the template still opened `<think>`.
+  3. No `h119_overridable` stamp was written, so the H119 route consumer read
+     the row as "caller said nothing" and installed a provisional DEEP budget
+     at batch-add — measured on the live boot: 101 thinking-OFF requests got
+     an H119 budget. The consumer acts in sync_batch; the router's own
+     thinking-off tap (`_prompt_thinking`) only runs later, in the prefill
+     postprocess, so it can never get there first.
+
+`_explicit_thinking_off()` + `_apply_explicit_off()` close all three: one
+short-circuit at the TOP of the hook that renders the off decision explicit
+(`enable_thinking=False`), clears the zero budget so no holder entry is ever
+built, and stamps `h119_overridable=0` so the worker keeps out. No classify
+call is made (that is a whole extra chat completion — 0.3-0.6s typical, 2.7s
+worst), no banner can attach (PN102 gates on both `enable_thinking is False`
+and a positive budget), and no forced-close machinery has a state entry to
+attach to.
+
+REQUEST PARAMS ONLY. Like `_shape_tier0`, this never reads prompt TEXT — the
+PN16-regex lesson. A request that does not carry one of the off forms runs on
+thinking exactly as before; the ~95-98% tier-0/engage figure is a property of
+requests that specified NOTHING (GENESIS_PN100_AUTO_DEFAULT=1 classifies
+those), not of requests that asked for off.
+
+Gate: GENESIS_THINKING_OFF_STRICT (DEFAULT ON — this enforces the caller's
+own choice rather than overriding it; set 0 to restore the pre-2026-07-26
+silence). Runs even when GENESIS_ENABLE_PN100_AUTO_BUDGET is 0: the bypass is
+a request contract, not a budget policy, and the H119 stamp has to be written
+whether or not PN100 is allocating this boot.
   - chat_template_kwargs.thinking_budget: <int>            -> that budget
   - chat_template_kwargs.thinking_budget: "auto"           -> classify now
   - else if GENESIS_PN100_AUTO_DEFAULT                     -> classify
@@ -176,6 +223,7 @@ _STATS: dict[str, int] = {
     "tier_2": 0,
     "tier_3": 0,
     "explicit_skip": 0,
+    "explicit_off": 0,
     "tiny_skip": 0,
     "shape_tier0": 0,
     "prefilter_default": 0,
@@ -220,6 +268,101 @@ def _flatten_messages(request: Any, cap: int = 8000) -> str:
         half = cap // 2
         joined = f"{joined[:half]}\n...[truncated]...\n{joined[-half:]}"
     return joined
+
+
+# ── explicit request-level thinking-off (USER directive, 2026-07-26) ────────
+# The four wire forms an "off" can arrive in. Everything else — including a
+# missing flag — means "unspecified", which runs on thinking.
+_OFF_WORDS = frozenset(("off", "none", "no", "false", "disable", "disabled",
+                        "0"))
+
+
+def _strict_off() -> bool:
+    """DEFAULT ON. Honouring the caller's own off is not an override."""
+    return _env_bool("GENESIS_THINKING_OFF_STRICT", True)
+
+
+def _is_off_value(val: Any) -> bool:
+    """True iff `val` is one of the recognised OFF spellings.
+
+    Bools first: `False` is an int subtype and `True == 1`, so an unguarded
+    numeric test would read `enable_thinking=True` as a zero-ish off (the same
+    class of bug the 2026-07-23 ultra-review #10 found in `_decide_mode`).
+    Also unwraps the OpenAI Responses-API object form `{"effort": ...}` that
+    PN71 accepts on `reasoning`.
+    """
+    if isinstance(val, bool):
+        return val is False
+    if isinstance(val, (int, float)):
+        return val == 0
+    if isinstance(val, str):
+        return val.strip().lower() in _OFF_WORDS
+    if isinstance(val, dict):
+        return _is_off_value(val.get("effort"))
+    return False
+
+
+def _explicit_thinking_off(request: Any) -> str | None:
+    """Name the wire form that turned thinking off, or None if unspecified.
+
+    REQUEST PARAMS ONLY — never prompt text. Ordered most-specific first so
+    the log line names the field the caller actually used.
+    """
+    ctk = getattr(request, "chat_template_kwargs", None) or {}
+    if isinstance(ctk, dict):
+        if ctk.get("enable_thinking", None) is False:
+            return "chat_template_kwargs.enable_thinking=false"
+        if _CONTROL_KEY in ctk and _is_off_value(ctk.get(_CONTROL_KEY)):
+            return f"chat_template_kwargs.{_CONTROL_KEY}=off"
+    # The house-preferred form. `is not None` matters: absent != 0.
+    budget = getattr(request, "thinking_token_budget", None)
+    if isinstance(budget, int) and not isinstance(budget, bool) and budget <= 0:
+        return "thinking_token_budget=0"
+    # PN71 aliases. Only the OFF spellings — low/medium/high/max are ON.
+    for attr in ("reasoning_effort", "reasoning"):
+        val = getattr(request, attr, None)
+        if val is not None and _is_off_value(val):
+            return f"{attr}=off"
+    return None
+
+
+def _apply_explicit_off(request: Any) -> None:
+    """Make the caller's off decision explicit to every layer downstream.
+
+    Three writes, each closing one leak documented in the module header:
+      * `enable_thinking=False` — the chat template pre-closes `<think></think>`
+        (so the model spends zero reasoning tokens), PN16 variant-3 defers,
+        PN102's banner injector early-returns, and PN114's seed stripper
+        declines. This is the one signal every downstream layer already reads.
+      * clear a zero `thinking_token_budget` — a budget of 0 is still a budget
+        to `ThinkingBudgetStateHolder`, which builds a state entry for it and
+        hands that entry to the forced-close path and to PN108's plateau cap.
+        None makes the holder pop the row instead of tracking it.
+      * `h119_overridable=0` — the ownership stamp the H119 route consumer
+        reads in `sync_batch`. Without it an unbudgeted row looks unclaimed and
+        the consumer installs a provisional DEEP budget before the router's own
+        thinking-off tap has run (it runs in the prefill postprocess, a whole
+        phase later — this is why the frontend has to say it).
+
+    The control key is popped for the same reason `_decide_mode` pops it: it is
+    our protocol, not the chat template's, and it must not reach the render.
+    """
+    ctk = dict(getattr(request, "chat_template_kwargs", None) or {})
+    ctk.pop(_CONTROL_KEY, None)
+    ctk["enable_thinking"] = False
+    # A banner/steps pair can only be here if something upstream already ran;
+    # neither is legal on a request that will not think.
+    ctk.pop("pn_env_banner", None)
+    ctk.pop("pn100_steps", None)
+    request.chat_template_kwargs = ctk
+    budget = getattr(request, "thinking_token_budget", None)
+    if isinstance(budget, int) and not isinstance(budget, bool) and budget <= 0:
+        try:
+            request.thinking_token_budget = None
+        except Exception:  # noqa: BLE001 — frozen model: the stamp still lands
+            log.debug("PN100: could not clear zero thinking_token_budget",
+                      exc_info=True)
+    _stamp_h119(request, 0)
 
 
 def _shape_tier0(request: Any) -> bool:
@@ -670,13 +813,32 @@ async def apply_hook_async(serving: Any, request: Any) -> None:
 
     Failure mode: any exception is caught by the call-site's try/except and
     the request proceeds untouched (fail-open to current behavior)."""
-    if not _is_enabled():
-        return
     ctk = getattr(request, "chat_template_kwargs", None)
     if ctk and ctk.pop(_MARKER_KEY, None):
-        return  # our own classify call — never recurse
-    _STATS["total_requests"] += 1
+        return  # our own classify call — never recurse (checked FIRST: that
+        # call carries enable_thinking=False and must not take the bypass)
+    enabled = _is_enabled()
+    if enabled:
+        _STATS["total_requests"] += 1
 
+    # ── explicit request-level thinking-off: hard bypass ──────────────────
+    # Deliberately ahead of the master gate — see the module header. The
+    # h119_overridable=0 stamp is a worker-side contract that has to be
+    # written whether or not PN100 is allocating budgets this boot.
+    if _strict_off():
+        off_form = _explicit_thinking_off(request)
+        if off_form is not None:
+            _STATS["explicit_off"] += 1
+            _apply_explicit_off(request)
+            log.info("PN100: explicit thinking-off (%s) — bypassed: no "
+                     "classify, no budget, no banner, no H119 grant", off_form)
+            return
+    if not enabled:
+        return
+
+    # NB with GENESIS_THINKING_OFF_STRICT on (the default) the off-forms never
+    # reach here, so "explicit_skip" now counts explicit ON intent only:
+    # a positive thinking_token_budget, or a non-off reasoning/reasoning_effort.
     mode, allow_disable = _decide_mode(request)
     if mode == "skip":
         _STATS["explicit_skip"] += 1

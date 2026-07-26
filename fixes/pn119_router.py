@@ -104,6 +104,15 @@ affect.
              counted as `scored_unknown`, and kept OUT of every rate
              denominator.
 
+That gate is a TAP, and a tap is too late to protect a thinking-OFF request
+from the CONSUMER. `_finalize` runs in the prefill postprocess;
+`h119_on_batch_add` ran in sync_batch, one phase earlier, and had already
+installed a provisional deep budget on any row the frontend left unstamped —
+101 thinking-OFF requests on the live boot. So `h119_on_batch_add` now runs
+the same last-marker-wins scan itself before it grants anything
+(`_prompt_reads_thinking_off`, `H119_RESPECT_THINKING_OFF`, default on),
+behind PN100's `h119_overridable=0` stamp as the cheap first line.
+
 MARKER IDENTITY (boot assertion). This module used to scan for the SINGLE
 ids PN119_THINK_START_ID / PN119_THINK_END_ID while the holder that actually
 forces `</think>` uses `reasoning_config.reasoning_start_token_ids` /
@@ -554,7 +563,8 @@ def make_snapshot(*, stats, boot_id="", pid=0, hostname="", started=0.0,
     # bump from h119_on_batch_add, which the aux tap cannot influence.
     batch_adds = sum(int(st.get(k, 0)) for k in (
         "h119_provisional_added", "h119_caller_explicit", "h119_pn100_override",
-        "h119_tier0_respected", "h119_pn100_entry_missing", "h119_no_router",
+        "h119_tier0_respected", "h119_prompt_thinking_off",
+        "h119_pn100_entry_missing", "h119_no_router",
         "h119_router_not_enforce"))
     cons = dict(consumer or {})
     cons.setdefault("flag_env", False)
@@ -565,6 +575,10 @@ def make_snapshot(*, stats, boot_id="", pid=0, hostname="", started=0.0,
         "provisional_added": int(st.get("h119_provisional_added", 0)),
         "caller_explicit": int(st.get("h119_caller_explicit", 0)),
         "tier0_respected": int(st.get("h119_tier0_respected", 0)),
+        # Unstamped rows the consumer declined because the RENDER read
+        # thinking-off. A non-zero value with tier0_respected at 0 means the
+        # PN100 stamp is not reaching the worker — the fallback is carrying it.
+        "prompt_thinking_off": int(st.get("h119_prompt_thinking_off", 0)),
         "routed_deep": int(st.get("h119_routed_deep", 0)),
         "routed_lean": int(st.get("h119_routed_lean", 0)),
         "route_missing": int(st.get("h119_route_missing", 0)),
@@ -2814,6 +2828,54 @@ def _h119_overridable_stamp(params) -> int | None:
         return None
 
 
+# Second line of defence for the USER thinking-off rule (2026-07-26). PN100
+# now stamps h119_overridable=0 on every explicitly-off request, which is the
+# cheap path — but a boot with GENESIS_ENABLE_PN100_AUTO_BUDGET=0, a drifted
+# PN100 call-site anchor (BUG-141's class), or a /v1/completions caller that
+# never passes through the chat frontend all reach sync_batch UNSTAMPED. The
+# consumer then read "unclaimed" and installed a provisional DEEP entry:
+# measured on the live boot, 101 thinking-OFF requests carried an H119 budget.
+#
+# The race is structural, not a bug in the tap. `h119_on_batch_add` runs in
+# sync_batch; the router's own thinking-off gate (`_prompt_thinking` inside
+# `_finalize`) runs in the prefill POSTPROCESS — a whole phase later, and only
+# for a request that is already being tracked. Nothing the tap learns can
+# un-grant a budget the consumer handed out one phase earlier.
+#
+# So the consumer reads the same signal itself, from the one thing it already
+# has in hand: the rendered prompt. A thinking-OFF render pre-closes the
+# region, so the tail carries BOTH markers with `</think>` LAST — identical
+# scan to `PN119Router._prompt_thinking`, deliberately (the two must agree
+# about what a thinking row is). Never claims off when the markers are
+# unavailable: an empty pattern would read EVERY prompt as off and silently
+# disable the whole consumer.
+_RESPECT_OFF_FLAG = "H119_RESPECT_THINKING_OFF"
+
+
+def _prompt_reads_thinking_off(prompt_tok_ids) -> bool:
+    """True iff this rendered prompt pre-closed its think region."""
+    if not _truthy(_env(_RESPECT_OFF_FLAG, "1")):
+        return False
+    router = ROUTER
+    if router is None:
+        return False
+    start_ids = getattr(router, "_think_start_ids", None)
+    end_ids = getattr(router, "_think_end_ids", None)
+    if not start_ids or not end_ids:
+        return False
+    if not prompt_tok_ids:
+        return False
+    window = getattr(router, "_tail_window", 64) or 64
+    tail = list(prompt_tok_ids[-window:])
+    last_end = router._last_subseq(tail, end_ids)
+    if last_end < 0:
+        return False
+    # LAST marker wins: a `<think>` after the close means the region reopened
+    # (a PN102 seed, or an earlier turn's closed region followed by this
+    # turn's open one), and that request is thinking-ON.
+    return router._last_subseq(tail, start_ids) < last_end
+
+
 def h119_on_batch_add(holder, index, params, prompt_tok_ids,
                       output_tok_ids) -> bool:
     """Called from ThinkingBudgetStateHolder.sync_batch for EVERY added row.
@@ -2859,6 +2921,12 @@ def h119_on_batch_add(holder, index, params, prompt_tok_ids,
             # AND told us to keep out; installing a provisional deep entry here
             # would start tracking a request that never enters <think>.
             _bump("h119_tier0_respected")
+            return False
+        if stamp is None and _prompt_reads_thinking_off(prompt_tok_ids):
+            # Unstamped AND the render pre-closed </think>: the caller asked
+            # for thinking off and no frontend stamp reached us. Granting a
+            # provisional budget here is exactly the 101-row defect.
+            _bump("h119_prompt_thinking_off")
             return False
         deep = _consumer_state["deep"]
         entry = holder._init_state_entry(prompt_tok_ids, deep)
