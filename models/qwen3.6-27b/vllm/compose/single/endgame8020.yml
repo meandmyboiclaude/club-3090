@@ -332,6 +332,22 @@ services:
       - GENESIS_ENABLE_PN372_EAGLE_ZERO_SEQLEN_GUARD=1
       - GENESIS_ENABLE_SPN71_THINKING_TAG_NORMALIZE=1
       - GENESIS_ENABLE_SPN73_TOOL_ARGS_SAFE_NORMALIZE=1
+      # [BUG-158 2026-07-27] reasoning-token ATTRIBUTION. The chat template opens
+      # <think> in PROMPT space (chat_template.jinja:147), so the output stream
+      # carries only the closer; parser_engine.py:624 count_reasoning_tokens
+      # seeks the OPENER in the output ids to raise its depth counter, never
+      # finds one, and reports usage.completion_tokens_details.reasoning_tokens=0
+      # on every thinking request. The graft seeds the walk from the parser's own
+      # per-request initial_state (already set from chat_template_kwargs.
+      # enable_thinking, qwen3.py:227) and mirrors the transition table.
+      # Touches ONE pure Sequence[int]->int method: it cannot move a byte of
+      # content, reasoning or any SSE delta — only that integer. Covers the
+      # streaming and non-streaming usage attach points alike (serving.py:964 /
+      # :1300). Default OFF: flipping it changes a number consumers may have
+      # calibrated against 0, so it wants a boot-window receipt first.
+      # NOT the same as message.reasoning_content — that field does not exist on
+      # this pin (renamed to `reasoning`); a client reading it gets null always.
+      - GENESIS_ENABLE_BUG158_REASONING_TOKENS=${GENESIS_ENABLE_BUG158_REASONING_TOKENS:-0}
       # ===== MUST-INCLUDE WAVE-1 (2026-07-14): pristine(107)∩qwen3.6-templates + house dedup =====
       # USER: enable everything, none skipped; crash/quality-breakers FIXED not ditched.
       # PN77=0 (degenerate token-soup, quality killer). PN399 deduped→/fixes PN79 (IMA gone).
@@ -532,6 +548,20 @@ services:
       # guillotined by max_tokens). BEHAVIORAL -> ships OFF; flip to 1 after
       # the 30-item regression validates (design doc DESIGN-pn101-*.md).
       - GENESIS_ENABLE_PN101_ANSWER_RESCUE=1
+      # [PN155 2026-07-27, BUG-155] budget-truth guard: a STRUCTURED request
+      # that spends its whole thinking budget takes the grammar's cheapest exit
+      # ({"facts": []}, ~8 tokens) and reports finish_reason=stop — silent data
+      # loss the caller cannot tell from a genuinely empty chunk. This leg
+      # stamps the granted budget on the response (reported NOWHERE today) and,
+      # in `flag` mode, reports the truthful finish_reason=length instead.
+      # Own master flag: every PN101 leg is gated behind `not _skip_common()`,
+      # which EXCLUDES structured requests, so this cannot ride PN101's.
+      # BEHAVIORAL in flag/retry mode -> ships OFF; MUST be declared here or a
+      # systemd Environment= drop-in never reaches the engine (the PN102
+      # autosplit trap, 051e2ea6). Declared in prod too so the flip is one
+      # variable, not a compose edit — same reason the autosplit flag is.
+      - GENESIS_ENABLE_PN155_BUDGET_TRUTH=${GENESIS_ENABLE_PN155_BUDGET_TRUTH:-0}
+      - GENESIS_PN155_MODE=${GENESIS_PN155_MODE:-observe}
       # [PN102 2026-07-18] Envelope Contract: template banner + think-seed
       # (self-counted steps), planner-router steps, p75=193 tok/step calib.
       - GENESIS_ENABLE_PN102_CONTRACT=1
@@ -679,6 +709,13 @@ services:
         # natively (:244 -> :774); budgets were engine-enforced all along.
         # Patch moved to /fixes/_archive/ (re-wire only if a future pin drops
         # the protocol field): # python3 /fixes/_archive/patch_pn109_budget_bridge.py
+        # [BUG-158 2026-07-27] reasoning-token attribution: seeds
+        # count_reasoning_tokens from the parser's own initial_state so a
+        # template-opened <think> (chat_template.jinja:147, opener in PROMPT
+        # space) is billed as reasoning instead of nothing. Edits ONE pure
+        # counting method -> byte-inert on content/reasoning/tool_calls by
+        # construction. DARK unless GENESIS_ENABLE_BUG158_REASONING_TOKENS=1.
+        python3 /fixes/patch_bug158_reasoning_token_attribution.py
         python3 /fixes/patch_pn71_reasoning_alias.py
         python3 /fixes/patch_pn72_streaming_toolcall_content_recover.py
         # [PN76 — 2026-06-26] Engine-level deferred tool-call commit: holds the <tool_call>
