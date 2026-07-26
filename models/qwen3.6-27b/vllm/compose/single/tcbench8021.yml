@@ -158,6 +158,16 @@ services:
       # sit ~0.14 apart, which is wider than the whole 25-35% routing band.
       - PN119_MODE=${PN119_MODE:-shadow}
       - PN119_TDEEP=${PN119_TDEEP:-0.495}
+      # [2026-07-26] Rate controller. TDEEP above is ABSOLUTE, on a score scale
+      # that shifts across probe reloads — the live failure was a 252-request
+      # window whose MAX score (0.4867) sat below it, i.e. zero deep for 10.6
+      # minutes with no critical alarm. RATE_TARGET>0 switches the cut point to
+      # the (1-target) quantile of this boot's own recent scores, so where the
+      # scale sits stops mattering. 0 = off, keeping TDEEP exactly as today;
+      # 0.30 is the band's design point. RATE_MIN_N is the warmup below which
+      # it defers to TDEEP rather than trust a quantile of a handful of scores.
+      - PN119_RATE_TARGET=${PN119_RATE_TARGET:-0}
+      - PN119_RATE_MIN_N=${PN119_RATE_MIN_N:-64}
       - GENESIS_PN119_PROBE=/pn119/probe.npz
       - PN119_SINK=/pn119-sink
       # [PN119-v2 2026-07-25] self-training loop knobs (BUILD-PACK §v2):
