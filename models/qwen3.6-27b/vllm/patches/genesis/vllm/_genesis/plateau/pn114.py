@@ -74,9 +74,14 @@ def confirm_enabled() -> bool:
     return _env_bool("GENESIS_PN112_CONFIRM", False)
 
 
+def softland_enabled() -> bool:
+    return _env_bool("GENESIS_ENABLE_PN121_SOFTLAND", False)
+
+
 def any_enabled() -> bool:
     return (probes_enabled() or wrapup_enabled() or confirm_enabled()
-            or _env_bool("GENESIS_PN112_WRAPUP_AT_CAP", False))
+            or _env_bool("GENESIS_PN112_WRAPUP_AT_CAP", False)
+            or softland_enabled())
 
 
 # one-shot import-time diagnostic: shows the env truth in whichever process
@@ -351,17 +356,23 @@ def _close(state: dict[str, Any], st: dict[str, Any], why: str,
              why, think, grace, st.get("req_id"))
 
 
-def arm_wrapup(state: dict[str, Any], req_id: str | None = None) -> bool:
+def arm_wrapup(state: dict[str, Any], req_id: str | None = None,
+               key: str = "wrapup_close") -> bool:
     """R1b: close the think block through the wrap-up sentence + </think>.
     Caller (pn112 fire / PN114 stop rule) uses this INSTEAD of a bare cut.
     Refuses while an end-forcing is already in flight (arming would mangle
-    a half-emitted </think> sequence) — caller falls back to the bare cut."""
+    a half-emitted </think> sequence) — caller falls back to the bare cut.
+
+    `key` selects which ids-file span to force. Default is unchanged; PN121
+    passes "softland_close" (same sentence, "</think>\\n\\n" terminated) so
+    the soft landing can ship without moving the bytes the existing wrap-up
+    arms emit."""
     ids = _ids()
-    if not ids or not ids.get("wrapup_close"):
+    if not ids or not ids.get(key):
         return False
     if state.get("in_end"):
         return False
-    _arm(state, ids["wrapup_close"], "wrapup", req_id)
+    _arm(state, ids[key], "wrapup", req_id)
     return True
 
 
@@ -432,7 +443,26 @@ def observe_state(state: dict[str, Any], think_start_len: int,
     # think=2997, in_end=True). No think_count fallback for the same reason.
     think = _live_think_len(state, st)
     if think is None:
-        return  # not mid-think per the slice: nothing to arm onto
+        # not mid-think per the slice: nothing to arm onto. PN121 still gets
+        # a look — a parked budget must be handed back when the think block
+        # ends by any other route, or a later block inherits the sentinel.
+        if softland_enabled():
+            try:
+                from vllm._genesis.plateau import pn121_softland as _pn121
+                _pn121.release(state)
+            except Exception:
+                log.warning("PN114: pn121 release raised", exc_info=True)
+        return
+    # PN121 soft landing (2026-07-26, GENESIS_ENABLE_PN121_SOFTLAND=1): park
+    # the budget AT the cap and land the wrap-up cue on the next newline
+    # (hard force at cap+margin). Distinct from — and mutually exclusive
+    # with — the KILLED P-cap arm below, which fired 512 tokens EARLY.
+    if softland_enabled():
+        try:
+            from vllm._genesis.plateau import pn121_softland as _pn121
+            _pn121.observe(state, think, seq_idx, req_id)
+        except Exception:
+            log.warning("PN114: pn121 observe raised", exc_info=True)
     # P-cap (2026-07-23, GENESIS_PN112_WRAPUP_AT_CAP=1): a deep STILL-WORKING
     # request about to hit the hard budget guillotine closes through the
     # wrap-up sentence instead (targets the class PN112 never touches; the

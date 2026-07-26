@@ -23,6 +23,15 @@ MODEL = os.environ.get("GENESIS_PN114_TOKENIZER_PATH",
 PROBE_STR = "\nMy current answer: ("
 WRAPUP_STR = "\nConsidering the limited time, I'll provide the final answer now.\n"
 THINK_END = "</think>"
+# PN121 soft-landing close (2026-07-26). Same transition sentence as the
+# R1b wrap-up, but terminated with "</think>\n\n" per the P7 research doc §4
+# ("newline first, then </think>", answer-mode scaffolding after it). Kept as
+# a SEPARATE key so PN121 can ship without moving the existing wrapup_close
+# bytes that GENESIS_PN112_WRAPUP / the killed WRAPUP_AT_CAP arm emit.
+SOFTLAND_TAIL = "\n\n"
+# Qwen3 tool-call opener — the implicit reasoning end of upstream #44676.
+# PN121 refuses to inject anywhere after this appears in the think slice.
+TOOL_CALL_STR = "<tool_call>"
 
 # PN117 deep-band rescue arm texts (plan 2.3, s12-P17). First-person own-voice
 # continuations injected as REAL tokens at a sentence boundary — NEVER a numeric
@@ -57,7 +66,8 @@ def main() -> int:
     if not (_on("GENESIS_ENABLE_PN114_PROBE") or _on("GENESIS_PN112_WRAPUP")
             or _on("GENESIS_PN112_CONFIRM")
             or _on("GENESIS_PN112_WRAPUP_AT_CAP") or ppen_on
-            or _on("GENESIS_ENABLE_PN117_RESCUE")):
+            or _on("GENESIS_ENABLE_PN117_RESCUE")
+            or _on("GENESIS_ENABLE_PN121_SOFTLAND")):
         print("[pn114_boot_ids] no PN114-family/P-pen/PN117 flag set — "
               "skipping", flush=True)
         return 0
@@ -88,6 +98,41 @@ def main() -> int:
         ids = {"probe": probe, "newline": newline,
                "close_paren": close_paren,
                "wrapup_close": wrap + end, "ppen": ppen}
+        # PN121 soft landing (only when enabled — the vocab scan below is the
+        # one non-trivial cost in this script).
+        if _on("GENESIS_ENABLE_PN121_SOFTLAND"):
+            ids["softland_close"] = (
+                wrap + end + tok.encode(SOFTLAND_TAIL, add_special_tokens=False)
+            )
+            ids["tool_call"] = tok.encode(TOOL_CALL_STR,
+                                          add_special_tokens=False)
+            # Boundary set: every id whose surface form ENDS in a newline.
+            # "land at the next newline token" cannot be done with the single
+            # "\n" id alone — Qwen merges ".\n", ")\n", ":\n", "\n\n" etc. into
+            # single tokens, and those are exactly the sentence/paragraph
+            # boundaries the Nemotron rule targets.
+            nl_end: list[int] = []
+            try:
+                vocab_n = len(tok)
+                for _tid in range(vocab_n):
+                    _s = tok.convert_ids_to_tokens(_tid)
+                    if _s is None:
+                        continue
+                    _d = tok.convert_tokens_to_string([_s])
+                    if _d.endswith("\n"):
+                        nl_end.append(_tid)
+            except Exception as _exc:
+                print(f"[pn114_boot_ids] WARN: newline scan failed "
+                      f"({type(_exc).__name__}: {_exc}) — falling back to the "
+                      f"bare \\n id", flush=True)
+                nl_end = []
+            for _t in newline:
+                if _t not in nl_end:
+                    nl_end.append(_t)
+            ids["nl_end"] = nl_end
+            print(f"[pn114_boot_ids] PN121: softland_close="
+                  f"{len(ids['softland_close'])} tool_call={ids['tool_call']} "
+                  f"nl_end={len(nl_end)} nl_bare={newline}", flush=True)
         # PN117 arm texts + sentence-end id set (only when PN117 is enabled).
         if _on("GENESIS_ENABLE_PN117_RESCUE"):
             for _k, _s in PN117_ARMS.items():

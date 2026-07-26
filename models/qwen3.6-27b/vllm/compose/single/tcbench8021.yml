@@ -258,6 +258,31 @@ services:
       - GENESIS_ENABLE_PN114_SEED_SPAN=${GENESIS_ENABLE_PN114_SEED_SPAN:-0}
       - GENESIS_PN114_SEED_MODE=${GENESIS_PN114_SEED_MODE:-mirror}
       - GENESIS_PN114_SEED_MAX_N=${GENESIS_PN114_SEED_MAX_N:-64}
+      # [PN121 2026-07-26] SOFT LANDING of the thinking-budget close.
+      # DEFAULT OFF. Measured problem (aibox-20260726-clean-100): 38/100 rows
+      # are guillotined mid-sentence with a BARE </think>; they are 39% wrong
+      # vs 15% for natural stops, and they relocate the reasoning into the
+      # answer channel (median 908 answer tokens vs ~7).
+      # PN121 parks the budget AT the cap (PARK_AT=16 ahead of the holder's
+      # own spec-window trigger) and lands the transition phrase on the next
+      # NEWLINE, hard-forcing at cap+HARD_MARGIN. It EXTENDS; it never
+      # pre-empts — which is the difference from GENESIS_PN112_WRAPUP_AT_CAP,
+      # KILLED 2026-07-23 (aibox-20260723-wrapcapfull, 70/100 vs 83/100,
+      # e-value M=34.64) because it fired at budget-512 and shortened deep
+      # items (rtok 1746 -> 1414). PN121 refuses to run while that flag is
+      # also set. NOT a grace change: GENESIS_PN112_GRACE and
+      # H119_ROUTE_GRACE_TOKENS are untouched (a 384 GRACE has a live kill at
+      # the PN112 FIRE seat — different seat, do not conflate).
+      # Screen on ctok + WALL, never rtok: a forced close relocates rather
+      # than saves, so rtok flatters every close mechanism.
+      - GENESIS_ENABLE_PN121_SOFTLAND=${GENESIS_ENABLE_PN121_SOFTLAND:-0}
+      - PN121_SOFT_RESERVE=${PN121_SOFT_RESERVE:-320}
+      - PN121_PARK_AT=${PN121_PARK_AT:-16}
+      - PN121_HARD_MARGIN=${PN121_HARD_MARGIN:-384}
+      - PN121_NUDGE_NL=${PN121_NUDGE_NL:-2.0}
+      - PN121_NUDGE_END=${PN121_NUDGE_END:-1.0}
+      - PN121_NUDGE_ALL_NL=${PN121_NUDGE_ALL_NL:-0}
+      - PN121_MIN_BUDGET=${PN121_MIN_BUDGET:-512}
       - TRITON_CACHE_DIR=/root/.triton/cache
       # Genesis opt-ins
       # [BUG-071 CORRECTED 2026-07-14] GENESIS_PREALLOC_TOKEN_BUDGET=16384 REMOVED —
@@ -795,6 +820,13 @@ services:
         # Design: ~/shared/PN114-DESIGN-probe-stability-20260723.md.
         python3 /fixes/pn114_boot_ids.py
         python3 /fixes/patch_pn114_forced_span.py
+        # [PN121 2026-07-26] soft-landing grafts: N = soft-phase newline/
+        # </think> logit nudge at the raw-logits seat (must run AFTER the
+        # forced-span patch — it anchors on the line P-pen/graft H leaves
+        # behind); X = structured-output row stamp in the model runner so
+        # PN121 can suppress injection under constrained decoding (#44676 is
+        # unmerged upstream). DARK unless GENESIS_ENABLE_PN121_SOFTLAND=1.
+        python3 /fixes/patch_pn121_softland.py
         # [H119 2026-07-25] lens-router (was "PN119" — renamed away from the
         # lane-2 TurboQuant PN119 kernel; audit: PATCH-ID-COLLISION-AUDIT-
         # 20260725.md). BACK-COMPAT: the sidecar still reads the old flag name,
