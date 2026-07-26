@@ -1128,10 +1128,18 @@ services:
       # 100% pin -> no capacity-queue throttle) AND drops the prefill VRAM spike under guardian
       # SOFT 98 (0 gc-fires). 5-seq is the KV-limited max (6 needs util 0.93 -> thrash/OOM).
       # oom_resilience makes any over-budget prefill a graceful 500, never a crash.
+      # [2026-07-26] switchable. 4128 == the forced attention block size, and one
+      # ~4K prompt therefore eats the WHOLE per-step token budget, which is the
+      # measured ~9% gap between seqs-6 throughput and linear scaling. Lowering it
+      # lets more sequences share a prefill step. CAUTION: the 4128 value is
+      # entangled with the mamba block-hash contract (see the BUG-140 comment
+      # above ~line 1014) — PR48361 fixed the mid-block corruption that made it
+      # load-bearing, but verify on a boot rather than assuming. Defaults are
+      # byte-identical to the hardcoded values they replace.
       - --max-num-batched-tokens
-      - "4128"
+      - "${MAX_NUM_BATCHED_TOKENS:-4128}"
       - --long-prefill-token-threshold
-      - "4128"
+      - "${LONG_PREFILL_TOKEN_THRESHOLD:-4128}"
       # [2026-07-14 TODO-PLANNING] interactivity mode = fine-grained CUDA graphs + latency
       # kernels — favors our single-shot/low-concurrency rig. Real dev1060 flag (arg_utils.py).
       - --performance-mode
