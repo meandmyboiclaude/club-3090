@@ -1022,6 +1022,41 @@ def _truthy(v: str) -> bool:
     return v.lower() in ("1", "true", "yes", "on")
 
 
+# Router master switch. H119_LENS_ROUTER is the CANONICAL name since the
+# 2026-07-25 rename off the "PN119" id — that id belongs to lane-2's TurboQuant
+# k8v4 GQA kernel (PATCH-ID-COLLISION-AUDIT-20260725.md), which ships as
+# GENESIS_ENABLE_PN119 and is a completely different feature. The old
+# GENESIS_ENABLE_PN119_ROUTER stays readable so an operator whose compose sets
+# only the old name keeps the old behaviour.
+ENABLE_FLAG = "GENESIS_ENABLE_H119_LENS_ROUTER"
+ENABLE_FLAG_LEGACY = "GENESIS_ENABLE_PN119_ROUTER"
+
+
+def _router_enabled() -> bool:
+    """True when the lens router is switched on. Single source of truth.
+
+    PRECEDENCE — canonical-first, first-SET-wins:
+      1. GENESIS_ENABLE_H119_LENS_ROUTER, whenever it is set to a non-empty
+         value. It decides, INCLUDING when it disagrees with the legacy alias:
+         `H119_LENS_ROUTER=0` with a stale `PN119_ROUTER=1` still means OFF.
+         An OR over both names would make the canonical name unable to turn the
+         router off, which is exactly the kill-switch an operator reaches for
+         first; an AND would break the only-new-set case.
+      2. otherwise GENESIS_ENABLE_PN119_ROUTER (back-compat).
+      3. otherwise off.
+
+    EMPTY == UNSET, deliberately. A `${FOO:-}` chain in a compose entrypoint
+    yields "" on docker-compose, and that must fall THROUGH to the legacy name
+    rather than read as an explicit "off" — the same semantics the compose ':-'
+    shim had. This mirrors the shim exactly, which is what makes the shim
+    deletable: the resolution moved from the entrypoint into this function.
+    """
+    canonical = _env(ENABLE_FLAG)
+    if canonical:
+        return _truthy(canonical)
+    return _truthy(_env(ENABLE_FLAG_LEGACY))
+
+
 def _int_env(name: str, default: int) -> int:
     """Env int with a fail-SOFT parse: an operator typo must not change a
     label rule silently, and must not take the boot down either."""
@@ -1040,7 +1075,7 @@ class PN119Router:
     def maybe_create(cls, runner):
         """Called from load_model tail. Returns router or None; never raises."""
         try:
-            if not _truthy(_env("GENESIS_ENABLE_PN119_ROUTER")):
+            if not _router_enabled():
                 return None
             npz_path = _env("GENESIS_PN119_PROBE")
             if not npz_path or not os.path.isfile(npz_path):
@@ -1969,7 +2004,7 @@ class PN119Router:
             hostname=self.hostname, started=self.started,
             mode=self.mode, mode_requested=self.mode_requested,
             router_present=(ROUTER is self) if present is None else present,
-            router_enabled=_truthy(_env("GENESIS_ENABLE_PN119_ROUTER")),
+            router_enabled=_router_enabled(),
             tdeep=self.tdeep, fallback_route=self.fallback_route,
             fallback_requested=self.fallback_requested,
             explore_rate=self.explore_rate, probe=probe, consumer=consumer,
