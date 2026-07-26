@@ -147,8 +147,12 @@ services:
       # RENAMED from "PN119" 2026-07-25 — that id already belonged to lane-2's
       # TurboQuant k8v4 GQA kernel (GENESIS_ENABLE_PN119 below, line ~410).
       # See ~/shared/PATCH-ID-COLLISION-AUDIT-20260725.md.
-      # The old flag GENESIS_ENABLE_PN119_ROUTER=1 still works (alias resolved
-      # in the entrypoint below); prefer the canonical name.
+      # This IS the flag the router reads. The old name
+      # GENESIS_ENABLE_PN119_ROUTER still works as a legacy fallback, but it is
+      # now resolved inside fixes/pn119_router.py (canonical-first,
+      # first-SET-wins), NOT by an entrypoint alias — that shim was removed
+      # 2026-07-26. Consequence worth knowing: setting the canonical name to 0
+      # is a real kill-switch even if a stale legacy export says 1.
       - GENESIS_ENABLE_H119_LENS_ROUTER=1
       # [2026-07-25] made unit-overridable so mode/threshold can be flipped by a
       # drop-in without editing this file. Defaults keep today's shadow behaviour.
@@ -739,6 +743,19 @@ services:
       # Set GENESIS_PN102_BANNER_V5=0 to make the split real: v3 for the mass,
       # router-promoted v5 for the deep subset.
       - GENESIS_PN102_BANNER_V5=${GENESIS_PN102_BANNER_V5:-1}
+      # [BUG-157 2026-07-26] server-side route->banner autosplit. Without this
+      # the banner half of the router is CLIENT-DRIVEN: pn102_force_v5 is set in
+      # production code in exactly one place (answer_rescue.py:1210, the PN118
+      # adjudicated rerun), never on a normal request, so the only way to get a
+      # deep/lean banner split was for the caller to hit /v1/h119/score itself
+      # and pass the key back. Every banner-split number in this project came
+      # from that client two-step and is NOT reproducible from a plain request.
+      # The wrapper runs score -> choose -> generate one frame out, costing the
+      # same extra prefill the client already paid, with zero caller cooperation.
+      # MUST be declared here: a systemd Environment= drop-in only reaches the
+      # engine if the compose interpolates the var. It did not, so the flag read
+      # OFF and the split silently never fired.
+      - GENESIS_ENABLE_PN102_ROUTE_AUTOSPLIT=${GENESIS_ENABLE_PN102_ROUTE_AUTOSPLIT:-0}
       # [PN102 prefix-order 2026-07-25, backlog #4] STATIC_FIRST reorders the
       # number-carrying banners (v3 sized / v8 / v8b) so all static text
       # precedes the per-request figures — leading banner tokens become
@@ -854,20 +871,20 @@ services:
         # PN121 can suppress injection under constrained decoding (#44676 is
         # unmerged upstream). DARK unless GENESIS_ENABLE_PN121_SOFTLAND=1.
         python3 /fixes/patch_pn121_softland.py
-        # [H119 2026-07-25] lens-router (was "PN119" — renamed away from the
-        # lane-2 TurboQuant PN119 kernel; audit: PATCH-ID-COLLISION-AUDIT-
-        # 20260725.md). BACK-COMPAT: the sidecar still reads the old flag name,
-        # so resolve the canonical name onto it. An operator compose that sets
-        # only GENESIS_ENABLE_PN119_ROUTER is left untouched by the ':-' chain.
-        # THE DOUBLED DOLLAR IS LOAD-BEARING: compose interpolates entrypoint
-        # strings too, so a single-dollar brace expansion here is consumed by
-        # COMPOSE, never reaching the container shell (this comment must obey
-        # the same rule -- an unescaped brace expansion in it aborts `config`).
-        # podman-compose 1.6.0 only produced "1" because it non-standardly folds
-        # this service's own environment: into the substitution dict —
-        # docker-compose yields "" and a stale host export yields "0", both
-        # falsy to _truthy() in fixes/pn119_router.py. `$$` emits one literal $.
-        export GENESIS_ENABLE_PN119_ROUTER="$${GENESIS_ENABLE_PN119_ROUTER:-$${GENESIS_ENABLE_H119_LENS_ROUTER:-}}"
+        # [H119 2026-07-25 / shim REMOVED 2026-07-26] lens-router (was "PN119" —
+        # renamed away from the lane-2 TurboQuant PN119 kernel; audit:
+        # PATCH-ID-COLLISION-AUDIT-20260725.md).
+        # There used to be an alias shim here exporting GENESIS_ENABLE_PN119_ROUTER
+        # from the canonical name. It is gone because fixes/pn119_router.py now
+        # resolves the flag itself, canonical-first and first-SET-wins
+        # (_router_enabled(), :1026-1069).
+        # DO NOT REINSTATE IT, and note why it could not simply be deleted on its
+        # own: the shim MINTED the legacy name into the engine process environ —
+        # absent from `podman exec printenv`, present in /proc/1/environ — and the
+        # old code read ONLY that name. Deleting it before the sidecar fix would
+        # have made maybe_create() return None and turned live routing OFF with no
+        # error, no log and no counter. Shim removal and the sidecar fix therefore
+        # had to land in the same restart, and did.
         python3 /fixes/patch_h119_lens_router.py
         # [PN109 RETIRED 2026-07-20 BUG-107h] the 107e diagnosis was wrong —
         # this pin's chat_completion/protocol.py carries thinking_token_budget
