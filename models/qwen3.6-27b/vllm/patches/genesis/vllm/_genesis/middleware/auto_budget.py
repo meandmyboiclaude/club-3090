@@ -91,6 +91,16 @@ Env knobs:
                                      path byte-identical to before.
   GENESIS_PN100_SHAPE_SMALL_MAX_TOKENS  small-completion-cap threshold used by
                                      the temp-0 and forced-tool rules (512)
+  GENESIS_PN100_TOTAL_CEIL_F         DEFAULT-DARK (0.0 = off): total-completion
+                                     ceiling multiplier. Bounds think+answer at
+                                     max(F x budget, budget) + slack — see
+                                     _apply_total_ceiling() for the 2026-07-26
+                                     fit. Fitted ship value: 1.0.
+  GENESIS_PN100_TOTAL_CEIL_SLACK     answer allowance for that ceiling (default
+                                     1024, floor 256). Fitted ship value: 3072
+                                     = prod_mixed_v2 natural-stop answer max
+                                     2740 + margin. 1024 CLIPS REAL PROD
+                                     ANSWERS (prod p95 is 1802).
   GENESIS_PN100_SHAPE_MAX_TEMP       "very low" temperature ceiling for the
                                      temp-0 rule (default 0.0 = exactly zero)
 
@@ -230,6 +240,7 @@ _STATS: dict[str, int] = {
     "cache_hits": 0,
     "fallbacks": 0,
     "errors": 0,
+    "total_ceiling": 0,
 }
 
 # Tier cache: retries and template-identical callers skip the classify call.
@@ -701,6 +712,91 @@ def _stamp_h119(request: Any, overridable: int) -> None:
         log.debug("PN100: could not stamp h119_overridable", exc_info=True)
 
 
+_TOTAL_CEIL_MIN_SLACK = 256
+
+
+def _apply_total_ceiling(request: Any, budget: int) -> int | None:
+    """Bound TOTAL completion (think + answer) for a budgeted request.
+
+    [2026-07-23 total-completion ceiling, DARK; corrected + refitted
+    2026-07-26] The answer channel is unbounded and capped-think grinders
+    relocate their burn there. Measured on aibox-20260726-clean-100 (n=100,
+    joined 100/100 to the PN108 observe line, so every row's grant is known):
+
+      * 38/100 rows were force-closed, in TWO signatures — 28 at `cap-5`
+        (the PN100-grant path) and 10 at `cap-13` (the client-budget path).
+        The earlier review counted only the cap-5 signature.
+      * cap-5 rows: median 908 answer tokens (max 4279) against a median 56
+        on rows that stopped naturally. cap-13 rows do NOT relocate
+        (median 82) — the relocation grind is a PN100-grant-path effect.
+      * median total completion 3568 forced vs 522 self-stopped.
+
+    WHAT THIS ACTUALLY BOUNDS: the request's completion cap. It is a HARD
+    sampling stop — vLLM ends the sequence at the limit, `finish_reason` is
+    `"length"`, and the client receives the answer CUT MID-EMISSION with no
+    repair. There is no soft landing. Hence three safety rules below.
+
+    1. It bounds the EFFECTIVE cap. The old code wrote `max_tokens` only,
+       but vLLM's `ChatCompletionRequest` prefers `max_completion_tokens`
+       when set — so against any OpenAI-modern caller (which is what the
+       hindsight prod client sends) the ceiling was silently INERT.
+    2. It never cuts inside the think block. `ceil_total` is floored at
+       `budget + slack`, so an F < 1 (or a slack typo) can no longer produce
+       a request that dies before it can answer at all.
+    3. It only ever LOWERS. A caller who already asked for less keeps their
+       own smaller cap; we never raise a cap the caller set.
+
+    FITTED VALUES (banked data, 2026-07-26 — see the F trade curve in the
+    commit message). Answer-length p99 on rows that stopped NATURALLY (the
+    only answers uncontaminated by relocation):
+        GPQA clean-100, n=62 : p95 474, p99 1311, max 1311
+        prod_mixed_v2, n=1043 (89 trace-corrupted rows excluded):
+                               p95 1802, p99 2173, p99.9 2608, max 2740
+    Real traffic answers are ~2x longer than GPQA's, so SLACK IS SIZED OFF
+    PROD, not off the bench: 3072 clears the observed prod max (2740) with
+    12% margin and GPQA's max with 2.3x. F=1.0 with that slack binds 2/100
+    GPQA rows, both already-force-closed grinders, zero natural rows, zero
+    correct answers lost: -1873 ctok (-1.0%) and -29.0s wall (-1.0%).
+
+    F=2.0 — the value the original comment proposed — binds ZERO rows on
+    clean-100 at any slack. It was fitted on the older 8.4K-answer traces
+    and is inert against current traffic; do not ship it as "the safe one",
+    it is the OFF one.
+    """
+    tc_f = _env_float("GENESIS_PN100_TOTAL_CEIL_F", 0.0)
+    if tc_f <= 0 or budget <= 0:
+        return None
+    slack = max(_env_int("GENESIS_PN100_TOTAL_CEIL_SLACK", 1024),
+                _TOTAL_CEIL_MIN_SLACK)
+    ceil_total = max(int(budget * tc_f) + slack, budget + slack)
+    # The EFFECTIVE cap the caller already asked for: max_completion_tokens
+    # wins over max_tokens where both are set, but a caller may set either,
+    # so respect the tighter of the two and never raise it.
+    caps = [
+        v for v in (getattr(request, "max_completion_tokens", None),
+                    getattr(request, "max_tokens", None))
+        if isinstance(v, int) and not isinstance(v, bool) and v > 0
+    ]
+    if caps and min(caps) <= ceil_total:
+        return None  # caller is already tighter — leave the request alone
+    applied = False
+    for attr in ("max_tokens", "max_completion_tokens"):
+        if not hasattr(request, attr):
+            continue
+        try:
+            setattr(request, attr, ceil_total)
+            applied = True
+        except Exception:  # noqa: BLE001 — frozen model: fail open, no ceiling
+            log.debug("PN100: could not set %s for total ceiling", attr,
+                      exc_info=True)
+    if not applied:
+        return None
+    _STATS["total_ceiling"] += 1
+    log.info("PN100: total-completion ceiling %d (budget=%d F=%.2f slack=%d)",
+             ceil_total, budget, tc_f, slack)
+    return ceil_total
+
+
 def _apply_tier(request: Any, tier: int, allow_disable: bool) -> int:
     budgets = _tier_budgets()
     if tier == 0 and not allow_disable:
@@ -719,6 +815,9 @@ def _apply_tier(request: Any, tier: int, allow_disable: bool) -> int:
     request.chat_template_kwargs = ctk
     request.thinking_token_budget = budgets[tier]
     _stamp_h119(request, 1)
+    # The tier path relocates exactly like the continuous path — the ceiling
+    # was only ever wired into _apply_budget, so a tier-map boot got none.
+    _apply_total_ceiling(request, budgets[tier])
     return budgets[tier]
 
 
@@ -792,19 +891,7 @@ def _apply_budget(request: Any, budget: int) -> int:
     request.chat_template_kwargs = ctk
     request.thinking_token_budget = budget
     _stamp_h119(request, 1)
-    # [2026-07-23 total-completion ceiling, DARK] the answer channel is
-    # unbounded, and capped-think grinders relocate their burn there (measured:
-    # every atok>=1500 trace had capped think; 115/127 ran 8.4K answer tokens).
-    # F x budget + slack bounds TOTAL completion; answers stay readable
-    # (slack >= 1024) while the relocation grind is contained. GPQA-measured
-    # cost: F=2.0 cuts one correct grinder (~-1 acc) for ~-2s.
-    tc_f = _env_float("GENESIS_PN100_TOTAL_CEIL_F", 0.0)
-    if tc_f > 0:
-        slack = _env_int("GENESIS_PN100_TOTAL_CEIL_SLACK", 1024)
-        ceil_total = int(budget * tc_f) + slack
-        cur = getattr(request, "max_tokens", None)
-        if cur is None or cur > ceil_total:
-            request.max_tokens = ceil_total
+    _apply_total_ceiling(request, budget)
     return budget
 
 
