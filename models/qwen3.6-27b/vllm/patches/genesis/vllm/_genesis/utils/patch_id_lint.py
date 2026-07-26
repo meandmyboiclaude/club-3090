@@ -152,6 +152,15 @@ HOUSE_IDS_OUTSIDE_FIXES: dict[str, tuple[str, str]] = {
         "answer_rescue.py",
         "GENESIS_ENABLE_PN118_CLOSEGATE",
     ),
+    # answer_rescue.py Leg 5 — the BUG-155 budget-truth guard. Lives in the
+    # mounted genesis tree rather than `fixes/patch_pn155_*.py` because the
+    # middleware IS the deployment artefact (the tree is bind-mounted read-only
+    # into site-packages), so there is no file for an applier to rewrite.
+    "PN155": (
+        "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/middleware/"
+        "answer_rescue.py",
+        "GENESIS_ENABLE_PN155_BUDGET_TRUTH",
+    ),
 }
 
 

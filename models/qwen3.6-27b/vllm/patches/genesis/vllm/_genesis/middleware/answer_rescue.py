@@ -106,6 +106,14 @@ _STATS: dict[str, int] = {
     "banner_echo_stripped": 0,
     "banner_step_echo_seen": 0,
     "banner_step_echo_stripped": 0,
+    # Leg 5 — PN155 budget-truth guard (BUG-155).
+    "pn155_seen": 0,
+    "pn155_stamped": 0,
+    "pn155_fired": 0,
+    "pn155_flagged": 0,
+    "pn155_retries": 0,
+    "pn155_retry_rescued": 0,
+    "pn155_errors": 0,
 }
 
 
@@ -1913,6 +1921,371 @@ async def _maybe_pn123_closegate(serving: Any, request: Any, result: Any) -> boo
                                  reasoning, spent, budget, req_id, signal)
 
 
+# ─── Leg 5: PN155 budget-truth guard (BUG-155) ───────────────────────────────
+# Under a JSON grammar the cheapest completion the parser accepts is the empty
+# container — `{"facts": []}`, ~8 answer tokens. A request whose thinking budget
+# expires is force-closed by the holder and then takes that exit, and the caller
+# receives a well-formed, schema-valid, `finish_reason="stop"` response carrying
+# no data. Measured 2026-07-26 on prod_mixed_v3/guided: `prod-016` returned 0
+# facts after rtok=3899 against its 3900 grant (atok=8) on a chunk the unguided
+# arm mined 9 facts from. 25/40 guided rows sit exactly on a PN100 ceiling
+# (2098-2100 x14, 3099 x3, 3899 x8); the unguided control pins 2/40.
+#
+# NOTHING ELSE IN THIS MODULE CAN SEE IT, by construction:
+#   * `_skip_common()` returns True for `_has_structured_output(request)`, and
+#     every PN101 leg is gated behind `not _skip_common(request)` — the one
+#     component that exists to rescue empty answers excludes exactly the
+#     requests this hits;
+#   * the PN101 guillotine path needs `finish_reason == "length"` and these rows
+#     finish `"stop"` — the grammar closed the JSON legally.
+# So this is a NEW leg that runs ON the requests the existing gates skip, with
+# its own master flag, independent of PN101's.
+#
+# THE FIX IS ONE LINE OF SEMANTICS: report `finish_reason="length"`. That is the
+# truthful reason (the response ended because it ran out of budget, not because
+# the model was done), every OpenAI-compatible client already treats it as
+# incomplete, and no caller has to learn a new field to stop trusting the empty
+# array. The original is preserved on the choice, never destroyed.
+#
+# NOT DONE, deliberately (spec §3c): the grammar is NOT changed to reject `[]`
+# — an empty array is legal in the caller's schema and legitimately occurs
+# (prod-038's chunk is literally `<local-command-stdout>Bye!</local-command-
+# stdout>`, empty in three separate runs); rejecting it would convert a
+# detectable failure into a WRONG answer. And the forced close is not suppressed
+# — PN122's graft already keeps the forced `</think>` out of the constrained
+# region, which fixes malformed JSON, not this; a request that reaches its cap
+# still has to end somewhere and the grammar still offers the cheap exit.
+#
+# Env (all inert while GENESIS_ENABLE_PN155_BUDGET_TRUTH is unset):
+#   GENESIS_ENABLE_PN155_BUDGET_TRUTH   master, DEFAULT OFF (house rule:
+#                                       behavioural patches never default on)
+#   GENESIS_PN155_MODE                  observe | flag | retry (default observe;
+#                                       `flag` is the ship target — an unflagged
+#                                       empty IS the bug)
+#   GENESIS_PN155_STAMP_BUDGET          default 1 — pure addition, see below
+#   GENESIS_PN155_MARGIN                default 16 (see _pn155_spend)
+#   GENESIS_PN155_RETRY_MULT            default 2
+#   GENESIS_PN155_RETRY_CEIL            default = GENESIS_PN101_TOTAL_THINK_CEIL
+#   GENESIS_PN155_TIMEOUT_S             default 180
+
+_PN155_MARKER_KEY = "pn155_internal"
+# usage/choice field names. `thinking_token_budget` is one of the four names the
+# qbench45 client already probes (bench/client.py:OpenAIArm._granted_budget) at
+# top level, on the choice, in usage and in usage.completion_tokens_details — so
+# stamping it upgrades the harness guard from an INFERRED cap to an exact one
+# with no client change.
+_PN155_BUDGET_FIELD = "thinking_token_budget"
+_PN155_EMPTY_FIELD = "budget_empty"
+_PN155_FORCED_FIELD = "budget_forced"
+_PN155_ORIG_FR_FIELD = "genesis_finish_reason_original"
+# Answer-token estimate for the BUG-158 fallback in _pn155_spend. 4 chars/token
+# is the same constant PN101 uses for its reasoning estimate.
+_PN155_CHARS_PER_TOKEN = 4
+
+
+def _pn155_master_on() -> bool:
+    return _env_bool("GENESIS_ENABLE_PN155_BUDGET_TRUTH")
+
+
+def _pn155_mode() -> str:
+    mode = (os.environ.get("GENESIS_PN155_MODE", "") or "observe").strip().lower()
+    return mode if mode in ("observe", "flag", "retry") else "observe"
+
+
+def _pn155_is_empty(content: Any) -> bool:
+    """The grammar's cheapest legal completion.
+
+    Schema-free on purpose: any container with zero entries counts, and anything
+    unparseable does NOT — that is a different failure and it is already visible
+    to the caller as broken JSON.
+    """
+    if not isinstance(content, str):
+        return False
+    try:
+        obj = json.loads(content.strip())
+    except Exception:
+        return False
+    if isinstance(obj, list):
+        return len(obj) == 0
+    if isinstance(obj, dict):
+        if not obj:
+            return True
+        return all(isinstance(v, (list, dict)) and not v for v in obj.values())
+    return False
+
+
+def _pn155_budget(request: Any, result: Any) -> int | None:
+    """The thinking budget this request was actually GRANTED, or None.
+
+    `request.thinking_token_budget` is PN100's grant (auto_budget `_apply_budget`
+    / `_apply_tier`) and this pin's chat_completion/protocol.py carries it into
+    SamplingParams natively, so it is the number the holder enforces — EXCEPT in
+    one case. H119's budget consumer (fixes/pn119_router.py `_h119_route_budget`)
+    MODULATES the caller's prior by H119_LEAN_MULT / H119_DEEP_MULT; with no
+    prior at all it substitutes the flat H119_LEAN_BUDGET / H119_DEEP_BUDGET
+    constants, and only then is the request-side value (absent) wrong rather than
+    merely approximate. That flat case is recovered here from the route the API
+    bridge publishes on the response. A non-1.0 multiplier makes the request-side
+    number an approximation; the error is bounded by the ladder snap and biases
+    this leg toward NOT firing, which is the safe direction.
+    """
+    budget = getattr(request, "thinking_token_budget", None)
+    if isinstance(budget, int) and budget > 0:
+        return budget
+    if not _env_bool("GENESIS_ENABLE_H119_ROUTE_BUDGET"):
+        return None
+    kvt = getattr(result, "kv_transfer_params", None)
+    h119 = kvt.get("h119") if isinstance(kvt, dict) else None
+    if not isinstance(h119, dict) or h119.get("mode") != "enforce":
+        return None
+    route = h119.get("route")
+    if route == "deep":
+        return _env_int("H119_DEEP_BUDGET", 10240)
+    if route == "lean":
+        return _env_int("H119_LEAN_BUDGET", 1600)
+    return None
+
+
+def _pn155_spend(result: Any, message: Any, content: str) -> tuple[int, str]:
+    """(thinking tokens spent, where the number came from).
+
+    `usage.completion_tokens_details.reasoning_tokens` is authoritative when the
+    accounting path populates it. On this deployment it does not: BUG-158 —
+    the chat template opens `<think>` in PROMPT space (chat_template.jinja:147),
+    so the usage path never finds an opener in the output and reports
+    `reasoning_tokens: 0` / `reasoning_content: null` for every request,
+    verified live on :8021 (879 completion tokens against a ~290-char answer,
+    reasoning_tokens 0). Keying condition 3 on it alone would make this leg
+    UNFIREABLE on the exact endpoint the bug was measured on.
+
+    So the fallback is `completion_tokens` minus the answer's own length. It is
+    an estimate, but only its DIFFERENCE from the budget is used, the answer it
+    subtracts is by construction tiny (the empty container is ~8 tokens), and
+    over-estimating the spend errs toward firing on a row that is already empty
+    — never toward touching a row that carried data.
+    """
+    usage = getattr(result, "usage", None)
+    det = getattr(usage, "completion_tokens_details", None) if usage else None
+    rt = getattr(det, "reasoning_tokens", None) if det is not None else None
+    if isinstance(rt, int) and rt > 0:
+        return rt, "usage"
+    reasoning = _read_reasoning(message) if message is not None else ""
+    if reasoning.strip():
+        return len(reasoning) // _PN155_CHARS_PER_TOKEN, "reasoning_text"
+    ctok = getattr(usage, "completion_tokens", None) if usage else None
+    if not isinstance(ctok, int) or ctok <= 0:
+        return 0, "unavailable"
+    answer_tokens = len(content or "") // _PN155_CHARS_PER_TOKEN
+    return max(0, ctok - answer_tokens), "derived"
+
+
+def _pn155_forced(result: Any) -> bool | None:
+    """The holder's own "I forced `</think>` on this request" bit, if anyone has
+    published it to the API process yet. None = not available.
+
+    The holder (`v1/sample/thinking_budget_state.py`) knows this exactly, and
+    fixes/pn119_router.py already latches it engine-side as `censor_forced`. It
+    is NOT readable here: the holder lives in the `VLLM::EngineCore` process and
+    this middleware runs in the API server process, so publishing the bit means
+    a new field on EngineCoreOutput — the same protocol hop the H119 route rides
+    via `kv_transfer_params`. That is a separate patch. This reader exists so
+    that the day it lands, the exact signal replaces the threshold below with no
+    change to this leg.
+    """
+    usage = getattr(result, "usage", None)
+    det = getattr(usage, "completion_tokens_details", None) if usage else None
+    for holder in (det, usage):
+        if holder is None:
+            continue
+        for name in (_PN155_FORCED_FIELD, "censor_forced"):
+            val = getattr(holder, name, None)
+            if isinstance(val, bool):
+                return val
+    kvt = getattr(result, "kv_transfer_params", None)
+    h119 = kvt.get("h119") if isinstance(kvt, dict) else None
+    if isinstance(h119, dict) and isinstance(h119.get("censor_forced"), bool):
+        return h119["censor_forced"]
+    return None
+
+
+def _pn155_stamp(result: Any, **fields: Any) -> bool:
+    """Additive stamps on the usage block. OpenAI clients ignore unknown keys.
+
+    `CompletionTokenUsageInfo`/`UsageInfo` are `OpenAIBaseModel`, i.e. pydantic
+    with `extra="allow"`, so an attribute set here lands in `__pydantic_extra__`
+    and IS serialized (verified against the live pin's protocol module). Falls
+    back to the usage object when the details block is absent — the qbench45
+    client probes both locations.
+    """
+    usage = getattr(result, "usage", None)
+    if usage is None:
+        return False
+    det = getattr(usage, "completion_tokens_details", None)
+    target = det if det is not None else usage
+    written = False
+    for key, val in fields.items():
+        try:
+            setattr(target, key, val)
+            written = True
+        except Exception as exc:  # pragma: no cover - frozen models
+            log.warning("PN155: could not stamp %s (%s)", key, exc)
+    return written
+
+
+async def _pn155_retry(serving: Any, request: Any, result: Any, message: Any,
+                       budget: int) -> bool:
+    """One bounded re-generate with more thinking room. True iff it delivered a
+    non-empty payload (which is then served in place of the empty one).
+
+    NOT `_maybe_escalate`: that leg continues an UNCLOSED think block from the
+    reasoning text, and a BUG-155 row has neither (its think block closed, and
+    `reasoning_content` is null here anyway — BUG-158). This is a fresh
+    generation of the same request, carrying the caller's structured-output
+    fields so the retry is answering the same question under the same grammar.
+    Never a second retry: the synthetic carries `_PN155_MARKER_KEY`.
+    """
+    ceil = _env_int("GENESIS_PN155_RETRY_CEIL",
+                    _env_int("GENESIS_PN101_TOTAL_THINK_CEIL", 10240))
+    mult = _env_float("GENESIS_PN155_RETRY_MULT", 2.0)
+    new_budget = min(ceil, int(budget * mult))
+    if new_budget <= budget:
+        log.info("PN155: retry skipped — budget %d already at ceiling %d",
+                 budget, ceil)
+        return False
+
+    _STATS["pn155_retries"] += 1
+    req_cls = type(request)
+    fields = getattr(req_cls, "model_fields", {}) or {}
+    ctk = dict(getattr(request, "chat_template_kwargs", None) or {})
+    ctk["enable_thinking"] = True
+    ctk[_MARKER_KEY] = True
+    ctk[_PN155_MARKER_KEY] = True
+    kwargs: dict[str, Any] = {
+        "model": getattr(request, "model", None),
+        "messages": list(getattr(request, "messages", None) or []),
+        "temperature": getattr(request, "temperature", 0.0) or 0.0,
+        "stream": False,
+        # An explicit positive budget makes PN100 take its "explicit ON intent"
+        # skip branch, so our number survives the hook.
+        "thinking_token_budget": new_budget,
+        "chat_template_kwargs": ctk,
+    }
+    # The grammar is the whole point of the retry — losing it would compare an
+    # unguided answer against a guided one.
+    for sf in ("response_format", "guided_json", "guided_regex", "guided_grammar",
+               "guided_choice", "guided_decoding_backend", "structured_outputs",
+               "top_p", "top_k", "min_p", "presence_penalty", "frequency_penalty",
+               "repetition_penalty", "stop", "seed", "logit_bias"):
+        if sf in fields:
+            sv = getattr(request, sf, None)
+            if sv is not None:
+                kwargs[sf] = sv
+    cap_field = (
+        "max_completion_tokens" if "max_completion_tokens" in fields else "max_tokens"
+    )
+    kwargs[cap_field] = max(_completion_cap(request) or 0, new_budget + 512)
+    synthetic = req_cls(**kwargs)
+    resp = await asyncio.wait_for(
+        serving.create_chat_completion(synthetic, raw_request=None),
+        _env_int("GENESIS_PN155_TIMEOUT_S", 180),
+    )
+    rchoice = _extract_choice(resp)
+    rmsg = getattr(rchoice, "message", None) if rchoice is not None else None
+    new_content = (getattr(rmsg, "content", None) or "") if rmsg else ""
+    if not new_content.strip() or _pn155_is_empty(new_content):
+        log.info("PN155: retry at budget=%d empty again — falling through to flag",
+                 new_budget)
+        return False
+    message.content = new_content
+    _sum_usage(getattr(result, "usage", None), getattr(resp, "usage", None))
+    _pn155_stamp(result, pn155_retry_budget=new_budget)
+    _STATS["pn155_retry_rescued"] += 1
+    log.info("PN155: retry at budget=%d recovered a non-empty payload (%d chars)",
+             new_budget, len(new_content))
+    return True
+
+
+async def _maybe_pn155_budget_truth(serving: Any, request: Any,
+                                    result: Any) -> None:
+    """Stamp the granted budget (3a) and guard the empty-at-cap exit (3b)."""
+    ctk = getattr(request, "chat_template_kwargs", None) or {}
+    if isinstance(ctk, dict) and ctk.get(_PN155_MARKER_KEY):
+        return  # our own retry — never recurse
+
+    budget = _pn155_budget(request, result)
+    if budget is None:
+        return
+    _STATS["pn155_seen"] += 1
+
+    # ── 3a: observability. Pure addition, so it runs for every budgeted
+    # request, structured or not, and independently of the mode below. Today
+    # the grant is reported NOWHERE on the response, which is why the harness
+    # has to infer the cap from the PN100 grid.
+    if _env_bool("GENESIS_PN155_STAMP_BUDGET", True):
+        if _pn155_stamp(result, **{_PN155_BUDGET_FIELD: budget}):
+            _STATS["pn155_stamped"] += 1
+
+    # ── 3b: detection. All four conditions, in cost order.
+    if not _has_structured_output(request):
+        return
+    choice = _extract_choice(result)
+    message = getattr(choice, "message", None) if choice is not None else None
+    if message is None:
+        return
+    content = getattr(message, "content", None)
+    if not _pn155_is_empty(content):
+        return
+    forced = _pn155_forced(result)
+    spend, spend_src = _pn155_spend(result, message, content or "")
+    margin = _env_int("GENESIS_PN155_MARGIN", 16)
+    if forced is False:
+        return  # the holder says it did not force this one — believe it
+    if forced is None and spend < budget - margin:
+        return  # ended well short of its cap: a genuinely empty chunk
+    if forced is None and spend_src == "unavailable":
+        return  # no spend signal at all — refuse to guess
+
+    _STATS["pn155_fired"] += 1
+    mode = _pn155_mode()
+    log.warning(
+        "PN155: structured request emptied out at its thinking budget "
+        "(budget=%d spend=%d[%s] forced=%s finish=%s mode=%s) — BUG-155",
+        budget, spend, spend_src, forced,
+        getattr(choice, "finish_reason", None), mode,
+    )
+    stamps: dict[str, Any] = {_PN155_EMPTY_FIELD: True}
+    if forced is not None:  # absent means "nobody published it", not "False"
+        stamps[_PN155_FORCED_FIELD] = forced
+    _pn155_stamp(result, **stamps)
+
+    if mode == "observe":
+        return
+    if mode == "retry":
+        try:
+            if await _pn155_retry(serving, request, result, message, budget):
+                _pn155_stamp(result, **{_PN155_EMPTY_FIELD: False})
+                return
+        except Exception as exc:
+            _STATS["pn155_errors"] += 1
+            log.warning("PN155: retry failed (%s) — falling through to flag", exc)
+
+    # `flag` — and the terminal state of `retry`. `length` is the truthful
+    # finish reason and the one every OpenAI-compatible client already reads as
+    # "incomplete". The original is preserved, never destroyed: `stop_reason`
+    # keeps its upstream meaning and the old value lands on its own field.
+    original = getattr(choice, "finish_reason", None)
+    try:
+        setattr(choice, _PN155_ORIG_FR_FIELD, original)
+        choice.finish_reason = "length"
+    except Exception as exc:  # pragma: no cover - frozen models
+        _STATS["pn155_errors"] += 1
+        log.warning("PN155: could not rewrite finish_reason (%s) — original kept", exc)
+        return
+    _STATS["pn155_flagged"] += 1
+    log.warning("PN155: finish_reason %s -> length (budget-enforced empty payload)",
+                original)
+
+
 async def maybe_rescue_answer(serving: Any, request: Any, result: Any) -> Any:
     # [BUG-157] This is the only seat in the module that is handed the serving
     # instance, so it is where Leg 1b's wrapper gets installed. Unconditional
@@ -1943,6 +2316,20 @@ async def maybe_rescue_answer(serving: Any, request: Any, result: Any) -> Any:
             _maybe_strip_banner_echo(request, result)
         except Exception as exc:  # pragma: no cover - fail-open
             log.warning("PN102: banner-echo net failed (%s) — original kept", exc)
+    # [BUG-155] PN155 budget-truth guard. Own master flag, independent of the
+    # PN101 master/repair toggles for the same reason the close gate is: it is
+    # the ONLY leg that runs on the requests `_skip_common()` excludes, which is
+    # exactly the structured population this bug lives in. Placed AFTER the
+    # close gate and the banner-echo net (both may rewrite `content`, and the
+    # emptiness test has to read the content the CALLER will get) and BEFORE the
+    # `_master_on()` early return. Non-streaming only.
+    if (_pn155_master_on() and not hasattr(result, "__aiter__")
+            and not getattr(request, "stream", False)):
+        try:
+            await _maybe_pn155_budget_truth(serving, request, result)
+        except Exception as exc:  # pragma: no cover - fail-open, always
+            _STATS["pn155_errors"] += 1
+            log.warning("PN155: guard failed (%s) — original kept", exc)
     if not _master_on() or not _env_bool("GENESIS_PN101_REPAIR", True):
         return result
     if hasattr(result, "__aiter__"):  # streaming generator — cannot repair
