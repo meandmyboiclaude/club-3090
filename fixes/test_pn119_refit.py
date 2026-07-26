@@ -34,8 +34,14 @@ NEEDFIT = os.path.expanduser("~/shared/needfit")
 PY = os.path.join(NEEDFIT, "lens-venv/bin/python")
 
 from pn119_atomic import atomic_write_bytes, atomic_write_npz  # noqa: E402
-from refit_pn119_probe import (FEAT_DIM, apply_guards, auc, load_sink,  # noqa: E402
-                               Row, score_with, spearman)
+from refit_pn119_probe import (FEAT_DIM, apply_guards, auc, bf16_rows,  # noqa: E402
+                               load_sink, Row, score_with, select_feat_dim,
+                               spearman)
+
+# G6's threshold. apply_guards takes it as a required positional now, so the
+# value has to be supplied here; 32 is the refit CLI's own --min-generated
+# default (the parser builds it inside main(), so it cannot be imported).
+MIN_GENERATED = 32
 
 FAILURES = []
 
@@ -82,19 +88,64 @@ def t1_kill_test(kills=25):
 # ── T2: real sink parse + guards ────────────────────────────────────────────
 def t2_real_sink():
     counts = {}
-    rows = load_sink(os.path.join(NEEDFIT, "pn119-sink"), counts)
+    # load_sink returns (rows, {tag: meta bytes}) and the rows come back
+    # WITHOUT features — .x stays None and the bytes are materialised per row
+    # index by bf16_rows. Unpacking it as a bare list made `len(rows)` report 2
+    # (the tuple) and every later attribute access blow up.
+    rows, sizes = load_sink(os.path.join(NEEDFIT, "pn119-sink"), counts)
     check("T2 sink parses", len(rows) > 0,
           f"{counts.get('scored', 0)} scored, {len(rows)} joined w/ finish, "
-          f"counts={counts}")
-    dims_ok = all(r.x.shape == (FEAT_DIM,) and np.isfinite(r.x).all() for r in rows)
-    check("T2 features well-formed [30720] finite", dims_ok)
-    c2 = {}
-    strict = apply_guards(rows, legacy_thinking_ok=False, counts=c2)
-    c3 = {}
-    legacy = apply_guards(rows, legacy_thinking_ok=True, counts=c3)
-    check("T2 G1 strict drops all pre-flag rows", len(strict) == 0,
-          f"strict eligible={len(strict)} (sink predates the thinking flag), "
-          f"legacy-ok eligible={len(legacy)}")
+          f"{len(sizes)} windows, counts={counts}")
+
+    # Feature width is a per-WINDOW property now: the sink spans two eras
+    # (15360 last-only and 30720 last+mean) and select_feat_dim picks the
+    # newest, so a flat `r.x.shape == (FEAT_DIM,)` is checking a constant the
+    # live windows no longer use. Check each row against ITS OWN window width,
+    # and pin that the era split is the one select_feat_dim reports.
+    dim, kept = select_feat_dim(rows, {})
+    bad = []
+    for r in rows[:200]:
+        x = bf16_rows(r.feat_path, [r.row_idx], r.feat_dim)[0]
+        if x.shape != (r.feat_dim,) or not np.isfinite(x).all():
+            bad.append(r.req_id)
+    check("T2 features well-formed at each window's own width, finite",
+          not bad and all(r.feat_dim in (15360, 30720) for r in rows),
+          f"newest era={dim} ({len(kept)}/{len(rows)} rows), "
+          f"widths={sorted({r.feat_dim for r in rows})}, bad={bad[:5]}")
+
+    c2, c3 = {}, {}
+    strict = apply_guards(rows, False, MIN_GENERATED, c2)
+    legacy = apply_guards(rows, True, MIN_GENERATED, c3)
+    # This used to assert `len(strict) == 0` — "the sink predates the thinking
+    # flag". It no longer does: the router has been writing `thinking` on the
+    # finish line since 730b6833, and today's sink carries 1125 thinking=True
+    # finish lines against 948 pre-flag ones. Strict is the REAL training set
+    # now, and asserting it is empty would have kept passing only for as long
+    # as the flag stayed unshipped. What is actually invariant is the
+    # containment: legacy-ok accepts everything strict accepts PLUS exactly the
+    # rows G1 booked as g1_legacy_accepted.
+    s_ids, l_ids = {r.req_id for r in strict}, {r.req_id for r in legacy}
+    check("T2 G1 strict keeps the post-flag rows the sink now carries",
+          len(strict) > 0,
+          f"strict eligible={len(strict)}, legacy-ok eligible={len(legacy)}, "
+          f"legacy accepted={c3.get('g1_legacy_accepted', 0)}, "
+          f"legacy dropped by strict={c2.get('g1_legacy_dropped', 0)}")
+    # Containment, not equality of counts: G1 admits g1_legacy_accepted rows
+    # and G6/G8 then thin them, so the surviving extras are a SUBSET of what
+    # G1 let through — every one of them a `legacy` row and never a real one.
+    extra = [r for r in legacy if r.req_id not in s_ids]
+    check("T2 G1 legacy-ok is strict plus legacy rows only",
+          s_ids <= l_ids and extra
+          and all(r.thinking == "legacy" for r in extra)
+          and len(extra) <= c3.get("g1_legacy_accepted", 0),
+          f"extra={len(extra)} (all legacy: "
+          f"{all(r.thinking == 'legacy' for r in extra)}) <= g1_legacy_accepted="
+          f"{c3.get('g1_legacy_accepted', 0)}; missing={len(s_ids - l_ids)}")
+    check("T2 G1 drops thinking-off and thinking-unknown under both settings",
+          c2.get("g1_thinking_off") == c3.get("g1_thinking_off")
+          and c2.get("g1_thinking_unknown") == c3.get("g1_thinking_unknown"),
+          f"strict={c2.get('g1_thinking_off')}/{c2.get('g1_thinking_unknown')} "
+          f"legacy={c3.get('g1_thinking_off')}/{c3.get('g1_thinking_unknown')}")
     return legacy
 
 
