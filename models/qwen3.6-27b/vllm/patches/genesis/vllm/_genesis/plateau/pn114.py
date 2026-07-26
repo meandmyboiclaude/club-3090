@@ -137,16 +137,36 @@ def _st(state: dict[str, Any]) -> dict[str, Any]:
     return st
 
 
-def _live_think_len(state: dict[str, Any], st: dict[str, Any]) -> int | None:
+def _live_think_len(state: dict[str, Any], st: dict[str, Any],
+                    in_span: bool = False) -> int | None:
     """LIVE think depth via pn108's spec-aware slice (BUG-120: the holder's
     state["think_count"] is FROZEN near its init value while a request is
     under budget — the early-return in _update_think_state only walks
     check_count_down — so think_count must never be used for depth or
     accounting). None when not derivable (not mid-think / slice failed).
-    think_start_len is stashed in st["tsl"] by observe_state each step."""
+    think_start_len is stashed in st["tsl"] by observe_state each step.
+
+    BUG-121: _arm() sets state["in_end"]=True to hand the row to the holder's
+    end-forcer, and _think_token_slice() short-circuits to None on in_end — so
+    a caller reading the depth WHILE a forced span is in flight got None and
+    fell back to the frozen think_count. That is what logged
+    "CLOSE (stable) at think=5" for a row sitting at ~1210 (gpqa-151, enf30).
+    in_span=True reads the slice with the end-forcer flags neutralised, which
+    is the depth those callers mean; _resume_thinking() gets the same effect
+    by flipping in_end back itself before it reads. Callers NOT inside a span
+    (observe_state, request_confirm) must leave it False — for them a None is
+    the real "not mid-think" signal and must not be papered over."""
     try:
         from vllm._genesis.plateau import pn108 as _pn108
-        toks = _pn108._think_token_slice(state, st.get("tsl", 1))
+        if in_span and state.get("in_end", False):
+            saved = (state.get("in_end"), state.get("in_think"))
+            state["in_end"], state["in_think"] = False, True
+            try:
+                toks = _pn108._think_token_slice(state, st.get("tsl", 1))
+            finally:
+                state["in_end"], state["in_think"] = saved
+        else:
+            toks = _pn108._think_token_slice(state, st.get("tsl", 1))
         if toks is not None:
             return len(toks)
     except Exception:
@@ -304,7 +324,8 @@ def _finish_probe(state: dict[str, Any], st: dict[str, Any],
                    grace=_env_int("GENESIS_PN112_GRACE", 64))
         else:
             _STATS["confirm_cancel"] += 1
-            _live = _live_think_len(state, st)
+            # BUG-121: still inside the probe span here (in_end set by _arm).
+            _live = _live_think_len(state, st, in_span=True)
             st["confirm_cooldown"] = (
                 _live if _live is not None
                 else state.get("think_count", 0)) + 512
@@ -340,7 +361,10 @@ def _close(state: dict[str, Any], st: dict[str, Any], why: str,
         grace = st["cfg"]["grace"]
     # BUG-120: close at the LIVE depth, not the frozen think_count (which
     # would set a near-zero budget and guillotine instantly).
-    _live = _live_think_len(state, st)
+    # BUG-121: reached from _finish_probe with _arm()'s in_end still set, so
+    # the slice must be read in-span or it returns None and takes exactly the
+    # frozen-count fallback BUG-120 forbids.
+    _live = _live_think_len(state, st, in_span=True)
     think = _live if _live is not None else state.get("think_count", 0)
     if not (wrapup_enabled() and arm_wrapup(state, st.get("req_id"))):
         # bare cut (also the fallback when an end-forcing is already active)
