@@ -1162,8 +1162,16 @@ services:
       # [endgame 2026-07-13] kills the whitespace degenerate-loop failure inside
       # grammar-constrained decode (canary round-6 `\t\t\t...` repeat until cap):
       # xgrammar otherwise permits unbounded inter-token whitespace.
+      # [2026-07-26] `reasoning_parser` here is NOT redundant with the top-level
+      # --reasoning-parser: this one tells the GRAMMAR where reasoning ends. Left
+      # empty, xgrammar binds from the very first token, so a guided request
+      # cannot think at all (measured: reasoning_content empty on a guided prod
+      # prompt). With it set and enable_in_reasoning=false, the model reasons
+      # freely and the schema is enforced only on the post-</think> answer —
+      # which is the only way to get guaranteed-valid JSON without losing the
+      # reasoning this model depends on. Switchable so it can be A/B'd.
       - --structured-outputs-config
-      - '{"backend": "xgrammar", "disable_any_whitespace": true}'
+      - '{"backend": "xgrammar", "disable_any_whitespace": true, "reasoning_parser": "${SO_REASONING_PARSER:-}", "enable_in_reasoning": false}'
       - --enable-auto-tool-choice
       - --tool-call-parser
       # [2026-07-14] hermes pairs with Jackrong's v2 template (JSON-in-<tool_call>);
