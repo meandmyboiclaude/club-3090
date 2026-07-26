@@ -134,11 +134,36 @@ independent evaluations hit that ceiling and named it), and — once enforce
 acts — makes lean an ABSORBING STATE: a lean-routed row that truncates is
 indistinguishable from one that genuinely needed little, so the router
 reinforces its own decision forever.
+THE OFFSET IS NOT ONE NUMBER (2026-07-26 re-measurement, the second half of
+BUG-139). Over all 1046 thinking finishes in the sink that carry a
+budget_grant, `gap = budget_grant - rtok` has TWO razor-sharp spikes:
+    gap  5 : 94 rows        gap 13 : 223 rows
+    gap 6..12 : 1 row       gap 14..30 : 7        gap >30 : 721 (natural stops)
+Both appear under both budget sources (h119 94@5 + 27@13, caller 0@5 + 196@13)
+and under both routes, so neither is a per-boot artefact. The first BUG-139
+fix used SLACK = len(think_end_ids) + 8 = 9, which sits exactly BETWEEN the two
+spikes: it flagged all 94 gap-5 rows and none of the 223 gap-13 rows. 70% of
+the truncated population was still on disk as a natural stop. `SLACK is 9, not
+13` in SPEC-adaptive-thinking-cap-20260726.md §4 describes what the router
+PUBLISHED, not what the rows do; 13 is what the detection rule needs.
 The fix is to record it, not to guess it. Each finish line now carries:
-  censored     = thinking and budget and rtok >= budget - SLACK,
-                 SLACK = len(think_end_ids) + 8 (the measured offset is
-                 exactly 5; the slack absorbs a multi-token end marker and
-                 the spec-decode lookahead without reaching a natural stop).
+  censor_forced= the holder was OBSERVED raising in_end / force_index on this
+                 request (h119_observe_forcing, latched). Ground truth: in the
+                 upstream holder `in_end` has exactly one cause, the thinking
+                 budget being spent — the natural-`</think>` branch is guarded
+                 by `not in_end` and never sets it. No slack, no arithmetic,
+                 no budget-source assumption.
+  censored     = censor_forced OR (thinking and budget and
+                 rtok >= budget - SLACK), SLACK = len(think_end_ids) + 12 = 13,
+                 which covers BOTH measured modes. Kept as a union because the
+                 observer can miss a request that finished before the router
+                 attached and the arithmetic can miss an offset mode nobody has
+                 measured yet.
+  censor_src   = forced | slack | none — which detector fired, so a later
+                 session can tell whether the constant still does any work.
+  censor_schema= header field, currently 2. A `censored: false` from a
+                 schema-1 window is NOT evidence of a natural stop and the
+                 refit re-derives it from budget_grant.
   budget_grant = the EFFECTIVE thinking budget — H119's own number when the
                  consumer rewrote it, otherwise sampling_params
                  .thinking_token_budget. On BOTH the score and finish lines,
@@ -424,6 +449,17 @@ _ALARM_TAP_GRACE_S = 600.0
 _ALARM_CENSORED_RATE = 0.35
 _ALARM_CENSORED_MIN_N = 25
 
+# BUG-139 sink schema generation, stamped in every window header so a reader
+# can tell which detector produced `censored`. Bump it whenever the DETECTION
+# rule changes in a way that makes an older window's `censored: false`
+# untrustworthy — that is the whole point of the field.
+#   1  slack-only, SLACK = len(think_end_ids) + 8 = 9. Caught the gap-5
+#      truncation mode and missed the gap-13 one entirely (223 of 317 truncated
+#      rows recorded as natural stops).
+#   2  SLACK = len(think_end_ids) + 12 = 13 (covers both measured modes) PLUS
+#      `censor_forced`, observed off the holder's own in_end/force_index.
+_CENSOR_SCHEMA = 2
+
 # THINK_MARKERS_DIVERGED. The sidecar's PN119_THINK_*_ID single ids and the
 # holder's reasoning_config token-id SEQUENCES must describe the same markers.
 # When they do not, every `thinking` label and every rtok in the sink is wrong
@@ -572,6 +608,13 @@ def make_snapshot(*, stats, boot_id="", pid=0, hostname="", started=0.0,
             "scored_unknown": scored_unknown,
             "thinking_off": thinking_off,
             "censored": censored,
+            # BUG-139 detector split: how much of `censored` the holder was
+            # actually OBSERVED forcing vs how much rests on the slack
+            # arithmetic. If `censored_forced` ever goes to 0 while
+            # `censored_slack` stays high, the observer has come unwired and
+            # the labels are back on a constant nobody has re-measured.
+            "censored_forced": int(st.get("finish_censored_forced", 0)),
+            "censored_slack": int(st.get("finish_censored_slack", 0)),
             "finished_thinking": finished_thinking,
             "decisions": decisions,
             "unroutable": unroutable,
@@ -933,6 +976,19 @@ def _truthy(v: str) -> bool:
     return v.lower() in ("1", "true", "yes", "on")
 
 
+def _int_env(name: str, default: int) -> int:
+    """Env int with a fail-SOFT parse: an operator typo must not change a
+    label rule silently, and must not take the boot down either."""
+    raw = _env(name, "")
+    if not raw:
+        return int(default)
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("[PN119] %s=%r is not an int — using %d", name, raw, default)
+        return int(default)
+
+
 class PN119Router:
     @classmethod
     def maybe_create(cls, runner):
@@ -1092,13 +1148,38 @@ class PN119Router:
         self._think_start = self._think_start_ids[0] if self._think_start_ids else None
         self._think_end = self._think_end_ids[0] if self._think_end_ids else None
         # BUG-139 slack: how close to its own grant an rtok has to land before
-        # the stop is attributed to the budget rather than to the model. The
-        # measured offset on 43 live rows is exactly 5; +8 over the end-marker
-        # length absorbs a multi-token `</think>` and the spec-decode lookahead
-        # without ever reaching far enough down to swallow a natural stop
-        # (the nearest non-grid modal value in the same window is 881 against
-        # a 1300 grant).
-        self._censor_slack = max(len(self._think_end_ids) + 8, 8)
+        # the stop is attributed to the budget rather than to the model.
+        #
+        # THERE ARE TWO OFFSETS, NOT ONE (measured 2026-07-26 over all 1046
+        # thinking finishes in ~/shared/needfit/pn119-sink that carry a
+        # budget_grant — `gap = budget_grant - rtok`):
+        #     gap  5 : 94 rows      gap 13 : 223 rows
+        #     gap 6..12 : 1 row     gap 14..30 : 7 rows     gap >30 : 721 rows
+        # Both spikes are razor-sharp and both appear under BOTH budget sources
+        # (h119: 94 @5 + 27 @13; caller: 0 @5 + 196 @13) and under both routes,
+        # so neither is a per-boot config artefact. The old slack of
+        # len(end_ids)+8 = 9 sat exactly BETWEEN them: it caught all 94 gap-5
+        # rows and none of the 223 gap-13 rows, i.e. 70% of the truncated
+        # population was still recorded as a natural stop. That is BUG-139
+        # surviving its own first fix.
+        # 12 (not 8) over the end-marker length covers both measured modes with
+        # nothing in between to swallow. The error is deliberately asymmetric:
+        # a false positive downgrades an exact spend to a lower bound (the
+        # refit right-censors it — conservative), while a false negative writes
+        # a truncation into the corpus as a natural stop, which is the
+        # absorbing state this bug is about.
+        #
+        # ARITHMETIC IS THE FALLBACK, NOT THE SIGNAL. `censor_forced` (below)
+        # observes the holder actually forcing `</think>` and needs no slack at
+        # all; this test only has to cover the windows where that observation
+        # is unavailable (no engine-side tap, older sinks).
+        self._censor_slack = max(
+            _int_env("PN119_CENSOR_SLACK", len(self._think_end_ids) + 12), 1)
+        # BUG-139 ground truth: req_ids the holder was observed FORCING to
+        # close their think region because the budget ran out. Latched (the
+        # flag is live for one step, the finish is thousands of steps later)
+        # and popped in on_finish alongside _h119_applied.
+        self._h119_forced: dict[str, bool] = {}
         # Tail window for the thinking-label scan. MUST be wide enough to reach
         # back past whatever PN102 seeded INSIDE the think region, otherwise the
         # <think> marker falls out of view and the row labels thinking=None —
@@ -1601,6 +1682,7 @@ class PN119Router:
                 ("scored_plen", self._scored_plen),
                 ("unscored", self.unscored), ("skipped", self.skipped),
                 ("h119_applied", self._h119_applied),
+                ("h119_forced", self._h119_forced),
                 ("routes", ROUTES), ("scores", SCORES))
         for name, m in maps:
             over = len(m) - lim
@@ -1676,6 +1758,12 @@ class PN119Router:
                 "think_start_ids": self._think_start_ids,
                 "think_end_ids": self._think_end_ids,
                 "censor_slack": self._censor_slack,
+                # BUG-139 schema generation. 1 = `censored` came from a
+                # single-mode slack test (9) that provably missed the gap-13
+                # truncation mode, so a `censored: false` in such a window is
+                # NOT evidence of a natural stop and the refit re-derives it.
+                # 2 = two-mode slack + the `censor_forced` observation.
+                "censor_schema": _CENSOR_SCHEMA,
             }) + "\n")
             self._sink_meta.flush()
         except Exception as e:  # noqa: BLE001 — a header is never worth a boot
@@ -2346,6 +2434,7 @@ class PN119Router:
             reason = self.unscored.pop(req_id, None)
             skipped = self.skipped.pop(req_id, None)
             applied = self._h119_applied.pop(req_id, None)
+            forced = bool(self._h119_forced.pop(req_id, False))
             SCORES.pop(req_id, None)
             ROUTES.pop(req_id, None)
             EXPLORE.discard(req_id)
@@ -2376,23 +2465,30 @@ class PN119Router:
                 budget, source = int(applied[0]), applied[1]
             else:
                 budget, source = self._budget_fields(req_id, req_state)
-            thinking, rtok, cap_hit, censored = self._label_fields(
-                req_state, generated, budget)
+            thinking, rtok, cap_hit, censored, censor_src = self._label_fields(
+                req_state, generated, budget, forced)
             if thinking:
                 _bump("finish_thinking")
                 if censored:
                     _bump("finish_censored")
+                    _bump(f"finish_censored_{censor_src}")
+                elif forced:
+                    # Forcing seen on a row the labeller could not call
+                    # censored (no think region resolved). Never silent.
+                    _bump("finish_forced_unlabelled")
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug("[PN119] finish req=%s score=%.4f generated=%d "
-                             "thinking=%s rtok=%s cap_hit=%s censored=%s "
+                             "thinking=%s rtok=%s cap_hit=%s censored=%s(%s) "
                              "budget=%s(%s)", req_id, score, generated,
-                             thinking, rtok, cap_hit, censored, budget, source)
+                             thinking, rtok, cap_hit, censored, censor_src,
+                             budget, source)
             if self._sink_meta is not None:
                 self._sink_append(None, json.dumps({
                     "req_id": req_id, "finish": True, "score": score,
                     "generated": generated, "ts": time.time(),
                     "thinking": thinking, "rtok": rtok, "cap_hit": cap_hit,
-                    "censored": censored, "budget_grant": budget,
+                    "censored": censored, "censor_src": censor_src,
+                    "censor_forced": forced, "budget_grant": budget,
                     "budget_source": source,
                     "routable": thinking if thinking is not None else None,
                     "explore": self._is_explore(req_id), "mode": self.mode,
@@ -2403,7 +2499,8 @@ class PN119Router:
             if self._warned <= 5:
                 logger.warning("[PN119] finish error: %s", e)
 
-    def _label_fields(self, req_state, generated: int, budget=None):
+    def _label_fields(self, req_state, generated: int, budget=None,
+                      forced: bool = False):
         """v2 label plumbing (BUILD-PACK §v2 items 3+4) + BUG-139 censoring.
 
         thinking: True  = prompt tail opens a <think> region (spend signal
@@ -2420,17 +2517,30 @@ class PN119Router:
                   max_tokens. It is a poor censoring signal — it fired on 4 of
                   79 thinking rows while 43 were truncated — because
                   max_tokens is not the cap that binds. `censored` is.
-        censored: BUG-139. The request was STOPPED at its thinking budget:
-                  rtok landed within SLACK of the grant, which is the holder
-                  forcing `</think>`. rtok is then a LOWER BOUND, not a spend,
-                  and any fit that reads it as a spend inherits a ceiling.
-                  Requires a known budget — with none there is nothing that
-                  could have truncated it here.
+        censored: BUG-139. The request was STOPPED at its thinking budget, so
+                  rtok is a LOWER BOUND, not a spend, and any fit that reads it
+                  as a spend inherits a ceiling. TWO independent detectors,
+                  OR-ed, reported apart in `censor_src`:
+                    "forced" — `forced=True`: the holder was OBSERVED raising
+                        `in_end`/`force_index` on this request
+                        (h119_observe_forcing). Ground truth; no slack, no
+                        arithmetic, no budget-source assumption.
+                    "slack"  — rtok landed within `_censor_slack` of the grant.
+                        The fallback for windows with no engine-side
+                        observation. Requires a known budget: with none there
+                        is nothing that could have truncated it here.
+                  The union is deliberate. The observer can miss a request that
+                  finished before the router attached; the arithmetic can miss
+                  an offset mode nobody has measured yet. Each covers the
+                  other's blind spot, and both err towards calling a row
+                  censored — which costs an exact label and buys a right-
+                  censored one, never the reverse.
         """
         thinking = self._prompt_thinking(req_state)
         rtok = None
         cap_hit = False
         censored = False
+        censor_src = "none"
         out_ids = getattr(req_state, "output_token_ids", None)
         if thinking and out_ids is not None:
             seq = list(out_ids)
@@ -2458,9 +2568,15 @@ class PN119Router:
         max_tokens = getattr(sp, "max_tokens", None) if sp is not None else None
         if max_tokens and generated >= max_tokens:
             cap_hit = True
-        if thinking and budget and rtok is not None:
-            censored = rtok >= int(budget) - self._censor_slack
-        return thinking, rtok, cap_hit, censored
+        if thinking:
+            if budget and rtok is not None and rtok >= int(budget) - self._censor_slack:
+                censored, censor_src = True, "slack"
+            if forced:
+                # Ground truth outranks the arithmetic, and is reported as such
+                # even where the two agree: `censor_src` is how a later session
+                # can tell whether the slack constant is still doing any work.
+                censored, censor_src = True, "forced"
+        return thinking, rtok, cap_hit, censored, censor_src
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2899,6 +3015,89 @@ def _record_applied(req_id: str, budget, source: str) -> None:
         pass
 
 
+def _entry_is_forcing(state: dict) -> bool:
+    """True iff this holder entry is forcing `</think>` BECAUSE OF ITS BUDGET.
+
+    Ground truth for BUG-139, read straight off the holder rather than inferred
+    from an rtok offset. Verified against BOOT-TIME content (image bytes plus
+    pn108 / pn112 / pr44812 / holder_syncbatch / pn114, replayed by
+    fixes/verify_h119_consumer_anchors.py), not pristine image bytes:
+
+      * ``in_end = True`` has exactly ONE write site in the holder,
+        ``_update_think_state``'s ``total_thinking_tokens > budget``, plus
+        ``_init_state_entry``'s ``(budget - think_count) <= 0`` — both budget
+        exhaustion. The NATURAL ``</think>`` path is the other branch, guarded
+        by ``not state.get("in_end")``, and never sets it.
+      * ``force_index`` is what ``apply_to_logits`` consumes to mask the
+        logits, so a non-empty one is forcing already scheduled for this step.
+        It is checked too, so an observation that arrives a step late (the
+        holder clears ``in_end`` when the end token commits) still lands.
+
+    TWO EXCLUSIONS, both of them real:
+
+      * ``force_seq`` — PN114 (`_genesis/plateau/pn114.py:_arm`) forces
+        ARBITRARY spans (plateau probes, wrap-ups, PN117 rescues) through the
+        same machinery: it sets ``in_end=True``, ``force_index=[0]`` and parks
+        the budget at 10_000_000 for the duration. Those rows are not
+        truncated and must not be labelled censored. PN114 is the only thing
+        that writes ``force_seq`` (cleared back to None on disarm), and the
+        holder's own budget forcing reads
+        ``state.get("force_seq") or self.think_end_token_ids`` — i.e. an
+        UNSET force_seq is precisely "this is the budget's own `</think>`".
+      * the ``-1`` budget sentinel (relaxed/budget-less rows): nothing can
+        truncate a row with no budget.
+    """
+    if state.get("force_seq"):
+        return False                       # PN114 span, not a budget stop
+    try:
+        if int(state.get("thinking_token_budget", -1)) == -1:
+            return False
+    except (TypeError, ValueError):
+        return False
+    return bool(state.get("in_end")) or bool(state.get("force_index"))
+
+
+def h119_observe_forcing(holder) -> None:
+    """Latch every request the holder is forcing to stop thinking (BUG-139).
+
+    Runs at the head of ``update_state`` for EVERY row the holder tracks —
+    caller-budgeted, PN100-budgeted and H119-routed alike — and deliberately
+    OUTSIDE the ``_consumer_active()`` gate, because the sink is written in
+    shadow mode too and a shadow row mislabelled as a natural stop poisons the
+    corpus exactly as hard as an enforce one.
+
+    The flag lives for a single step (the holder clears ``in_end`` as soon as
+    the forced end token commits) while the finish line is written thousands
+    of steps later, so the observation has to be LATCHED. Latching also makes
+    the observer robust to being called at a step boundary where the flag
+    happens to be down.
+
+    Never raises: it runs inside the sampler.
+    """
+    try:
+        router = ROUTER
+        forced = getattr(router, "_h119_forced", None)
+        if forced is None:
+            return
+        state_map = getattr(holder, "_state", None)
+        if not state_map:
+            return
+        req_ids = router.runner.input_batch.req_ids
+        n = len(req_ids)
+        for index, state in state_map.items():
+            if not _entry_is_forcing(state):
+                continue
+            if not isinstance(index, int) or index >= n or index < 0:
+                continue
+            req_id = req_ids[index]
+            if not req_id or forced.get(req_id):
+                continue
+            forced[req_id] = True
+            _bump("censor_forced_observed")
+    except Exception as e:  # noqa: BLE001 — never fail a sampling step
+        _consumer_warn("observe_forcing failed — censoring falls back to slack", e)
+
+
 def h119_resolve_routes(holder) -> None:
     """Called at the top of ThinkingBudgetStateHolder.update_state.
 
@@ -2916,12 +3115,14 @@ def h119_resolve_routes(holder) -> None:
     that emits the first token — while removing the mid-step device sync. The
     drain deliberately happens BEFORE `_consumer_active()`: in shadow mode, or
     with the consumer flag off, there is still a score waiting in pinned memory
-    and a sink row that has to be written.
+    and a sink row that has to be written. The BUG-139 forcing observation is
+    hoisted above the gate for the same reason.
     """
     try:
         router = ROUTER
         if getattr(router, "_pending", None):
             router._drain_pending()
+        h119_observe_forcing(holder)
         if not _consumer_active():
             return
         state_map = getattr(holder, "_state", None)

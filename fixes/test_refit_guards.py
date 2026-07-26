@@ -565,8 +565,13 @@ def case13_absorbing_state_is_closed() -> None:
 def case14_censoring_detection() -> None:
     print("case 14 — censoring: sink field > budget_grant > cap_hit > grid")
     slack = R.CENSOR_SLACK
-    check("SLACK = len(think_end_ids) + 8; the LIVE engine's </think> is one "
-          "token, so 9", slack == 9, f"slack={slack}")
+    # WAS `slack == 9` (len(think_end_ids) + 8) until 2026-07-26. That constant
+    # was fitted to ONE truncation mode; the live sink has two, at gap 5 and
+    # gap 13, and 9 sat exactly between them — it resolved the 94 gap-5 rows and
+    # wrote 223 gap-13 rows into the corpus as natural stops. See
+    # fixes/test_bug139_censoring.py for the replay that quantifies it.
+    check("SLACK = len(think_end_ids) + 12 = 13; covers BOTH measured "
+          "truncation modes (gap 5 and gap 13)", slack == 13, f"slack={slack}")
     # The measured signature: 43 of 79 rows at exactly (grant - 5).
     for rtok, grant in ((1295, 1300), (3095, 3100), (2095, 2100), (3895, 3900)):
         cens, lb, prov = R.censoring_of({"rtok": rtok, "cap_hit": False,
@@ -578,11 +583,27 @@ def case14_censoring_detection() -> None:
                                       "generated": 1300})
     check("a natural stop mid-band is NOT called censored", not cens and
           prov == "uncensored")
-    # The router's own field wins over any derivation.
+    # The router's own POSITIVE wins over any derivation. Its NEGATIVE does not,
+    # unless the window that wrote it ran a detector at least as sensitive as
+    # ours (censor_schema >= 2 AND its declared slack >= ours). Believing a
+    # schema-1 `censored: false` is how BUG-139's own output got re-imported as
+    # ground truth — 213 of 223 live gap-13 rows trained as y=0 through exactly
+    # this line.
     cens, lb, prov = R.censoring_of({"rtok": 1295, "cap_hit": False,
                                      "generated": 1400, "censored": False})
-    check("an explicit censored=false from the sink overrides the grid",
+    check("a schema-1 censored=false is RE-DERIVED, not believed",
+          cens and prov == "grid", f"{cens} {prov}")
+    cens, lb, prov = R.censoring_of({"rtok": 1295, "cap_hit": False,
+                                     "generated": 1400, "censored": False,
+                                     "censor_schema": R.TRUSTED_CENSOR_SCHEMA,
+                                     "slack": R.CENSOR_SLACK})
+    check("a censored=false from a detector as wide as ours IS believed",
           not cens and prov == "sink", f"{cens} {prov}")
+    cens, lb, prov = R.censoring_of({"rtok": 900, "cap_hit": False,
+                                     "generated": 950, "censor_forced": True,
+                                     "budget_grant": 6500})
+    check("an OBSERVED forced </think> outranks everything (no slack involved)",
+          cens and prov == "forced" and lb == 6500 - slack, f"{cens} {prov} lb={lb}")
     cens, lb, prov = R.censoring_of({"rtok": 900, "cap_hit": False,
                                      "generated": 950, "censored": True,
                                      "budget_grant": 6500})

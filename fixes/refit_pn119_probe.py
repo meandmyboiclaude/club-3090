@@ -47,23 +47,31 @@ its observed spend is an UNCENSORED measurement of true need:
      label.
   G3 censoring detection. `cap_hit` sees only max_tokens, so a request
      stopped by its THINKING budget logs cap_hit=False and looks like a
-     natural stop: measured 43 of 79 thinking rows sit at exactly
-     (a PN100 100-grid grant) - 5, and only 4 log cap_hit=True. The router
-     is adding `censored` / `budget_grant` / `budget_source` to the sink;
-     this reads them when present and DERIVES them when absent (older
-     rows), so the existing corpus is usable today:
-       * explicit `censored` from the sink wins;
+     natural stop. The router now writes `censor_forced` / `censored` /
+     `budget_grant` / `budget_source` and stamps a `censor_schema` on the
+     window header; this reads them when present and DERIVES them when
+     absent (older rows), so the existing corpus is usable today:
+       * `censor_forced` (schema 2+) — the engine tap OBSERVED the holder
+         forcing `</think>`. Ground truth, outranks everything;
+       * else `censored: true` from the sink;
+       * else `censored: false` from a window whose detector was at least as
+         sensitive as ours (schema >= 2 AND declared slack >= SLACK) is
+         believed; a schema-1 negative is NOT — it is re-derived below;
        * else `budget_grant` present  -> rtok >= budget_grant - SLACK;
        * else cap_hit (and generated >= --min-generated) -> censored, and
          the lower bound is rtok itself;
        * else the grant is derived as the smallest plausible PN100 grant
          >= rtok (the 100-grid from _continuous_budget, plus the tier
          budgets and the floor) and the same rule applies.
-     SLACK = len(think_end_ids) + 8 = 13; the measured offset is exactly 5.
-     Grid derivation is deliberately conservative: a genuine natural stop
-     that happens to land within SLACK of a grid point is called censored
-     and (below theta) becomes UNRESOLVED — it loses a row, it never
-     invents a label.
+     SLACK = len(think_end_ids) + 12 = 13. The offset is BIMODAL — 5 and 13,
+     measured 2026-07-26 over 1046 live rows with a budget_grant (94 @5,
+     223 @13, one row in between). The previous 9 sat between the two modes
+     and re-labelled 223 truncations as natural stops; believing a schema-1
+     window's `censored: false` re-imports exactly that. Both the widening
+     and the negative-distrust rule are deliberately conservative: a genuine
+     natural stop that lands within SLACK of a grant is called censored and
+     (below theta) becomes UNRESOLVED — it loses a row, it never invents a
+     label.
   G4 dedup by req_id (preemption/retry can double-log), last finish wins.
   G5 structural: a row needs BOTH a score line (features exist in the
      .bin) and a finish line (label exists); orphans are dropped.
@@ -205,13 +213,35 @@ SINK_CAPTURE_SOURCE = "tap"
 EXIT_OK, EXIT_REJECT, EXIT_SKIP = 0, 2, 3
 
 # ── censoring (BUG-139) ───────────────────────────────────────────────────
-# SLACK = len(think_end_ids) + 8. The LIVE engine's `</think>` is ONE token
-# (248069), so the live value is 9 — and the running router publishes it in
-# each window's pn119_header (censor_slack), which is authoritative and wins
-# over this default. The measured budget-stop offset is exactly 5, comfortably
-# inside either value.
+# SLACK = len(think_end_ids) + 12. The LIVE engine's `</think>` is ONE token
+# (248069), so the live value is 13.
+#
+# IT USED TO BE 9 AND THAT WAS THE BUG'S SECOND HALF. Measured 2026-07-26 over
+# all 1046 thinking finishes in the live sink carrying a budget_grant, the
+# truncation offset `budget_grant - rtok` has TWO sharp modes and 9 lands
+# exactly between them:
+#     gap  5 : 94 rows        gap 13 : 223 rows
+#     gap 6..12 : 1 row       gap 14..30 : 7        gap >30 : 721
+# A slack of 9 resolved 94 rows as censored and wrote the other 223 into the
+# training set as natural stops — i.e. 70% of the truncated population became
+# y=0 "lean was right" labels, which is precisely the absorbing state BUG-139
+# is about. 13 covers both modes; nothing sits between them to be swallowed.
+#
+# The error is deliberately asymmetric. A false positive turns an exact spend
+# into a lower bound and `interval_label` right-censors it (weight 0 below
+# theta) — conservative. A false negative is an absorbing-state y=0.
+#
+# A WINDOW'S OWN HEADER SLACK NO LONGER WINS UNCONDITIONALLY. It is honoured
+# when it is at least as WIDE as this default (the sink's own detector was at
+# least as sensitive as ours, so its `censored: false` means something), and
+# ignored when it is narrower — otherwise every schema-1 window silently
+# re-imports its 9-token blind spot. See `censoring_of`.
 THINK_END_IDS_N = 1
-CENSOR_SLACK = THINK_END_IDS_N + 8           # 9
+CENSOR_SLACK = THINK_END_IDS_N + 12          # 13
+# Lowest sink `censor_schema` whose NEGATIVE censoring verdict may be trusted
+# at face value. Schema 1 windows (no field) predate `censor_forced` and used
+# the 9-token slack; their `censored: false` is re-derived from budget_grant.
+TRUSTED_CENSOR_SCHEMA = 2
 # PN100 grant shapes. _continuous_budget rounds to 100 and clamps to
 # [GENESIS_PN100_BUDGET_FLOOR, GENESIS_PN100_BUDGET_CEIL]; the tiered path
 # grants one of GENESIS_PN100_TIER_BUDGETS, which are NOT on the 100-grid.
@@ -251,6 +281,8 @@ class Row:
     feat_dim: int = FEAT_DIM       # this WINDOW's feature width (two eras)
     slack: int = CENSOR_SLACK      # this window's censor slack (header-borne)
     censored: object = None        # True / False / None(unknown -> derive)
+    censor_forced: object = None   # holder OBSERVED forcing </think> (schema 2+)
+    censor_schema: int = 1         # window's BUG-139 detector generation
     budget_grant: int | None = None
     budget_source: str | None = None
     # ── dual-probe shadow scoring (router-written; see the docstring)
@@ -337,13 +369,31 @@ def censoring_of(row_like, slack: int = CENSOR_SLACK, min_generated: int = 32):
     """(censored, lower_bound, provenance) for one row.
 
     `row_like` is a Row or a reservoir meta dict — anything with rtok /
-    cap_hit / generated / censored / budget_grant.
+    cap_hit / generated / censored / censor_forced / budget_grant.
 
     lower_bound is what the row PROVES about true need:
       * uncensored          -> rtok (an exact measurement)
       * censored w/ budget  -> budget - slack   (the pack's rule)
       * censored w/o budget -> rtok             (a max_tokens cap-hit: all we
                                                  know is that it wanted more)
+
+    TRUST ORDER, and why it is this order
+    -------------------------------------
+    1. `censor_forced` — the engine-side tap OBSERVED the holder raising
+       in_end/force_index on this request. Not an inference. Outranks
+       everything, in both directions is not claimed: a False here only means
+       "not observed", never "not censored", so it never suppresses 2-4.
+    2. `censored: true` from the sink — the router's own verdict, whichever
+       detector produced it.
+    3. `censored: false` from the sink — honoured ONLY from a window whose
+       detector was at least as sensitive as ours: schema >= TRUSTED and the
+       window's declared slack >= the slack we would apply. Schema-1 windows
+       ran the 9-token test that provably missed the gap-13 truncation mode
+       (223 of 317 truncated rows), so their negatives are re-derived from
+       `budget_grant` rather than believed. This is the difference between
+       importing the bug's own output and correcting it.
+    4. the arithmetic — rtok within `slack` of the effective grant, with the
+       grant derived from the PN100 grid when the row predates the field.
     """
     def _get(k, default=None):
         if isinstance(row_like, dict):
@@ -354,6 +404,7 @@ def censoring_of(row_like, slack: int = CENSOR_SLACK, min_generated: int = 32):
     generated = _get("generated")
     cap_hit = bool(_get("cap_hit", False))
     censored = _get("censored")
+    forced = _get("censor_forced")
     budget = _get("budget_grant")
     budget = None if budget in (None, "", 0) else int(budget)
 
@@ -362,12 +413,28 @@ def censoring_of(row_like, slack: int = CENSOR_SLACK, min_generated: int = 32):
     # consulted or a completion-capped row reads as a natural stop.
     capped = cap_hit and (generated is None or int(generated) >= min_generated)
 
-    if censored is not None:                       # the router said so
-        if censored:
-            lb = (budget - slack) if budget is not None else rtok
-            return True, int(lb), "sink"
-        return (True, rtok, "cap_hit") if capped else (False, rtok, "sink")
-    if budget is not None:                         # budget known, flag isn't
+    if forced:                                     # (1) observed, not inferred
+        lb = (budget - slack) if budget is not None else rtok
+        return True, int(lb), "forced"
+
+    if censored:                                   # (2) the router said so
+        lb = (budget - slack) if budget is not None else rtok
+        return True, int(lb), "sink"
+
+    if censored is False:                          # (3) a NEGATIVE verdict
+        try:
+            w_schema = int(_get("censor_schema", 1) or 1)
+        except (TypeError, ValueError):
+            w_schema = 1
+        try:
+            w_slack = int(_get("slack", slack) or slack)
+        except (TypeError, ValueError):
+            w_slack = slack
+        if w_schema >= TRUSTED_CENSOR_SCHEMA and w_slack >= slack:
+            return (True, rtok, "cap_hit") if capped else (False, rtok, "sink")
+        # else: fall through and re-derive. The window's own flag is unusable.
+
+    if budget is not None:                         # (4) budget known
         if rtok >= budget - slack:
             return True, budget - slack, "budget"
         return (True, rtok, "cap_hit") if capped else (False, rtok, "budget")
@@ -406,10 +473,14 @@ def label_rows(row_likes, deep_thresh: int, counts: dict | None = None,
     """
     ys, ws, buckets, provs = [], [], [], []
     for r in row_likes:
-        # The window's own header-declared slack wins: it is derived from the
-        # think_end_ids the engine actually ran with.
+        # The window's own header-declared slack is derived from the
+        # think_end_ids the engine ran with, so it may WIDEN the test — but it
+        # may never narrow it. A schema-1 window declares 9, and taking that at
+        # face value re-imports the exact blind spot BUG-139 is about; the
+        # widest of the two is the only safe rule (see `censoring_of`).
         s = getattr(r, "slack", None) if not isinstance(r, dict) else r.get("slack")
-        y, w, b, p = interval_label(r, deep_thresh, int(s or slack), min_generated)
+        eff = max(int(s or slack), int(slack))
+        y, w, b, p = interval_label(r, deep_thresh, eff, min_generated)
         ys.append(0.0 if y is None else y)
         ws.append(w)
         buckets.append(b)
@@ -420,7 +491,7 @@ def label_rows(row_likes, deep_thresh: int, counts: dict | None = None,
         for b in ("resolved_pos", "resolved_neg", "censored_pos",
                   "interval_unresolved"):
             counts[f"g3_{b}"] = int(sum(1 for x in buckets if x == b))
-        for p in ("sink", "budget", "cap_hit", "grid", "uncensored"):
+        for p in ("forced", "sink", "budget", "cap_hit", "grid", "uncensored"):
             n = int(sum(1 for x in provs if x == p))
             if n:
                 counts[f"censor_src_{p}"] = n
@@ -532,10 +603,19 @@ def load_sink(sink_dir: str, counts: dict, exclude_tags=(),
             continue
         counts[f"feat_dim_{dim}_via_{how}"] = counts.get(
             f"feat_dim_{dim}_via_{how}", 0) + 1
+        # The window's declared detector. Both are recorded as-declared and
+        # NOT clamped here: censoring_of/label_rows need the raw values to
+        # decide whether this window's `censored: false` is trustworthy.
         w_slack = int((header or {}).get(
             "censor_slack",
             len((header or {}).get("think_end_ids") or []) + 8
             if (header or {}).get("think_end_ids") else CENSOR_SLACK))
+        w_schema = int((header or {}).get("censor_schema", 1) or 1)
+        counts[f"censor_schema_{w_schema}_windows"] = counts.get(
+            f"censor_schema_{w_schema}_windows", 0) + 1
+        if w_schema < TRUSTED_CENSOR_SCHEMA or w_slack < CENSOR_SLACK:
+            counts["censor_negatives_rederived_windows"] = counts.get(
+                "censor_negatives_rederived_windows", 0) + 1
         n_feat_rows = bin_row_count(feat_p, dim)
         for req_id, (sm, s_off) in score_lines.items():
             counts["scored"] = counts.get("scored", 0) + 1
@@ -559,6 +639,7 @@ def load_sink(sink_dir: str, counts: dict, exclude_tags=(),
             # prefill), so accept it from either.
             bg = fm.get("budget_grant", sm.get("budget_grant"))
             cens = fm.get("censored", sm.get("censored"))
+            cforced = fm.get("censor_forced")
             rows.append(Row(
                 req_id=req_id,
                 tag=tag,
@@ -573,8 +654,9 @@ def load_sink(sink_dir: str, counts: dict, exclude_tags=(),
                 thinking=fm["thinking"] if "thinking" in fm else "legacy",
                 ts=float(fm.get("ts", 0.0)),
                 end_off=max(s_off, f_off),
-                feat_dim=dim, slack=w_slack,
+                feat_dim=dim, slack=w_slack, censor_schema=w_schema,
                 censored=None if cens is None else bool(cens),
+                censor_forced=None if cforced is None else bool(cforced),
                 budget_grant=None if bg in (None, "") else int(bg),
                 budget_source=(str(fm.get("budget_source",
                                           sm.get("budget_source", "")))
@@ -1358,7 +1440,13 @@ def update_reservoir(state_dir: str, rows: list[Row], cap: int,
                         # the censoring evidence has to travel WITH the row.
                         # A meta dict written before this carries none, and
                         # censoring_of() falls back to the grid derivation.
+                        # `slack`/`censor_schema` travel too: without them a
+                        # reservoir row's `censored: false` would be read as a
+                        # trusted negative once its window is gone, which is
+                        # the schema-1 blind spot laundered through the cache.
                         "censored": r.censored, "budget_grant": r.budget_grant,
+                        "censor_forced": r.censor_forced,
+                        "censor_schema": r.censor_schema, "slack": r.slack,
                         "budget_source": r.budget_source,
                         "score": r.score, "cand_score": r.cand_score,
                         "cand_sha": r.cand_sha, "p_explore": r.p_explore}
