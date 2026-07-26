@@ -55,6 +55,32 @@ assertion, it FAILS on fork HEAD, and it PASSES in the fixed configuration.
 That test is the evidence the starvation (A) was written to prevent does not
 return.  Never apply one hunk without the other.
 
+THE HUNK-B EXEMPTION (BUG-149) — why the re-floor is not unconditional
+---------------------------------------------------------------------
+Hunk B as first written re-floored EVERY off-grid `end`.  That is correct for
+three of the four mandatory stops, which are block-aligned by construction, and
+catastrophic for the fourth: `tail_boundary` deliberately sits on the HASH grid
+whenever `Scheduler.mamba_partial_cache_hit` is on (it is the position the
+prompt's partial-tail entry can only be registered at).  Flooring it drives
+`end` back to `start`, `_mamba_block_aligned_split` returns 0, and both call
+sites treat 0 as "cannot schedule" (`continue` at :641, `break` at :1009) — so
+the request sits in the waiting queue forever at 0% GPU.
+
+That is BUG-149, and it is why `cache-override-apc.yaml` hangs the box rather
+than merely under-performing.  Measured against the real function at the
+override's geometry (block 4128 / prefix_match_unit 258), 93.2% of prompt
+lengths in 1..20000 never complete their prefill; the survivors are the exact
+multiples of 258.  With the override off, `tail_boundary` is 0 and the
+exemption cannot fire, so this changes nothing on the shipped configs — proven
+by an all-lengths equivalence sweep in `verify_bug149_partial_tail.py`.
+
+The alignment contract is not weakened: chunk ends before `last_cache_position`
+are still block-floored by the earlier clause, so a budget-driven mid-block end
+(the BUG-140 corruption) is still impossible.  Only the one position the
+partial-hit feature itself mandates is allowed through, and
+`KVCacheCoordinator.cache_blocks` caches exactly that position unaligned when
+`enable_partial_hash_hits` is set.
+
 DELIVERY
 --------
 TEXT patch.  `apply_all` runs standalone and the entrypoint then does
@@ -112,7 +138,14 @@ B_NEW = (
     "        # clamped at `start` so the caller still sees an empty chunk and\n"
     "        # skips rather than spins.\n"
     "        prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)\n"
-    "        if end < prefill_end and end % block_size != 0:\n"
+    "        # BUG-149: `tail_boundary` is the one mandatory stop that is NOT on\n"
+    "        # the block grid by construction — under `mamba_partial_cache_hit`\n"
+    "        # it sits on the hash grid, and the coordinator caches it verbatim\n"
+    "        # (`cache_blocks` skips its own alignment when partial hits are on).\n"
+    "        # Re-flooring it clamps `end` back to `start` and the request is\n"
+    "        # skipped every step forever. It is 0 whenever partial hits are off,\n"
+    "        # so this exemption is inert on the block-aligned configs.\n"
+    "        if end < prefill_end and end % block_size != 0 and end != tail_boundary:\n"
     "            end = max(end // block_size * block_size, start)\n"
     "        return max(end - start, 0)\n"
 )
