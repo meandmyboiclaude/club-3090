@@ -20,10 +20,25 @@ HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import patch_pr48361_mamba_align_split as P  # noqa: E402
 
+# The boot pin first. Unlike verify_pn71/pn100/pn101/pn114_seed — which drop
+# dev1060cherry-20260713 on the "never booted again" ruling — this script KEEPS
+# it, and removing it is a regression, not cleanup:
+#
+#   dev1060cherry-20260713 is the only pin carrying the ORIGINAL full #48361
+#   pick, i.e. the re-floor branch this patch restores (see the patcher's header
+#   and the #48361 row in docs/UPSTREAM.md). It is therefore the POSITIVE
+#   CONTROL: it is the one pin that must take the ALREADY_FIXED path and report
+#   zero anchors, which is what proves the no-op detection below still works.
+#   Drop it and a broken ALREADY_FIXED check reads as a clean run.
+#
+# Booting it is not required and not implied — replay() only ever runs a
+# throwaway `sh -c` container (no GPU, --network none), so the never-booted-again
+# ruling does not reach this list. Verified 2026-07-26: wheel v2 and wheel v1
+# resolve both anchors count==1; dev1060cherry takes the ALREADY_FIXED branch.
 PINS = (
     "localhost/vllm-qwen36-endgame:dev1474cherrymax-1757-20260725",  # the boot pin
-    "localhost/vllm-qwen36-endgame:dev1474cherry-1711-20260725",
-    "localhost/vllm-qwen36-endgame:dev1060cherry-20260713",
+    "localhost/vllm-qwen36-endgame:dev1474cherry-1711-20260725",     # wheel v1
+    "localhost/vllm-qwen36-endgame:dev1060cherry-20260713",          # positive control
 )
 TARGET = "/usr/local/lib/python3.12/dist-packages/vllm/v1/core/sched/scheduler.py"
 
