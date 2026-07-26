@@ -726,6 +726,35 @@ services:
       # ("around Step N, check whether your answer is settled"), so continuing is
       # framed as normal rather than as an exception.
       - GENESIS_PN100_TIER_BUDGETS=0,10240,10240,10240
+      # [2026-07-26] PROJECTED_N — read the step POSTERIOR instead of the argmax.
+      # DECLARED HERE BUT DEFAULT OFF. It must be declared: a systemd drop-in
+      # only reaches the engine if the compose interpolates the var, so setting
+      # it in the unit alone would silently do nothing (same trap as
+      # GENESIS_PN102_BANNER_V5 and ROUTE_AUTOSPLIT).
+      # WHAT IT FIXES: the estimator's 23% pile-up on `2|12` is NOT literal-example
+      # anchoring — from logprobs over 98 items the non-example values '1'/'5'
+      # outrank the example ones, median top-1 probability is 0.40, and only 11%
+      # exceed 0.5. It is ARGMAX COLLAPSE of a near-flat posterior onto a 7-value
+      # menu. Replayed over those 98 posteriors: distinct step values 7 -> 18,
+      # largest pile-up 42% -> 24%, mean grant 2185 -> 2165 (cost-NEUTRAL).
+      # TWO PRECONDITIONS, both verified live 2026-07-26, neither obvious:
+      #   1. auto_budget.py:564 ANDs the flag with `"logprobs" in fields`, so it
+      #      is a silent no-op unless the request class carries logprobs. It does
+      #      (ChatCompletionRequest.model_fields: logprobs + top_logprobs present),
+      #      and the probe then asks for top_logprobs=20.
+      #   2. :592 gates the read on the sampled value being ON the menu
+      #      (3,4,5,8,12,15,25) — off-menu digits make the read ambiguous
+      #      ("2" = two or twenty-five). Off-menu falls back to sampled.
+      # Fails open to the sampled value if menu mass <= 0.05, so the failure mode
+      # is "no change", not a bad budget.
+      # PREFER THIS OVER EDITING THE ESTIMATOR PROMPT. De-anchoring the prompt was
+      # measured UNSAFE: a `T|N` placeholder parsed 0/8 and a prose spec 3/8, and a
+      # failed parse yields steps=None -> the TIER_BUDGETS fallback above -> a
+      # 10240 grant, a 3-8x cost blowout per failure. The worked examples are
+      # load-bearing. This lever touches neither the prompt nor the prefix cache.
+      # UNSCREENED: enabling changes budgets, so it needs a 30-item screen against
+      # the champion's same-30 line before it goes anywhere near prod.
+      - GENESIS_PN100_PROJECTED_N=${GENESIS_PN100_PROJECTED_N:-0}
       - GENESIS_PN102_STATIC_BANNER=${GENESIS_PN102_STATIC_BANNER:-1}
       # [v5 2026-07-19, BENCH ONLY] floorless stop + progress-conditional
       # continue. v4's checkpoint delay was measured as a hard floor (0 items
