@@ -398,6 +398,15 @@ _ALARM_BAND_MIN_N = 20
 # coincidence: a threshold that cannot catch the smallest real instance of the
 # failure it is named after is decoration.
 _ALARM_DEGENERATE_MIN_N = 12
+# ── DEEP_FRAC_WINDOW_DEGENERATE ────────────────────────────────────────────
+# DEEP_FRAC_DEGENERATE counts from boot and is all-or-nothing, so ONE deep
+# request at minute two disarms it for the rest of the boot. That is exactly
+# how the live defect escaped: 252 consecutive requests whose MAX score was
+# 0.4867 against tdeep=0.495 — 10.6 minutes routing nothing deep, on a router
+# that had already routed deep earlier and so looked armed and healthy.
+# This one asks the same question of the TRAILING WINDOW, where "it stopped"
+# is visible and "it never started" is already covered by its cumulative twin.
+_ALARM_WINDOW_MIN_N = 64
 
 # CONSUMER_* need "meaningful traffic" before they can distinguish "never
 # applied" from "not applied yet". 20 decisions is ~2 minutes of bench traffic
@@ -483,6 +492,7 @@ _ALARM_SEVERITY = {
     "ROUTER_ABSENT": "critical",
     "TAP_NEVER_FIRED": "critical",
     "DEEP_FRAC_DEGENERATE": "critical",
+    "DEEP_FRAC_WINDOW_DEGENERATE": "critical",
     "DEEP_FRAC_OUT_OF_BAND": "warn",
     "CONSUMER_NOT_WIRED": "critical",
     "CONSUMER_NEVER_APPLIED": "critical",
@@ -525,7 +535,7 @@ def make_snapshot(*, stats, boot_id="", pid=0, hostname="", started=0.0,
                   fallback_route=ROUTE_DEEP, fallback_requested="",
                   explore_rate=0.0, probe=None, sink=None, consumer=None,
                   first_scored_ts=None, last_scored_ts=None,
-                  last_decision_ts=None, extra=None) -> dict:
+                  last_decision_ts=None, window=None, extra=None) -> dict:
     """Build the health document. Pure: dict in, dict out.
 
     Kept separate from the router instance so the alarm logic can be exercised
@@ -614,6 +624,10 @@ def make_snapshot(*, stats, boot_id="", pid=0, hostname="", started=0.0,
         "probe": dict(probe or {}),
         "sink": dict(sink or {}),
         "consumer": cons,
+        # Trailing routable-decision counts. Empty on a snapshot built without
+        # a live router (the doctor's reader-side path), and the alarm below
+        # requires _ALARM_WINDOW_MIN_N before it looks, so absence is silent.
+        "window": dict(window or {}),
         "traffic": {
             "scored": scored,
             "deep": deep,
@@ -814,6 +828,24 @@ def pn119_alarms(snap: dict) -> list[dict]:
                        f"{_ALARM_BAND_LO:.2f}-{_ALARM_BAND_HI:.2f} design band",
                        n=scored, deep=deep, ci=[round(lo, 4), round(hi, 4)],
                        deep_frac=_rate(deep, scored))
+
+        # ── DEEP_FRAC_WINDOW_DEGENERATE ────────────────────────────────────
+        # Deliberately NOT part of the if/elif chain above: the cumulative
+        # check passing is the normal state while this one fires. A router that
+        # routed deep this morning and has routed nothing deep for the last 250
+        # requests is degenerate NOW, and "deep_frac 0.13, retune tdeep" is the
+        # wrong page to hand whoever gets woken up for it.
+        w = snap.get("window") or {}
+        w_n, w_deep = int(w.get("n", 0)), int(w.get("deep", 0))
+        if w_n >= _ALARM_WINDOW_MIN_N and w_deep in (0, w_n):
+            side = "deep" if w_deep else "lean"
+            _alarm(out, "DEEP_FRAC_WINDOW_DEGENERATE",
+                   f"the last {w_n} routable requests ALL routed {side} "
+                   f"(cumulative deep_frac is {_rate(deep, scored):.3f}, which "
+                   "is why the boot-wide check is quiet) — the router has "
+                   "stopped discriminating, whatever it did earlier",
+                   n=w_n, deep=w_deep, window_deep_frac=_rate(w_deep, w_n),
+                   cumulative_deep_frac=_rate(deep, scored))
 
         # ── CONSUMER_NOT_WIRED / CONSUMER_NEVER_APPLIED ────────────────────
         # These two split the "the flag is on and nothing happens" space in
@@ -1101,6 +1133,32 @@ class PN119Router:
             logger.error("[PN119] PN119_TDEEP=%r is not a number — using 0.5",
                          _env("PN119_TDEEP"))
             self.tdeep = 0.5
+        # ── rate controller ────────────────────────────────────────────────
+        # PN119_TDEEP is an ABSOLUTE threshold against a score scale that is
+        # not stable across probe reloads: a refit that shifts every score by a
+        # constant moves the deep fraction to 0 or 1 without changing a single
+        # routing-relevant fact. The controller targets a FRACTION instead and
+        # reads the cut point off the boot's own recent scores, so a shifted
+        # scale costs nothing. 0 (the default) keeps the absolute threshold.
+        try:
+            self.rate_target = float(_env("PN119_RATE_TARGET", "0") or 0.0)
+        except ValueError:
+            logger.error("[PN119] PN119_RATE_TARGET=%r is not a number — "
+                         "rate controller stays OFF", _env("PN119_RATE_TARGET"))
+            self.rate_target = 0.0
+        if not (0.0 <= self.rate_target < 1.0) or not math.isfinite(self.rate_target):
+            if self.rate_target != 0.0:
+                logger.error("[PN119] PN119_RATE_TARGET=%r is outside [0,1) — "
+                             "rate controller stays OFF", self.rate_target)
+            self.rate_target = 0.0
+        # Below this many routable scores the window quantile is noise, so the
+        # controller defers to the static threshold rather than inventing a cut
+        # point from six samples on a cold boot.
+        self.rate_min_n = max(int(_env("PN119_RATE_MIN_N", "64") or 64), 8)
+        if self.rate_target:
+            logger.info("[PN119] rate controller ON: target deep_frac=%.3f "
+                        "min_n=%d (PN119_TDEEP=%.4f is the warmup threshold)",
+                        self.rate_target, self.rate_min_n, self.tdeep)
         # Route for requests we cannot score (see module docstring §2).
         self.fallback_requested = _env("PN119_FALLBACK_ROUTE", ROUTE_DEEP)
         fb = _env("PN119_FALLBACK_ROUTE", ROUTE_DEEP).lower() or ROUTE_DEEP
@@ -1233,6 +1291,11 @@ class PN119Router:
         self._pctl_window = max(int(_env("PN119_PCTL_WINDOW", "512") or 512), 8)
         self._score_win: collections.deque = collections.deque()
         self._score_sorted: list[float] = []
+        # Trailing window of ROUTABLE route decisions (True = deep), for
+        # DEEP_FRAC_WINDOW_DEGENERATE. Separate from _score_win because that
+        # one is sized for a stable quantile and this one for "has it stopped".
+        self._route_win: collections.deque = collections.deque(
+            maxlen=max(int(_env("PN119_WINDOW_N", "256") or 256), _ALARM_WINDOW_MIN_N))
         # ── deferred score readback (PN119_ASYNC_SCORE) ────────────────────
         self._async_want = _truthy(_env("PN119_ASYNC_SCORE", "0"))
         self._async_slots = max(int(_env("PN119_ASYNC_SLOTS", "0") or 0), 0)
@@ -1913,6 +1976,7 @@ class PN119Router:
             first_scored_ts=self._h_first_scored_ts,
             last_scored_ts=self._h_last_scored_ts,
             last_decision_ts=self._h_last_decision_ts,
+            window=self.window_stats(),
             sink={
                 "dir": self.sink_dir,
                 "enabled": self._sink_meta is not None,
@@ -2195,6 +2259,46 @@ class PN119Router:
             self.mode, route, "x" if explore else "-",
             "c" if _consumer_state.get("on") else "-")
 
+    def _effective_tdeep(self) -> tuple[float, str]:
+        """(threshold, source) for THIS decision.
+
+        Returns the static `PN119_TDEEP` unless the rate controller is on and
+        the window holds enough routable scores, in which case the cut point is
+        the (1 - target) quantile of recent scores — i.e. "route the top
+        `target` share deep", whatever the scale happens to be this boot.
+
+        Read BEFORE the current score joins the window (`_pctl` inserts it), so
+        a request is never compared against a threshold it helped define.
+        """
+        if not self.rate_target:
+            return self.tdeep, "static"
+        srt = self._score_sorted
+        n = len(srt)
+        if n < self.rate_min_n:
+            return self.tdeep, "warmup"
+        # k = index of the lowest score that should route deep. ceil keeps the
+        # realised fraction at or just under target rather than over it.
+        k = int(math.ceil((1.0 - self.rate_target) * n))
+        k = min(max(k, 0), n - 1)
+        T = float(srt[k])
+        if not math.isfinite(T):
+            # A non-finite score reached the window: every comparison against
+            # it is False, which is the silent all-lean failure this controller
+            # exists to prevent. Fall back rather than propagate it.
+            return self.tdeep, "nonfinite"
+        return T, "rate"
+
+    def window_stats(self) -> dict:
+        """Trailing routable-decision counts for the window alarm."""
+        win = self._route_win
+        n = len(win)
+        deep = sum(1 for d in win if d)
+        return {"n": n, "deep": deep, "lean": n - deep,
+                "cap": win.maxlen, "min_n": _ALARM_WINDOW_MIN_N,
+                "deep_frac": _rate(deep, n),
+                "rate_target": self.rate_target or None,
+                "rate_min_n": self.rate_min_n}
+
     def _pctl(self, score: float) -> float:
         """Percentile of `score` within a bounded window of RECENT routable
         scores. The threshold is absolute, so an operator cannot tell from a
@@ -2385,9 +2489,14 @@ class PN119Router:
         """Everything that happens once a score EXISTS — sync or deferred."""
         self.scored[req_id] = score
         self._scored_plen[req_id] = prompt_len
-        route = ROUTE_DEEP if score >= self.tdeep else ROUTE_LEAN
+        # Threshold first: `_pctl` below inserts `score` into the same window
+        # the controller reads, and a request must not move its own cut point.
+        t_used, t_source = self._effective_tdeep()
+        route = ROUTE_DEEP if score >= t_used else ROUTE_LEAN
         explore = self._is_explore(req_id)
         routable = bool(thinking)
+        if routable:
+            self._route_win.append(route == ROUTE_DEEP)
         if routable:
             _bump("scored")
             _bump(f"scored_{route}")
@@ -2428,7 +2537,7 @@ class PN119Router:
                 "score": score, "route": route, "prompt_tok": prompt_len,
                 "ts": time.time(), "mode": self.mode, "explore": explore,
                 "routable": routable if thinking is not None else None,
-                "pctl": pctl, "T_used": self.tdeep,
+                "pctl": pctl, "T_used": t_used, "T_source": t_source,
                 "probe_sig": self.probe_sig_short(),
                 "lane_key": self._lane_key(route, explore),
                 "boot_id": self.boot_id, "pid": self._sink_pid,
