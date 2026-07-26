@@ -46,6 +46,38 @@ def _mock_tokenizer():
     return tok
 
 
+def _pn135_applied() -> bool:
+    """Is the patch present in the engine THIS interpreter imported?
+
+    T1/T2 assert the POST-patch contract, so on a stock engine they fail with
+    'raw </think> leaked to client content' — which is the bug, correctly
+    observed, and reads exactly like a broken patch. That misreading already
+    cost one session: it was reported up as 'PN135 fails its own suite, 5
+    passed 2 failed' and wired into a handoff, when the run had simply omitted
+    the patch invocation this file's header documents. Skip loudly instead.
+    """
+    import inspect  # noqa: PLC0415 — only needed when the module is imported
+
+    from vllm.parser.engine import streaming_parser_engine as _spe  # noqa: PLC0415
+
+    try:
+        return "[Genesis-house PN135]" in inspect.getsource(_spe)
+    except OSError:
+        return False
+
+
+PN135_APPLIED = _pn135_applied()
+needs_patch = pytest.mark.skipif(
+    not PN135_APPLIED,
+    reason=(
+        "PN135 is NOT applied to this engine — these two assert the post-patch "
+        "contract. Run 'python3 /fixes/patch_pn135_streaming_think_end.py' "
+        "first (see this file's header). A bare pytest run measures the "
+        "unpatched leak, which is the bug, not a patch failure."
+    ),
+)
+
+
 @pytest.fixture
 def parser():
     return Qwen3Parser(_mock_tokenizer())
@@ -81,6 +113,7 @@ def stream(parser, chunks):
 
 
 # ── T1: the leak — text-spelled </think> must terminate reasoning ──────────
+@needs_patch
 def test_text_spelled_think_end_terminates_reasoning(parser):
     reasoning, content = stream(
         parser,
@@ -99,6 +132,7 @@ def test_text_spelled_think_end_terminates_reasoning(parser):
 
 
 # ── T2: duplicate </think> in CONTENT must be absorbed, not emitted ────────
+@needs_patch
 def test_text_spelled_duplicate_think_end_absorbed(parser):
     reasoning, content = stream(
         parser,
