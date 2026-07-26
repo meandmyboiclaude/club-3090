@@ -1162,7 +1162,16 @@ services:
       # qwen3_coder/qwen3_xml = engine parser, parses only the XML <function=> dialect
       - hermes
       - --enable-chunked-prefill
-      - --enable-prefix-caching
+      # [2026-07-26] switchable so the D2 replayssm rung is a unit drop-in.
+      # `use_replayssm_spec` requires mamba_cache_mode=none, and prefix caching
+      # force-sets that mode to "align" for Qwen3.5/3.6 (models/config.py:558-566),
+      # so the two are mutually exclusive and this must go OFF for that rung —
+      # set PREFIX_CACHING_ARG=--no-enable-prefix-caching alongside
+      # CACHE_OVERRIDE=cache-override-replayssm.yaml. The override's other stated
+      # half, `--mamba-backend triton`, needs no flag: TRITON is already the
+      # EngineArgs default on this build (verified live). Default below is
+      # byte-identical to the hardcoded flag it replaces.
+      - "${PREFIX_CACHING_ARG:---enable-prefix-caching}"
       - --speculative-config
       # [2026-07-23 probdraft verdict: draft_sample_method=probabilistic tested
       # (native30pd + capt10pd30): acceptance 67.2->69.5 (+2.3pt, ~2-3% tok/s),
