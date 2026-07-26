@@ -966,6 +966,18 @@ services:
         # demoted to content (strict-demotion + end-of-output lexer flush).
         # Must run AFTER PN76 (deferred toolcall commit). Gate: canary_47194 0/15.
         python3 /fixes/patch_pn98_toolcall_text_fragment_demotion.py
+        # [PN135 2026-07-26] AUDIT-leak-paths L2: on the STREAMING path a
+        # `</think>` matched by the text lexer (not the token-id scanner) was
+        # demoted to content by the same strict branch PN98 sits in — so in
+        # REASONING the engine never transitioned (whole answer stranded in
+        # reasoning_content) and in CONTENT the literal marker was emitted to
+        # the client. Drops only the config's declared reasoning-close
+        # terminals from the strict set; tool terminals keep strict demotion.
+        # Order-independent vs PN76/PN98 (patches __init__, not the function
+        # body). Reachable consumers today: ragflow + phoenix playground
+        # (hindsight and bench.runner are non-streaming).
+        # Kill-switch: GENESIS_DISABLE_PN135_STREAM_THINK_END=1.
+        python3 /fixes/patch_pn135_streaming_think_end.py
         # [PN81 — 2026-07-07] /rerank on :8020 (USER: reranker lives IN vLLM).
         # Adapts TEI + Cohere wire formats onto upstream /generative_scoring
         # (yes/no-logit scoring on the generate engine). Requires PN82.
