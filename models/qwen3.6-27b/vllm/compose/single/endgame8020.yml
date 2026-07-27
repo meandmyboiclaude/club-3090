@@ -742,6 +742,30 @@ services:
       - VRAM_GUARDIAN_SOFT_PCT=98
       - VRAM_GUARDIAN_HARD_PCT=99
       - VRAM_GUARDIAN_POLL_MS=200
+      # [BUG-177 2026-07-27] VRAM budget WALL — DARK. gpu_memory_utilization is a
+      # boot-time sizing hint and nothing enforces it at runtime, so aligned
+      # long-prompt requests walk ~1.2GB past the budget into physical
+      # exhaustion (engine died 05:01Z with 4MiB free). This arms
+      # torch.cuda.set_per_process_memory_fraction at init_device so the torch
+      # allocator raises OutOfMemoryError first — which patch_oom_resilience.py
+      # v7 already catches, aborting the offending step and keeping EngineCore up.
+      #
+      # READ BEFORE PICKING A NUMBER: the cap is on ALLOCATOR bytes; the CUDA
+      # context is not charged against it. Measured on this card, 20/20 samples:
+      # torch total 24109MB, nvidia-used minus allocator-reserved = 889MB flat.
+      # So a fraction only binds below 1 - 889/24109 = 0.96313. HARD_PCT=99
+      # above is 0.99 -> it has NEVER been able to bind, which is why the
+      # guardian fired ~900 times reclaiming 0MB while the engine died.
+      # 'auto' = (total - max(measured_overhead, FLOOR) - RESERVE) / total,
+      # which lands at ~0.9469 (cap 22829MB) here: 233MB above the observed
+      # steady peak (22596MB), 391MB of physical slack under the wall.
+      # An armed boot logs `[vram_wall] ARMED ... physical_headroom_at_wall=NMB`;
+      # if that N is <= 0 the wall is decorative and it says so on its own line.
+      # Rollback = set the enable back to 0 (or unset) + boot. Nothing to undo.
+      - GENESIS_ENABLE_VRAM_BUDGET_WALL=${GENESIS_ENABLE_VRAM_BUDGET_WALL:-0}
+      - GENESIS_VRAM_WALL_FRACTION=${GENESIS_VRAM_WALL_FRACTION:-auto}
+      - GENESIS_VRAM_WALL_RESERVE_MB=${GENESIS_VRAM_WALL_RESERVE_MB:-256}
+      - GENESIS_VRAM_WALL_OVERHEAD_FLOOR_MB=${GENESIS_VRAM_WALL_OVERHEAD_FLOOR_MB:-1024}
     network_mode: host
     ipc: host
     # Explicit CDI device = reliable podman GPU injection. Do NOT rely solely on
@@ -791,6 +815,16 @@ services:
         # (the actual VRAM-frag fix). Re-enable only with a stream-aware/synced pool.
         # python3 /fixes/patch_tq_buffer_pool.py
         python3 /fixes/patch_vram_guardian.py
+        # [BUG-177 2026-07-27] VRAM budget WALL. MUST run AFTER the guardian:
+        # the guardian synchronously calls set_per_process_memory_fraction(0.99)
+        # from init_device (patch_vram_guardian.py:57), and this graft anchors on
+        # the `_vg_start_guardian()` line it leaves behind so the wall is armed
+        # last. It ALSO installs a clamp that lets any later call only LOWER the
+        # cap, so the two coexist whatever the order. DARK unless
+        # GENESIS_ENABLE_VRAM_BUDGET_WALL=1 (declared in the environment block
+        # above, with the numeracy for the fraction). Anchor drift is FATAL only
+        # when armed — a dark patch must not be able to fail a boot.
+        python3 /fixes/patch_bug177_vram_budget_wall.py
         # [2026-07-14 USER] vram_tracer wired but flag-gated OFF (GENESIS_ENABLE_VRAM_TRACER=1 to
         # enable). In-config for findability; self-skips as a debug-only per-step tracer.
         python3 /fixes/patch_vram_tracer.py
