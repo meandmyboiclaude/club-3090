@@ -15,6 +15,16 @@ Covered
   * the k update: bump / decay / no-op, both clamps, and the per-pass cap —
     including the 2026-07-27 semantics that decay stops at NEUTRAL (k_min=1.0,
     the flat PN100 grid) rather than reclaiming below it
+  * SAMPLE-SIZE ROBUSTNESS (the 2026-07-27 per-ROW rewrite): one outlier row
+    moves k <1%, 20 consistent rows reproduce the retired 15% pass step, the
+    move is invariant to how rows are sliced into passes, and one dissenting
+    row's SHARE of a 5000-row window is ~100x smaller than of a 50-row one
+  * the ERA-CONSISTENCY filter: a bound row served under a smaller, older grant
+    does not bump the k that already answered it (and the symmetric slack
+    case), end to end through run_pass — without eating the current-era case
+  * the AUDIT trail: cumulative n_evidence_total, the step actually applied
+  * ambiguous grants splitting one vote across candidates, and the bounded
+    neighbour smear that buys (winner-take-all inversion locks the loop)
   * the sink reader: pairing, byte cursor, IDEMPOTENCE (a second pass over
     unchanged files learns nothing), unfinished rows held for the next pass,
     truncation recovery, synthetic-marker exclusion
@@ -197,14 +207,18 @@ def test_inverse_falls_back_when_no_candidate_matches():
 # ─── the k update ────────────────────────────────────────────────────────────
 def test_bump_decay_and_noop():
     """The three arms under the shipped k_min=1.0: bound bumps UP toward k_max,
-    slack decays DOWN TOWARD NEUTRAL (never past it), ok does nothing."""
+    slack decays DOWN TOWARD NEUTRAL (never past it), ok does nothing.
+
+    Re-pinned 2026-07-27 to the PER-ROW steps: one row is one vote of size
+    beta / gamma, not a whole 1.15 / 0.97 pass step.
+    """
     k, _ = up.update_buckets([dict(_bucket=5, _outcome="bound", _keys=["5"])],
                              {}, CFG)
-    assert abs(k["5"] - 1.15) < 1e-9
+    assert abs(k["5"] - (1 + CFG["beta"])) < 1e-9
     # decay only has room to move while the bucket is ABOVE neutral
     k, _ = up.update_buckets([dict(_bucket=5, _outcome="slack", _keys=["5"])],
                              {"5": 1.3}, CFG)
-    assert abs(k["5"] - 1.3 * 0.97) < 1e-9
+    assert abs(k["5"] - 1.3 * (1 - CFG["gamma"])) < 1e-9
     # at neutral, a slack row is a no-op: 1.0 x 0.97 lands on the floor, and
     # the floor IS the flat PN100 grid. Reclaiming below it is out of scope.
     k, _ = up.update_buckets([dict(_bucket=5, _outcome="slack", _keys=["5"])],
@@ -216,7 +230,13 @@ def test_bump_decay_and_noop():
 
 
 def test_clamps_and_per_pass_cap():
-    rows = [dict(_bucket=5, _outcome="bound", _keys=["5"])] * 40
+    """`max_step` survives as an absolute safety rail. Under the per-ROW steps
+    it takes ~58 bound rows in ONE pass to reach it, so it now binds only on a
+    genuine flood — the 40-row case below is deliberately UNDER the rail."""
+    forty = [dict(_bucket=5, _outcome="bound", _keys=["5"])] * 40
+    k, _ = up.update_buckets(forty, {"5": 1.0}, CFG)
+    assert abs(k["5"] - 1.007 ** 40) < 1e-9 and k["5"] < 1.5
+    rows = [dict(_bucket=5, _outcome="bound", _keys=["5"])] * 200
     k, _ = up.update_buckets(rows, {"5": 1.0}, CFG)
     assert k["5"] == 1.5                              # max_step, not 3.0
     k2, _ = up.update_buckets(rows, {"5": 2.9}, CFG)
@@ -320,7 +340,11 @@ def test_run_pass_credits_a_bound_row_that_straddled_a_pass_boundary():
     led = up.run_pass(CFG, sink, ledger, cursor)
     assert led["window"]["bound"] == 1, led["window"]
     assert led["window"]["n"] == 4, led["window"]
-    assert led["bucket"]["5"] > 1.0, led["bucket"]
+    # The straddling row VOTED — it is not era-stale and it counts as effective
+    # evidence. Its net k move is another matter: the same pass also carries 3
+    # slack rows, and at the neutral floor the arithmetic cannot go below 1.0.
+    assert led["audit"]["5"]["bound_eff"] == 1, led["audit"]
+    assert led["telemetry"]["5"]["new_bound"] == 1, led["telemetry"]["5"]
 
 
 def test_reader_abandons_an_orphan_when_the_boot_died():
@@ -478,8 +502,8 @@ def test_composite_row_credits_cell_and_marginal():
     cfg = dict(CFG, key_schema="steps_ptok", min_cell=1)
     rows = [dict(_bucket=8, _keys=["8|p2", "8"], _outcome="bound")]
     k, per = up.update_buckets(rows, {}, cfg, {"8|p2", "8"})
-    assert abs(k["8|p2"] - 1.15) < 1e-9
-    assert abs(k["8"] - 1.15) < 1e-9        # the fallback stays representative
+    assert abs(k["8|p2"] - (1 + cfg["beta"])) < 1e-9
+    assert abs(k["8"] - (1 + cfg["beta"])) < 1e-9   # fallback stays representative
     assert per["8|p2"]["bound"] == per["8"]["bound"] == 1
 
 
@@ -498,8 +522,12 @@ def test_repeated_binding_converges_upward_then_stabilises():
     raised until it stops binding, and then it does NOT keep climbing."""
     cfg = dict(CFG, max_step=10.0)      # per-row dynamics, unthrottled
     steps, need = 5, 2400               # 5 x 260 = 1300 -> badly under-granted
+    # 300 rows, not 40: SEMANTIC re-pin for the per-ROW steps. The property
+    # asserted below is unchanged (climb past the need, then hold in a band);
+    # only the row COUNT the climb costs moved, from ~7 rows at 1.15/row to
+    # ~90 at 1.007/row. That slowness IS the feature being bought.
     kmap, grants = {}, []
-    for _ in range(40):
+    for _ in range(300):
         k = up.lookup_k(kmap, up.bucket_keys(steps), cfg)
         g = up.pn100_grant(steps, k, cfg)
         grants.append(g)
@@ -511,7 +539,7 @@ def test_repeated_binding_converges_upward_then_stabilises():
         kmap, _ = up.update_buckets([r], kmap, cfg)
     assert grants[0] == 1300
     assert max(grants) > need, "never grew past the true need"
-    tail = grants[-12:]
+    tail = grants[-40:]
     assert min(tail) >= need, f"fell back under the need: {tail}"
     # and it settles in a band rather than running to the ceiling
     assert max(tail) <= need / (1 - cfg["slack_frac"]) + 200, tail
@@ -534,7 +562,10 @@ def test_a_loose_bucket_decays_and_stops_at_the_floor():
     flat = up.pn100_grant(steps, 1.0, cfg)
     assert flat == 2600
     kmap, grants = {"10": 2.5}, []      # start ABOVE neutral so decay can bite
-    for _ in range(200):
+    # 500 rows, not 200: at gamma=0.004 the 2.5 -> 1.0 relaxation costs ~230
+    # slack rows by design ("hundreds of rows, not minutes"). Equilibrium
+    # assertion below is untouched.
+    for _ in range(500):
         k = up.lookup_k(kmap, up.bucket_keys(steps), cfg)
         g = up.pn100_grant(steps, k, cfg)
         grants.append(g)
@@ -548,7 +579,7 @@ def test_a_loose_bucket_decays_and_stops_at_the_floor():
     assert up.pn100_grant(steps, kmap["10"], cfg) == flat
     # monotone down to the floor, and it STAYS — never a single grant below it
     assert min(grants) == flat, min(grants)
-    assert grants[-40:] == [flat] * 40, grants[-40:]
+    assert grants[-120:] == [flat] * 120, grants[-120:]
 
 
 # ─── THE USER'S 10x STORY, end to end ────────────────────────────────────────
@@ -572,9 +603,15 @@ def _workload():
     return items
 
 
-def _tenx(rounds=10, items=None, cfg=None, seed_bucket=None):
+def _tenx(rounds=40, items=None, cfg=None, seed_bucket=None):
     """Run the SAME 100 requests `rounds` times back to back through the real
     run_pass(), against a real sink dir, ledger file and cursor file.
+
+    `rounds` defaults to 40, not 10: SEMANTIC re-pin for the per-ROW steps
+    (2026-07-27). The story is unchanged — the same requests, over and over,
+    until the caps fit and then held — but a round carries only 10 bound rows
+    for bucket 5, so at 1.007/row the climb takes ~14 rounds instead of ~3.
+    Buying outlier-immunity is exactly what that slowness pays for.
 
     `seed_bucket` writes a starting ledger (e.g. {"8": 2.0}) so a run can begin
     from an ALREADY-BUMPED bucket — the only state from which decay has room to
@@ -616,16 +653,26 @@ def _tenx(rounds=10, items=None, cfg=None, seed_bucket=None):
 
 
 def test_ten_rounds_of_the_same_hundred_calibrate():
-    """THE user's story: the same 100 requests, ten times back to back. Run 1
-    force-closes 10 items; by run 10 the caps fit and nothing is force-closed
-    — with no correctness signal and no extra LLM call anywhere in the loop."""
+    """THE user's story: the same 100 requests, over and over. Round 1
+    force-closes 10 items; the loop raises that bucket until the caps fit and
+    then STOPS — with no correctness signal and no extra LLM call anywhere.
+
+    Equilibrium assertions are the same as the 10-round version; only the
+    round at which it arrives moved (see `_tenx`).
+    """
     history, led, cfg, items, _ = _tenx()
     assert history[0] == 10, f"round 1 must bind the 10 under-granted: {history}"
-    assert history[-1] == 0, f"round 10 must bind nothing: {history}"
-    assert all(h == 0 for h in history[3:]), history
+    assert history[-1] == 0, f"the last round must bind nothing: {history}"
+    # converge, THEN HOLD — no oscillation once it fits
+    first_fit = history.index(0)
+    assert first_fit < 25, history
+    assert all(h == 0 for h in history[first_fit:]), history
     kmap = up.load_kmap(led, cfg)
     assert kmap["5"] > 2.0, kmap          # raised, not flailing
-    assert "10" not in kmap or kmap["10"] == 1.0   # the fitted buckets untouched
+    # the fitted buckets are untouched (11-15; bucket 10 collides with bucket
+    # 5's climb in this fixture — see the aliasing test)
+    for b in ("11", "12", "13", "14", "15"):
+        assert kmap.get(b, 1.0) == 1.0, (b, kmap.get(b))
 
 
 def test_ten_rounds_return_the_over_granted_bucket_to_neutral():
@@ -660,12 +707,44 @@ def test_ten_rounds_return_the_over_granted_bucket_to_neutral():
 
 def test_ten_rounds_leave_the_already_right_buckets_alone():
     """No-op on OK is the third arm of the loop and it has to hold: a bucket
-    that was already right must not drift just because it is being observed."""
+    that was already right must not drift just because it is being observed.
+
+    Buckets 11-15 are the clean statement. Bucket 10 is asserted separately
+    below because this fixture makes it collide with bucket 5's climb — see
+    `test_grant_aliasing_smears_a_neighbour_and_that_is_the_cheap_side`.
+    """
     _, led, cfg, _, grants = _tenx()
     kmap = up.load_kmap(led, cfg)
-    for b in ("10", "11", "12", "13", "14", "15"):
+    for b in ("11", "12", "13", "14", "15"):
         assert kmap.get(b, 1.0) == 1.0, (b, kmap.get(b))
         assert grants[0][int(b)] == grants[-1][int(b)]
+
+
+def test_grant_aliasing_smears_a_neighbour_and_that_is_the_cheap_side():
+    """The documented COST of splitting an ambiguous vote, asserted so it
+    cannot be forgotten.
+
+    `round100` is many-to-one, so while bucket 5 climbs through k ~ 2.05 its
+    grant is 2600 — which is ALSO bucket 10's flat grant. No field in the sink
+    separates those two populations, so each such row splits its single vote
+    and bucket 10 picks up a fraction of bucket 5's bound evidence: it ends
+    slightly above neutral despite its own items being perfectly sized.
+
+    This is deliberately preferred to the alternative. Winner-take-all
+    inversion instead LOCKS: against a bucket sitting on the k_min floor the
+    mis-credited votes cannot move it away, so the aliased bucket never
+    converges (reproduced at k=1.258, permanently). Per the loop's causal
+    grounding a slightly fat grant costs nothing — cost is E[min(need, grant)]
+    and the model never sees the number — while a cap that never stops
+    truncating costs ~9.6pt. Smear is the cheap failure; lock is the expensive
+    one. The bound below is what keeps 'slight' honest.
+    """
+    _, led, cfg, _, grants = _tenx()
+    k10 = up.load_kmap(led, cfg).get("10", 1.0)
+    assert 1.0 < k10 < 1.25, k10                 # smeared, but bounded
+    assert grants[-1][10] >= grants[0][10]        # fat, never starved
+    # and only the colliding bucket — its non-colliding neighbours are clean
+    assert up.load_kmap(led, cfg).get("11", 1.0) == 1.0
 
 
 def test_bucket_k_cannot_rescue_one_item_inside_a_fitted_bucket():
@@ -827,9 +906,257 @@ def test_ledger_carries_its_params_and_key_schema():
     led = up.run_pass(CFG, sink, os.path.join(d, "l.json"),
                       os.path.join(d, "c.json"))
     assert led["key_schema"] == "steps"
-    assert led["params"]["bump"] == 1.15 and led["params"]["decay"] == 0.97
+    assert led["params"]["beta"] == 0.007 and led["params"]["gamma"] == 0.004
+    assert "bump" not in led["params"] and "decay" not in led["params"]
     assert led["schema"] == up.LEDGER_SCHEMA
     assert "ptok" in led["key_bands"]
+
+
+# ─── SAMPLE-SIZE ROBUSTNESS — the 2026-07-27 requirement ─────────────────────
+# "if it's 50 samples one weird request would move it too much; if it's 5000
+#  nothing would move it almost" — the cap must fit the ~90% repeating
+#  majority, and an outlier must not drag the bucket for the other 99%.
+def _rows(outcome, n, bucket=5):
+    return [dict(_bucket=bucket, _outcome=outcome, _keys=[str(bucket)])] * n
+
+
+def test_one_outlier_row_moves_k_under_one_percent():
+    """THE headline property. Under the retired per-PASS rule a single weird
+    request arriving alone in a 60 s pass moved its whole bucket 15%. It now
+    moves it beta = 0.7%, and three ordinary slack rows erase it."""
+    k, _ = up.update_buckets(_rows("bound", 1), {"5": 1.5}, CFG)
+    move = k["5"] / 1.5 - 1.0
+    assert 0 < move < 0.01, move
+    assert abs(move - CFG["beta"]) < 1e-9
+    # self-erasing: the majority takes it back with a couple of ordinary rows
+    k2, _ = up.update_buckets(_rows("bound", 1) + _rows("slack", 2),
+                              {"5": 1.5}, CFG)
+    assert k2["5"] < 1.5, k2
+    # and the same single row cannot reach the old step no matter the pass it
+    # lands in — passes are not evidence any more
+    for extra in (0, 1, 5):
+        k3, _ = up.update_buckets(_rows("bound", 1) + _rows("ok", extra),
+                                  {"5": 1.5}, CFG)
+        assert abs(k3["5"] - k["5"]) < 1e-12
+
+
+def test_twenty_consistent_rows_reproduce_the_retired_single_step():
+    """beta's calibration point: ~20 CONSISTENT bound rows buy what one pass
+    used to buy on the strength of one row. The evidence bar moved 20x; the
+    control authority did not."""
+    k, _ = up.update_buckets(_rows("bound", 20), {"5": 1.0}, CFG)
+    assert abs(k["5"] - 1.15) < 0.005, k["5"]        # the retired 1.15
+    # and it does not matter how those 20 rows are sliced into passes
+    kmap = {"5": 1.0}
+    for _ in range(20):
+        kmap, _ = up.update_buckets(_rows("bound", 1), kmap, CFG)
+    assert abs(kmap["5"] - k["5"]) < 1e-9
+    kmap = {"5": 1.0}
+    for _ in range(4):
+        kmap, _ = up.update_buckets(_rows("bound", 5), kmap, CFG)
+    assert abs(kmap["5"] - k["5"]) < 1e-9
+
+
+def test_decay_is_slower_than_bump_and_relaxes_over_hundreds_of_rows():
+    """gamma: an over-granted bucket returns to neutral over HUNDREDS of slack
+    rows, not over minutes of timer ticks."""
+    cfg = dict(CFG, max_step=1e9)
+    k, _ = up.update_buckets(_rows("slack", 26), {"5": 2.0}, cfg)
+    assert 0.895 < k["5"] / 2.0 < 0.905            # ~26 rows = -10%
+    kb, _ = up.update_buckets(_rows("bound", 14), {"5": 2.0}, cfg)
+    assert 1.095 < kb["5"] / 2.0 < 1.105           # ~14 rows = +10%
+    n = 0
+    kmap = {"5": 2.0}
+    while kmap["5"] > 1.0 and n < 10000:
+        kmap, _ = up.update_buckets(_rows("slack", 1), kmap, cfg)
+        n += 1
+    assert 100 < n < 400, n                        # hundreds, by design
+    # bump per row is strictly the stronger of the two, as the +9.6pt asymmetry
+    # requires: recovering a decay costs fewer rows than causing it
+    assert CFG["beta"] > CFG["gamma"]
+
+
+def test_five_thousand_row_window_is_dominated_by_the_majority():
+    """The other end of the user's range. One weird request among 5000 is
+    0.03% of the evidence; the same request among 50 is 3.5%. Both move k by
+    the same absolute beta — what changes is its SHARE, which is the whole
+    point of counting rows."""
+    import math
+    cfg = dict(CFG, max_step=1e9)
+
+    # (a) the majority owns the DIRECTION even against 50 outliers pulling the
+    #     other way: 300 slack rows beat 50 bound ones, decisively.
+    k, _ = up.update_buckets(_rows("bound", 50) + _rows("slack", 300),
+                             {"5": 3.0}, cfg)
+    assert k["5"] < 3.0 * 0.95, k
+
+    # (b) the SHARE one dissenting row holds of the whole window's evidence.
+    #     This is the user's 50-vs-5000 statement, stated as a number.
+    one = math.log(1 + cfg["beta"])
+
+    def share(n_major):
+        return one / (one + abs(n_major * math.log(1 - cfg["gamma"])))
+    assert 0.03 < share(50) < 0.04                 # 50 samples: ~3.4%
+    assert share(5000) < 0.0004                    # 5000 samples: ~0.03%
+    assert share(50) / share(5000) > 90            # ~100x less leverage
+
+    # (c) adding ONE more outlier to a 5000-row window changes the answer by
+    #     exactly beta and nothing else — no pass-boundary amplification left.
+    window = _rows("ok", 4950) + _rows("bound", 50)
+    k1, _ = up.update_buckets(window, {"5": 1.5}, cfg)
+    k2, _ = up.update_buckets(window + _rows("bound", 1), {"5": 1.5}, cfg)
+    assert abs(k2["5"] / k1["5"] - (1 + cfg["beta"])) < 1e-9
+    # under the retired per-PASS rule (c) and a 1-row pass were the SAME 1.15
+    assert (k2["5"] / k1["5"]) < 1.01
+
+
+def test_max_step_is_now_a_rail_not_the_control_law():
+    """Kept as an absolute safety rail. It takes a genuine flood to reach it."""
+    import math
+    rows_to_rail = math.log(CFG["max_step"]) / math.log(1 + CFG["beta"])
+    assert rows_to_rail > 50, rows_to_rail
+    k, _ = up.update_buckets(_rows("bound", int(rows_to_rail) - 1),
+                             {"5": 1.0}, CFG)
+    assert k["5"] < CFG["max_step"]
+
+
+# ─── the era-consistency filter ──────────────────────────────────────────────
+def test_era_stale_bound_row_does_not_bump_the_current_k():
+    """A row served 1300 when the bucket now grants 2600 is evidence about a
+    regime the current k already answered. It must not bump again — that
+    double-counting is what drove the live buckets to 2.25-3.0."""
+    r = row(1300, 1290, censor_forced=True)
+    r["_bucket"], r["_keys"] = 5, ["5"]
+    r["_outcome"] = up.classify(r, CFG)
+    assert r["_outcome"] == "bound"
+    assert up.era_stale(r, {"5": 2.0}, CFG) is True     # now grants 2600
+    assert up.era_stale(r, {}, CFG) is False            # still grants 1300
+    r["_stale"] = True
+    k, per = up.update_buckets([r], {"5": 2.0}, CFG)
+    assert k["5"] == 2.0, k                             # no bump
+    assert per["5"]["bound"] == 1 and per["5"]["bound_eff"] == 0
+    assert per["5"]["bound_stale"] == 1                 # still counted
+
+
+def test_era_stale_slack_row_does_not_decay_the_current_k():
+    """Symmetric: a slack row served MORE than the bucket grants today is
+    evidence about fat the current k has already handed back."""
+    r = row(2600, 300)
+    r["_bucket"], r["_keys"] = 5, ["5"]
+    r["_outcome"] = up.classify(r, CFG)
+    assert r["_outcome"] == "slack"
+    assert up.era_stale(r, {}, CFG) is True             # bucket 5 grants 1300
+    r["_stale"] = True
+    k, per = up.update_buckets([r], {"5": 1.4}, CFG)
+    assert k["5"] == 1.4, k
+    assert per["5"]["slack"] == 1 and per["5"]["slack_eff"] == 0
+    assert per["5"]["slack_stale"] == 1
+
+
+def test_era_filter_end_to_end_through_run_pass():
+    """The same thing where it matters: a starved-era bound row landing in a
+    real pass against a ledger that has already been raised."""
+    d = tmpdir()
+    sink = os.path.join(d, "sink")
+    os.makedirs(sink)
+    ledger, cursor = os.path.join(d, "l.json"), os.path.join(d, "c.json")
+    up.atomic_write_json(ledger, {"schema": up.LEDGER_SCHEMA,
+                                  "bucket": {"5": 2.0}, "exact": {}})
+    write_sink(sink, [sink_rows(1300, 1290, censor_forced=True)])
+    led = up.run_pass(CFG, sink, ledger, cursor)
+    assert led["bucket"]["5"] == 2.0, led["bucket"]
+    assert led["window"]["counts"]["era_stale"] == 1, led["window"]["counts"]
+    assert led["audit"]["5"]["bound_stale"] == 1
+    assert led["audit"]["5"]["bound_eff"] == 0
+    assert led["telemetry"]["5"]["new_bound"] == 1        # telemetry still sees
+    assert led["telemetry"]["5"]["new_bound_stale"] == 1
+
+
+def test_a_current_era_row_still_votes():
+    """The filter must not eat the normal case, or the loop stops learning."""
+    d = tmpdir()
+    sink = os.path.join(d, "sink")
+    os.makedirs(sink)
+    ledger, cursor = os.path.join(d, "l.json"), os.path.join(d, "c.json")
+    up.atomic_write_json(ledger, {"schema": up.LEDGER_SCHEMA,
+                                  "bucket": {"5": 2.0}, "exact": {}})
+    grant = up.pn100_grant(5, 2.0, CFG)                   # what it grants NOW
+    write_sink(sink, [sink_rows(grant, grant - 5, censor_forced=True)])
+    led = up.run_pass(CFG, sink, ledger, cursor)
+    assert led["window"]["counts"].get("era_stale", 0) == 0
+    assert led["bucket"]["5"] > 2.0, led["bucket"]
+
+
+# ─── the audit trail ─────────────────────────────────────────────────────────
+def test_ledger_publishes_evidence_totals_and_the_applied_step():
+    """`n_evidence_total` is cumulative across passes — the denominator that
+    says how much a k has actually been paid for — and `step` is what the pass
+    applied, after the rail and the clamps."""
+    d = tmpdir()
+    sink = os.path.join(d, "sink")
+    os.makedirs(sink)
+    ledger, cursor = os.path.join(d, "l.json"), os.path.join(d, "c.json")
+    write_sink(sink, [sink_rows(1300, 1290, censor_forced=True, ts=1.0 + i)
+                      for i in range(4)])
+    led = up.run_pass(CFG, sink, ledger, cursor)
+    a = led["audit"]["5"]
+    assert a["n_evidence_total"] == 4 and a["n_evidence_pass"] == 4
+    assert a["bound_eff"] == 4
+    assert abs(a["step"] - 1.007 ** 4) < 1e-6
+    assert abs(a["k"] / a["k_prev"] - a["step"]) < 1e-4
+    assert led["telemetry"]["5"]["n_evidence_total"] == 4
+    assert led["telemetry"]["5"]["step_applied"] == a["step"]
+
+    write_sink(sink, [sink_rows(up.pn100_grant(5, led["bucket"]["5"], CFG),
+                                1, generated=200, ts=50.0 + i)
+                      for i in range(3)])
+    led2 = up.run_pass(CFG, sink, ledger, cursor)
+    a2 = led2["audit"]["5"]
+    assert a2["n_evidence_total"] == 7, a2      # CUMULATIVE, not the window
+    assert a2["n_evidence_pass"] == 3
+    assert a2["slack_eff"] == 3 and a2["step"] < 1.0
+
+    led3 = up.run_pass(CFG, sink, ledger, cursor)       # nothing new
+    a3 = led3["audit"]["5"]
+    assert a3["n_evidence_total"] == 7 and a3["n_evidence_pass"] == 0
+    assert a3["step"] == 1.0                            # sitting still, visibly
+
+
+def test_ambiguous_grant_splits_one_vote_across_its_candidates():
+    """`invert_candidates` never awards a whole vote to a guess."""
+    kmap = {"5": 1.2328}                       # raw 1602.6 -> 1600
+    cands = up.invert_candidates(1600, kmap, CFG)
+    got = {b: w for b, _keys, w in cands}
+    assert set(got) == {5, 6}, got             # bucket 6 flat is 1560 -> 1600
+    assert abs(sum(got.values()) - 1.0) < 1e-9
+    assert got[5] == got[6] == 0.5
+    assert up.invert_steps(1600, kmap, CFG) == 5   # nearest UNROUNDED raw
+    # an unambiguous grant is still exactly one vote for one bucket
+    solo = up.invert_candidates(up.pn100_grant(3, 1.0, CFG), {}, CFG)
+    assert len(solo) == 1 and solo[0][0] == 3 and solo[0][2] == 1.0
+    r = dict(_bucket=5, _outcome="bound",
+             _alias=[(5, ["5"], 0.5), (6, ["6"], 0.5)])
+    k, per = up.update_buckets([r], {}, CFG)
+    assert abs(k["5"] - 1.007 ** 0.5) < 1e-9
+    assert abs(k["6"] - 1.007 ** 0.5) < 1e-9
+    assert per["5"]["bound"] == 0.5
+
+
+# ─── env / CLI knobs ─────────────────────────────────────────────────────────
+def test_beta_and_gamma_are_env_and_cli_overridable():
+    env = {"PN162_BETA": "0.02", "PN162_GAMMA": "0.01", "PN162_WINDOW": "77"}
+    over = up.env_overrides(env)
+    assert over == {"beta": 0.02, "gamma": 0.01, "window": 77}
+    args = up.main.__globals__["argparse"].Namespace(
+        **{k: None for k in up.DEFAULTS})
+    cfg = up.build_cfg(args, env)
+    assert cfg["beta"] == 0.02 and cfg["gamma"] == 0.01 and cfg["window"] == 77
+    args.beta = 0.5                                   # CLI beats env
+    assert up.build_cfg(args, env)["beta"] == 0.5
+    # a typo must not stop the learning pass
+    assert up.env_overrides({"PN162_BETA": "not-a-float"}) == {}
+    assert up.env_overrides({"PN162_BETA": ""}) == {}
+    assert up.build_cfg(args, {})["gamma"] == up.DEFAULTS["gamma"]
 
 
 # ─── standalone runner ───────────────────────────────────────────────────────

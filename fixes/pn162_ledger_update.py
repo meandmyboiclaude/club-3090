@@ -22,16 +22,60 @@ request, whether its own thinking budget bound (BUG-139 censor schema 2):
     grant - rtok > SLACK_FRAC * grant -> SLACK  : the cap was far too loose
     otherwise                         -> OK     : the cap was about right
 
-    k[bucket] *= BUMP  on BOUND   (default 1.15, clamp 3.0)
-    k[bucket] *= DECAY on SLACK   (default 0.97, floor 1.0 = NEUTRAL)
-    k[bucket] unchanged on OK
+PER-ROW EVIDENCE, NOT PER-PASS (2026-07-27 rewrite)
+---------------------------------------------------
+The update is EXPONENTIAL IN THE ROW COUNT, so one pass's k move depends on how
+much evidence that pass carried and on nothing else:
+
+    k[key] *= (1 + BETA)  ** n_bound_rows      (BETA  default 0.007)
+    k[key] *= (1 - GAMMA) ** n_slack_rows      (GAMMA default 0.004)
+    k[key] unchanged on OK
+    floor 1.0 (= NEUTRAL), ceiling K_MAX, and a per-pass |k'/k| <= MAX_STEP rail
+
+The rule it replaced was per-PASS multiplicative: ANY pass containing a bound
+row bumped the whole bucket by 1.15. At the 60 s timer cadence a pass often
+carries one or two rows, so ONE outlier request moved a bucket 15% — and two
+manual passes drove live buckets to 2.25-3.0 on starved-era evidence. Counting
+rows instead of passes makes the pass boundary irrelevant: 20 bound rows move k
++15% whether they arrive in one pass or twenty, and a lone outlier moves it
++0.7%, which the majority erases with three slack rows.
+
+Counts, not magnitudes, is the deliberate choice. The goal is to fit the ~90%
+majority of (usually repeating) requests, so each request gets exactly one vote;
+a single request that needed 8x its grant cannot outvote the 99 that did not.
+See PN162-BUDGET-CAL.md §2.1 for the calibration table (rows -> % move) and the
+1000-row-window outlier bound.
 
 Causal grounding (banked 2026-07-26): force-closed items gain +9.6pt when given
 more; natural stops lose nothing. Bumping a bound bucket is the paying side of
 the trade; an unused grant costs nothing (cost = E[min(need, grant)]), so decay
 exists only to hand back bumps this loop granted. It stops at 1.0 — identity
 with PN100's validated flat grid — because a sub-neutral k starves lean items
-(-6pt on a live full-100). Reclaiming below the flat grid is out of scope.
+(-6pt on a live full-100). Reclaiming below the flat grid is out of scope, and
+the k_min clamp IS the "decay only while k > 1.0" rule.
+
+THE ERA-CONSISTENCY FILTER
+--------------------------
+A sink row is evidence about the grant IT WAS SERVED, not about the grant the
+bucket hands out now. Rows generated minutes ago under a smaller k kept voting
+as if current, so a bucket that had already been raised was raised again on the
+starvation its own raise had fixed — the observed 2.25-3.0 runaway.
+
+The sink row carries the granted budget, and `invert_steps` already inverts a
+grant THROUGH the live key map, so the row's era is recoverable exactly:
+
+    era_grant = row.budget_grant
+    now_grant = pn100_grant(bucket, k_current[bucket])
+
+    BOUND row with era_grant < now_grant  -> STALE: the current k already
+                                             answered this starvation. Weight 0.
+    SLACK row with era_grant > now_grant  -> STALE (symmetric): the current k
+                                             already handed that fat back.
+
+Stale rows still count in telemetry and in `n_evidence_total` — they are real
+observations, just not observations about the CURRENT cap. Rows served at
+exactly the current grant (the overwhelming majority, since the ledger only
+moves once a minute) always vote.
 
 WHAT CARRIES THE STEPS ESTIMATE — IT IS NOT IN THE SINK
 -------------------------------------------------------
@@ -50,10 +94,17 @@ So steps is INVERTED from the grant. PN100's continuous grid is
 That inversion has ONE trap, and it is PN162's own feedback: once k != 1 the
 grant is `round100(steps x TOK * k[steps])`, so the naive quotient recovers
 `steps*k`, not `steps`, and the update would be credited to the wrong bucket —
-a self-reinforcing drift. `invert_steps()` therefore inverts THROUGH the
-current bucket map: it searches for the b whose calibrated grant equals the
+a self-reinforcing drift. `invert_candidates()` therefore inverts THROUGH the
+current bucket map: it collects every b whose calibrated grant equals the
 observed one, and falls back to the naive quotient only when no b matches
-(a ledger changed mid-window). With k all 1.0 it is exactly the quotient.
+(a ledger changed mid-window — the only path `era_stale` can fire on). With k
+all 1.0 it is exactly the quotient.
+
+`round100` is many-to-one, so two buckets can genuinely share a grant. Control
+does NOT guess between them: an ambiguous row splits its single vote evenly
+across the candidates. Winner-take-all LOCKS the loop (see `invert_candidates`);
+`invert_steps()` still returns the single best candidate, for telemetry, key
+derivation and the era filter.
 
 Assumes the two other multipliers on that path are at their defaults
 (`GENESIS_PN100_HIGHSTEP_MULT=1.0`, `GENESIS_PN100_STEP_BUDGET_MAP` unset).
@@ -129,8 +180,13 @@ MAX_STEPS_SEARCH = 64     # ceil 10240 / 260 / k_min -> ~56
 DEFAULTS = dict(
     window=1000,
     tok_per_step=260,
-    bump=1.15,
-    decay=0.97,
+    # PER-ROW evidence steps (2026-07-27). See the module docstring and
+    # PN162-BUDGET-CAL.md §2.1. beta is calibrated so ~20 consistent bound rows
+    # reproduce the retired per-pass 1.15 step (1.007**20 = 1.1498) and one
+    # outlier row moves k by +0.7%; gamma is deliberately slower so an
+    # over-granted bucket relaxes to neutral over hundreds of slack rows.
+    beta=0.007,
+    gamma=0.004,
     slack_frac=0.40,
     # 2026-07-27: floor raised 0.7 -> 1.0 — slack is free on this stack (grant
     # invisible, cost=E[min(need,grant)]); sub-neutral k starved lean items
@@ -255,24 +311,67 @@ def pn100_grant(steps: int, k: float, cfg: dict) -> int:
     return max(cfg["budget_floor"], min(cfg["budget_ceil"], round100(raw)))
 
 
-def invert_steps(grant: int, kmap: dict, cfg: dict, ptok=None) -> int:
-    """Observed grant -> the steps estimate that produced it (bucket domain).
+def invert_candidates(grant: int, kmap: dict, cfg: dict,
+                      ptok=None) -> list:
+    """Every bucket whose CURRENT calibrated grant is `grant`, with vote weights.
 
     Inverts THROUGH the live key map so PN162's own multiplier cannot make the
-    updater credit the wrong bucket. Ambiguity (two b sharing a grant, or a
-    saturated clamp) resolves to the candidate nearest the naive quotient; no
-    candidate at all falls back to the naive quotient outright.
+    updater credit the wrong bucket. Returns `[(bucket, keys, weight)]`, best
+    candidate first, weights summing to 1.
+
+    AMBIGUITY IS REAL AND MUST BE SPLIT, NOT GUESSED. `round100` is many-to-one,
+    so two buckets can genuinely share a grant — bucket 8 at k=1.258 (raw 2616)
+    and bucket 10 at k=1.0 (raw 2600) both serve 2600, and NOTHING in the sink
+    row distinguishes them. Awarding the whole vote to one of them is what
+    locks the loop: under the per-ROW step sizes a moving bucket now visits
+    every 100-token grant on its way (instead of stepping over most of them, as
+    the retired 15%-per-pass rule did by luck), so it meets these coincidences
+    constantly. Each winner-take-all decision hands ALL of a bucket's evidence
+    to a neighbour that does not size its requests; the real bucket's k freezes
+    and never reaches its need. Both directions were reproduced: a permanent
+    10/100 force-close climbing, and an over-granted bucket stuck at k=1.258
+    decaying.
+
+    So an ambiguous row splits its single vote evenly across the candidates.
+    That is honest (the posterior over buckets really is flat given only the
+    grant), it keeps every candidate moving, and it composes exactly with the
+    exponential rule, which takes fractional exponents without a special case.
+    The cost is a documented smear: a bucket with no traffic of its own can
+    pick up a fraction of a neighbour's votes. Its own traffic, when any
+    arrives, decays it back.
+
+    No candidate at all -> the naive quotient, weight 1. That is the ONLY path
+    on which `era_stale` can fire; see it for why.
     """
-    naive = max(1, int(round(grant / float(cfg["tok_per_step"]))))
+    tps = float(cfg["tok_per_step"])
+    naive = max(1, int(round(grant / tps)))
     schema = cfg.get("key_schema", KEY_SCHEMA_STEPS)
-    cands = [
-        b for b in range(1, MAX_STEPS_SEARCH + 1)
-        if pn100_grant(
-            b, lookup_k(kmap, bucket_keys(b, ptok, schema), cfg), cfg) == grant
-    ]
+    cands = []
+    for b in range(1, MAX_STEPS_SEARCH + 1):
+        keys = bucket_keys(b, ptok, schema)
+        k = lookup_k(kmap, keys, cfg)
+        if pn100_grant(b, k, cfg) != grant:
+            continue
+        raw = b * tps * (cfg["highstep_mult"]
+                         if (cfg["highstep_mult"] > 1.0
+                             and b >= cfg["highstep_min"]) else 1.0) * k
+        cands.append((abs(raw - grant), abs(b - naive), b, keys))
     if not cands:
-        return bucket_of(naive)
-    return bucket_of(min(cands, key=lambda b: (abs(b - naive), b)))
+        b = bucket_of(naive)
+        return [(b, bucket_keys(b, ptok, schema), 1.0)]
+    cands.sort()
+    w = 1.0 / len(cands)
+    return [(b, keys, w) for _d, _n, b, keys in cands]
+
+
+def invert_steps(grant: int, kmap: dict, cfg: dict, ptok=None) -> int:
+    """The single best bucket for `grant` — telemetry, keys and the era filter.
+
+    Control does NOT go through this: an ambiguous grant splits its vote across
+    `invert_candidates`. Ordering is nearest UNROUNDED calibrated grant, then
+    nearest naive quotient, then lowest bucket.
+    """
+    return bucket_of(invert_candidates(grant, kmap, cfg, ptok)[0][0])
 
 
 def _clamp_k(k, cfg) -> float:
@@ -539,45 +638,106 @@ def writable_keys(window: list, cfg: dict) -> set:
     return marg | {k for k, n in occ.items() if n >= cfg["min_cell"]}
 
 
-def _row_key(row: dict, allowed: set) -> str:
-    for key in (row.get("_keys") or []):
+def _pick_key(keys: list, bucket, allowed: set) -> str:
+    for key in (keys or []):
         if key in allowed:
             return key
-    return str(row.get("_bucket") or 1)
+    return str(bucket or 1)
+
+
+def _row_key(row: dict, allowed: set) -> str:
+    return _pick_key(row.get("_keys"), row.get("_bucket"), allowed)
+
+
+def era_stale(row: dict, kmap: dict, cfg: dict) -> bool:
+    """Is this row evidence about a grant the CURRENT k no longer hands out?
+
+    The sink row carries `budget_grant` — the number the engine actually served
+    it — and `pn100_grant` reproduces what the bucket would grant under the
+    ledger's current k. A bound row served LESS than today's grant is telling
+    us about a starvation today's k has already addressed; a slack row served
+    MORE than today's grant is telling us about fat today's k has already
+    handed back. Both are true observations about a dead regime, so they are
+    weight 0 for control and still counted everywhere else.
+
+    Equal grants — the normal case, since the ledger moves at most once a
+    minute — are never stale. OK rows have no weight to zero out.
+
+    MECHANICALLY this fires only on `invert_candidates`' naive-quotient
+    fallback, and that is exactly right: an exact candidate is by construction
+    a bucket whose CURRENT grant equals the row's, i.e. a row still on the live
+    grid. A row served under an old k regime whose grant has since fallen off
+    the grid entirely matches nothing, gets credited by quotient to a bucket
+    that never sized it, and is precisely the "starved-era outcome voting as if
+    current" the 2026-07-27 runaway was made of. Rows from an old regime that
+    happen to ALIAS onto some current bucket's grant are not detectable — no
+    field in the sink dates a grant against a ledger revision.
+    """
+    b = row.get("_bucket")
+    outcome = row.get("_outcome")
+    grant = row.get("budget_grant")
+    if not b or not grant or outcome not in ("bound", "slack"):
+        return False
+    keys = row.get("_keys") or bucket_keys(b, row.get("prompt_tok"),
+                                           cfg.get("key_schema",
+                                                   KEY_SCHEMA_STEPS))
+    now = pn100_grant(int(b), lookup_k(kmap, keys, cfg), cfg)
+    return grant < now if outcome == "bound" else grant > now
+
+
+_ZERO = ("bound", "slack", "ok", "bound_eff", "slack_eff",
+         "bound_stale", "slack_stale")
 
 
 def update_buckets(rows: list, kmap: dict, cfg: dict,
                    allowed: set | None = None) -> tuple[dict, dict]:
     """(new kmap, per-key outcome counts) from NEW rows only.
 
-    Per-row multiplicative, exactly as specified — but the whole pass's change
-    for one key is then capped at `max_step` in either direction. Without that
-    cap a single unlucky window (say 40 bound rows in one bucket) slams k
-    straight to the clamp, which is a control move no evidence supports; with
-    it the loop still converges, just over a couple of passes.
+    Per-ROW exponential: the pass's whole move for one key is
+    `(1+beta)**bound_eff * (1-gamma)**slack_eff`, where `_eff` excludes the
+    era-stale rows (`row["_stale"]`, set by `run_pass`). A pass with no rows
+    for a key does nothing to it — the cadence of the timer is not evidence.
+
+    `max_step` survives as an absolute safety rail, not as the control law:
+    at the shipped beta it takes 58 bound rows in ONE pass to reach 1.5, so it
+    now binds only on a genuine flood. Each key's realised step lands in
+    `per[key]["step"]` and is written to the ledger as the audit trail.
     """
     out = {key: _clamp_k(k, cfg) for key, k in kmap.items()}
     per: dict = {}
     for r in rows:
         if r.get("_outcome") not in ("bound", "slack", "ok"):
             continue
-        key = _row_key(r, allowed) if allowed is not None else str(r["_bucket"])
-        marg = str(r["_bucket"])
-        # Credit the APPLIED key and, when they differ, the marginal bucket
-        # too. Without the second credit a marginal bucket stops seeing any
-        # traffic the moment its composite cells open, and it is precisely the
-        # fallback that new and thin cells land on. The cost is a confound —
-        # the marginal then learns partly from rows that were sized by a
-        # composite k — which is one reason a composite schema needs its own
-        # screened boot rather than a flag flip.
-        for kk in ({key, marg} if key != marg else {key}):
-            c = per.setdefault(kk, {"bound": 0, "slack": 0, "ok": 0})
-            c[r["_outcome"]] += 1
+        stale = bool(r.get("_stale"))
+        # One row is ONE vote, split across the buckets its grant is ambiguous
+        # between (`invert_candidates`). Unambiguous rows — the overwhelming
+        # majority — are a single (bucket, keys, 1.0).
+        alias = r.get("_alias") or [(r["_bucket"], r.get("_keys"), 1.0)]
+        for b, keys, w in alias:
+            key = _pick_key(keys, b, allowed) if allowed is not None else str(b)
+            marg = str(b)
+            # Credit the APPLIED key and, when they differ, the marginal bucket
+            # too. Without the second credit a marginal bucket stops seeing any
+            # traffic the moment its composite cells open, and it is precisely
+            # the fallback that new and thin cells land on. The cost is a
+            # confound — the marginal then learns partly from rows that were
+            # sized by a composite k — which is one reason a composite schema
+            # needs its own screened boot rather than a flag flip.
+            for kk in ({key, marg} if key != marg else {key}):
+                c = per.setdefault(kk, {z: 0.0 for z in _ZERO})
+                c[r["_outcome"]] += w
+                if r["_outcome"] in ("bound", "slack"):
+                    c[r["_outcome"] + ("_stale" if stale else "_eff")] += w
+    beta, gamma = float(cfg["beta"]), float(cfg["gamma"])
     for key, c in per.items():
         k0 = _clamp_k(out.get(key, 1.0), cfg)
-        k = k0 * (cfg["bump"] ** c["bound"]) * (cfg["decay"] ** c["slack"])
+        k = k0 * ((1.0 + beta) ** c["bound_eff"]) \
+               * ((1.0 - gamma) ** c["slack_eff"])
         k = max(k0 / cfg["max_step"], min(k0 * cfg["max_step"], k))
         out[key] = _clamp_k(k, cfg)
+        # The audit trail the ledger publishes: the step ACTUALLY applied,
+        # after the rail and both clamps — not the step the counts asked for.
+        c["step"] = round(out[key] / k0, 6) if k0 else 1.0
     return out, per
 
 
@@ -635,8 +795,43 @@ def announcement_oracle(window: list, cfg: dict) -> dict:
     return out
 
 
+def roll_audit(prev: dict, per: dict, kmap: dict, kprev: dict,
+               cfg: dict) -> dict:
+    """The per-key audit trail, carried forward across passes.
+
+    `n_evidence_total` is CUMULATIVE over the calibrator's whole life, not over
+    the rolling window: it is the denominator that says how much a bucket's k
+    has actually been paid for. `step` is what this pass applied. Keys that saw
+    no rows this pass keep their total and report step 1.0, so a bucket sitting
+    still is visibly sitting still rather than absent.
+    """
+    out: dict = {}
+    for key in set(prev) | set(per) | set(kmap):
+        p = prev.get(key) or {}
+        c = per.get(key) or {}
+        try:
+            total = float(p.get("n_evidence_total") or 0)
+        except (TypeError, ValueError):
+            total = 0.0
+        # Vote counts are fractional when a grant was ambiguous (one row, one
+        # vote, split across candidates), so they round for publication.
+        n_pass = c.get("bound", 0) + c.get("slack", 0) + c.get("ok", 0)
+        out[key] = {
+            "n_evidence_total": round(total + n_pass, 3),
+            "n_evidence_pass": round(n_pass, 3),
+            "bound_eff": round(c.get("bound_eff", 0), 3),
+            "slack_eff": round(c.get("slack_eff", 0), 3),
+            "bound_stale": round(c.get("bound_stale", 0), 3),
+            "slack_stale": round(c.get("slack_stale", 0), 3),
+            "step": round(float(c.get("step", 1.0)), 6),
+            "k_prev": round(_clamp_k(kprev.get(key, 1.0), cfg), 4),
+            "k": round(_clamp_k(kmap.get(key, 1.0), cfg), 4),
+        }
+    return out
+
+
 def telemetry(window: list, kmap: dict, kprev: dict, per: dict,
-              oracle: dict, cfg: dict) -> dict:
+              oracle: dict, cfg: dict, audit: dict | None = None) -> dict:
     """Per-bucket estimator-error + anchor telemetry. Records, never steers."""
     tps = float(cfg["tok_per_step"])
     edges = oracle.get("edges") or []
@@ -663,14 +858,23 @@ def telemetry(window: list, kmap: dict, kprev: dict, per: dict,
             if bd and bd.get("announce_bias") is not None:
                 biases.append(bd["announce_bias"])
         pc = per_marg.get(str(b), {})
+        au = (audit or {}).get(str(b), {})
         out[str(b)] = {
             "n": len(rs),
             "bound": sum(1 for r in rs if r["_outcome"] == "bound"),
             "slack": sum(1 for r in rs if r["_outcome"] == "slack"),
             "ok": sum(1 for r in rs if r["_outcome"] == "ok"),
-            "new_bound": pc.get("bound", 0),
-            "new_slack": pc.get("slack", 0),
-            "new_ok": pc.get("ok", 0),
+            "new_bound": round(pc.get("bound", 0), 3),
+            "new_slack": round(pc.get("slack", 0), 3),
+            "new_ok": round(pc.get("ok", 0), 3),
+            # era-consistency filter: how many of this pass's rows actually
+            # voted, and how many were evidence about a dead k regime.
+            "new_bound_stale": round(pc.get("bound_stale", 0), 3),
+            "new_slack_stale": round(pc.get("slack_stale", 0), 3),
+            # cumulative evidence behind this bucket's k, and the step this
+            # pass actually applied (post-rail, post-clamp). Audit trail.
+            "n_evidence_total": au.get("n_evidence_total", 0),
+            "step_applied": au.get("step", 1.0),
             "k": round(_clamp_k(kmap.get(str(b), 1.0), cfg), 4),
             "k_prev": round(_clamp_k(kprev.get(str(b), 1.0), cfg), 4),
             "grant_med": _r2(_pct(grants, 0.5)),
@@ -787,12 +991,18 @@ def run_pass(cfg: dict, sink: str, ledger_path: str, cursor_path: str,
             r["_bucket"] = None
             r["_keys"] = None
         else:
-            r["_bucket"] = invert_steps(r["budget_grant"], kprev, cfg,
-                                        r.get("prompt_tok"))
-            r["_keys"] = bucket_keys(r["_bucket"], r.get("prompt_tok"), schema)
+            r["_alias"] = invert_candidates(r["budget_grant"], kprev, cfg,
+                                            r.get("prompt_tok"))
+            r["_bucket"] = r["_alias"][0][0]
+            r["_keys"] = r["_alias"][0][1]
+            # Era-consistency: judged against the k the ledger carries NOW
+            # (kprev — the same map the inversion used), never against the k
+            # this pass is about to write.
+            r["_stale"] = era_stale(r, kprev, cfg)
     scored = [r for r in new_rows if r["_bucket"] is not None]
     counts["new_rows"] = len(new_rows)
     counts["new_scored"] = len(scored)
+    counts["era_stale"] = sum(1 for r in scored if r.get("_stale"))
 
     # Rolling window: last N SCORED rows, carried in the cursor so a pass never
     # rereads consumed sink bytes. Trimmed to the fields telemetry needs.
@@ -807,8 +1017,10 @@ def run_pass(cfg: dict, sink: str, ledger_path: str, cursor_path: str,
     kmap, per = update_buckets(scored, kprev, cfg, allowed)
     kmap = {k: v for k, v in kmap.items() if k in allowed or k in kprev}
 
+    audit = roll_audit(ledger.get("audit") or {}, per, kmap, kprev, cfg)
+    audit = {k: v for k, v in audit.items() if k in kmap or k in kprev}
     oracle = announcement_oracle(window, cfg)
-    tel = telemetry(window, kmap, kprev, per, oracle, cfg)
+    tel = telemetry(window, kmap, kprev, per, oracle, cfg, audit)
     ledger_out = {
         "schema": LEDGER_SCHEMA,
         "updated_ts": time.time(),
@@ -828,6 +1040,11 @@ def run_pass(cfg: dict, sink: str, ledger_path: str, cursor_path: str,
         "exact_note": ("not implemented: the PN119 sink carries no prompt "
                        "hash, so no entry can be keyed the consumer would "
                        "recognise. Consumer read path is live + tested."),
+        # Per-key audit trail for the per-ROW update: cumulative evidence
+        # behind each k, this pass's effective vs era-stale row counts, and the
+        # step actually applied. This is what makes a k move explainable
+        # without re-reading the sink.
+        "audit": audit,
         "params": {k: cfg[k] for k in sorted(cfg)},
         "window": {
             "n": len(window),
@@ -852,8 +1069,35 @@ def run_pass(cfg: dict, sink: str, ledger_path: str, cursor_path: str,
     return ledger_out
 
 
-def build_cfg(args) -> dict:
+ENV_PREFIX = "PN162_"
+
+
+def env_overrides(env=None) -> dict:
+    """`PN162_<KNOB>` for every DEFAULTS key, e.g. PN162_BETA / PN162_GAMMA.
+
+    The timer runs the updater with no arguments, so env is the only way to
+    retune it without editing the unit — and a knob that cannot be set where it
+    runs is a knob that does not exist. Precedence is CLI > env > DEFAULTS.
+    An unparseable value is IGNORED (with a stderr note) rather than fatal: the
+    learning pass must not stop because someone typo'd a float.
+    """
+    env = os.environ if env is None else env
+    out = {}
+    for name, val in DEFAULTS.items():
+        raw = env.get(ENV_PREFIX + name.upper())
+        if raw is None or raw == "":
+            continue
+        try:
+            out[name] = type(val)(raw)
+        except (TypeError, ValueError):
+            print(f"[pn162] ignoring {ENV_PREFIX}{name.upper()}={raw!r} "
+                  f"(expected {type(val).__name__})", file=sys.stderr)
+    return out
+
+
+def build_cfg(args, env=None) -> dict:
     cfg = dict(DEFAULTS)
+    cfg.update(env_overrides(env))
     for k in cfg:
         v = getattr(args, k, None)
         if v is not None:
@@ -875,7 +1119,7 @@ def main(argv=None) -> int:
     for name, val in sorted(DEFAULTS.items()):
         p.add_argument(f"--{name.replace('_', '-')}", dest=name,
                        type=type(val), default=None,
-                       help=f"(default {val})")
+                       help=f"(default {val}; env {ENV_PREFIX}{name.upper()})")
     args = p.parse_args(argv)
     cfg = build_cfg(args)
     led = run_pass(cfg, args.sink, args.ledger, args.cursor, args.dry_run)
@@ -884,9 +1128,10 @@ def main(argv=None) -> int:
         return 0
     w = led["window"]
     print(f"[pn162] {'DRY-RUN ' if args.dry_run else ''}"
-          f"new={w['new_scored']} window={w['n']} "
+          f"new={w['new_scored']} era_stale={w['counts'].get('era_stale', 0)} "
+          f"window={w['n']} "
           f"(bound={w['bound']} slack={w['slack']} ok={w['ok']}) "
-          f"-> {args.ledger}")
+          f"beta={cfg['beta']} gamma={cfg['gamma']} -> {args.ledger}")
     print(f"[pn162] key_schema={led['key_schema']}"
           + (f" cells={len(led['cells'])}" if led["cells"] else ""))
     for b, k in sorted(led["bucket"].items(),
@@ -896,8 +1141,10 @@ def main(argv=None) -> int:
         t = led["telemetry"].get(b, {})
         if k == 1.0 and not t.get("n"):
             continue
-        print(f"  bucket {b:>3}  k={k:<6} n={t.get('n', 0):<4} "
+        print(f"  bucket {b:>3}  k={k:<6} step={t.get('step_applied', 1.0):<8} "
+              f"n={t.get('n', 0):<4} ev={t.get('n_evidence_total', 0):<6} "
               f"bound={t.get('bound', 0):<4} slack={t.get('slack', 0):<4} "
+              f"stale={t.get('new_bound_stale', 0)}/{t.get('new_slack_stale', 0)} "
               f"rtok_med={t.get('rtok_med')} "
               f"steps_real_med={t.get('steps_real_med')} "
               f"adherence={t.get('anchor_adherence')} "
