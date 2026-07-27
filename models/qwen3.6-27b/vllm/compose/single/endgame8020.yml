@@ -83,6 +83,13 @@ services:
       # [PN119 2026-07-25] lens-router probe (ro) + v2 self-training sink (rw)
       - /home/user/shared/needfit/pn119-probe-lens_only.npz:/pn119/probe.npz:ro
       - /home/user/shared/needfit/pn119-sink:/pn119-sink
+      # [PN162 2026-07-27] closed-loop budget-calibration ledger, DIRECTORY mount
+      # (the host updater writes tmp+rename; a single-FILE bind would pin this
+      # container to the dead inode and the swap would be invisible until a
+      # restart). Deliberately /pn162, not /pn119 — this compose still file-mounts
+      # its probe at /pn119/probe.npz and that line stays untouched.
+      # Inert until GENESIS_ENABLE_PN162_BUDGET_CAL=1; absent file = identity.
+      - /home/user/shared/needfit/pn119-live:/pn162:ro
       - ./cache-override.yaml:/config/cache-override.yaml:ro
     environment:
       # - CUDA_VISIBLE_DEVICES=0
@@ -565,6 +572,48 @@ services:
       # variable, not a compose edit — same reason the autosplit flag is.
       - GENESIS_ENABLE_PN155_BUDGET_TRUTH=${GENESIS_ENABLE_PN155_BUDGET_TRUTH:-0}
       - GENESIS_PN155_MODE=${GENESIS_PN155_MODE:-observe}
+      # [PN162 2026-07-27] CLOSED-LOOP THINKING-BUDGET CALIBRATOR. DARK.
+      # PN100's grid (steps x TOK_PER_STEP) is open loop: nothing ever compares
+      # the estimate against what the request actually spent. PN162 multiplies a
+      # learned per-steps-bucket k into the grant BEFORE rounding, learned from
+      # the engine's OWN recorded budget outcomes (BUG-139 schema 2:
+      # censor_forced/censored = BOUND -> k up; grant-rtok > 40% = SLACK -> k
+      # down; else no-op). No correctness signal, no extra LLM call.
+      # Ledger: host updater ~/shared/needfit/pn162-ledger-update.py writes
+      # pn119-live/pn162-ledger.json (tmp+rename); the consumer mtime-caches it
+      # and hot-reloads. Missing/ bad ledger, or flag off = exact current
+      # behaviour. Mechanism + boot receipts: ~/shared/needfit/PN162-BUDGET-CAL.md
+      # MUTUALLY EXCLUSIVE with GENESIS_PN100_STEP_BUDGET_MAP (which must stay
+      # unset — it is an absolute fitted budget; the consumer refuses to
+      # multiply on top of it and says so in the log).
+      - GENESIS_ENABLE_PN162_BUDGET_CAL=${GENESIS_ENABLE_PN162_BUDGET_CAL:-0}
+      - GENESIS_PN162_LEDGER=${GENESIS_PN162_LEDGER:-/pn162/pn162-ledger.json}
+      - GENESIS_PN162_RESTAT_S=${GENESIS_PN162_RESTAT_S:-2.0}
+      - GENESIS_PN162_K_MIN=${GENESIS_PN162_K_MIN:-0.7}
+      - GENESIS_PN162_K_MAX=${GENESIS_PN162_K_MAX:-3.0}
+      # Consumer-side chars->tokens estimate, used ONLY by a composite
+      # key_schema (the default "steps" schema ignores it).
+      - GENESIS_PN162_CHARS_PER_TOK=${GENESIS_PN162_CHARS_PER_TOK:-3.6}
+      # [PN162 EXACT — USER RULING PENDING, SEPARATE FLAG] per-PROMPT memory:
+      # a prompt that was force-closed last time gets max(grant, last x1.25)
+      # immediately instead of waiting for its bucket to drift. That is a
+      # per-item bench history, which the bench-protocol rule forbids for bench
+      # traffic — hence its own flag, default 0. It is also INERT: the PN119
+      # sink carries no prompt hash, so nothing populates the map (the read
+      # path is live + tested so wiring it is one router line).
+      - GENESIS_ENABLE_PN162_EXACT=${GENESIS_ENABLE_PN162_EXACT:-0}
+      - GENESIS_PN162_EXACT_MULT=${GENESIS_PN162_EXACT_MULT:-1.25}
+      # [PN162 EXPLORE — USER RULING PENDING, SEPARATE FLAG] the LEAN lane
+      # ANNOUNCES N into the prompt (PN102 v3 "about N short reasoning steps"),
+      # so an under-announced N self-fulfils: the model paces to N, stops
+      # clean, nothing binds, and the bound/slack loop is blind to it. On eps of
+      # requests this announces N+delta and tags the row (vllm_xargs x_caller ->
+      # the sink's `caller` column) so the updater can compare arms. eps 0.0 =
+      # every request labelled control, nothing perturbed.
+      - GENESIS_ENABLE_PN162_EXPLORE=${GENESIS_ENABLE_PN162_EXPLORE:-0}
+      - PN162_EXPLORE_EPS=${PN162_EXPLORE_EPS:-0.0}
+      - PN162_EXPLORE_DELTAS=${PN162_EXPLORE_DELTAS:-1,2}
+      - PN162_EXPLORE_BUDGET_FOLLOWS=${PN162_EXPLORE_BUDGET_FOLLOWS:-1}
       # [PN102 2026-07-18] Envelope Contract: template banner + think-seed
       # (self-counted steps), planner-router steps, p75=193 tok/step calib.
       - GENESIS_ENABLE_PN102_CONTRACT=1

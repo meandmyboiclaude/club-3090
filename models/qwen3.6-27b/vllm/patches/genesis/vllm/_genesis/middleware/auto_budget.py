@@ -137,6 +137,26 @@ try:  # vllm's logger prints INFO in-server; plain root logger may not
 except Exception:  # pragma: no cover
     log = logging.getLogger("genesis.middleware.auto_budget")
 
+# [PN162 2026-07-27] closed-loop budget calibrator (GENESIS_ENABLE_PN162_
+# BUDGET_CAL, default OFF). Sibling module, loaded two ways because this file
+# is imported BOTH as a package member in-container and by absolute path from
+# the offline tests (which stub `vllm.*`, so the package import cannot resolve).
+# A missing/broken calibrator leaves `_pn162 = None` -> every leg below is a
+# no-op and PN100 behaves exactly as it does today.
+try:
+    from vllm._genesis.middleware import pn162_budget_cal as _pn162
+except Exception:  # pragma: no cover — path fallback, see above
+    try:
+        import importlib.util as _ilu
+
+        _p162 = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "pn162_budget_cal.py")
+        _s162 = _ilu.spec_from_file_location("_genesis_pn162_budget_cal", _p162)
+        _pn162 = _ilu.module_from_spec(_s162)
+        _s162.loader.exec_module(_pn162)
+    except Exception:
+        _pn162 = None
+
 _MARKER_KEY = "pn100_internal"
 _CONTROL_KEY = "thinking_budget"
 _LAST_CONF: dict = {"v": "h"}
@@ -821,7 +841,8 @@ def _apply_tier(request: Any, tier: int, allow_disable: bool) -> int:
     return budgets[tier]
 
 
-def _continuous_budget(tier: int, steps: int | None) -> int | None:
+def _continuous_budget(tier: int, steps: int | None,
+                       ptok: int | None = None) -> int | None:
     """Continuous per-task budget from the classifier's own step estimate.
 
     [2026-07-22 USER] The tier bucket is too coarse — real traffic wants a
@@ -880,8 +901,80 @@ def _continuous_budget(tier: int, steps: int | None) -> int | None:
     hs_min = _env_int("GENESIS_PN100_HIGHSTEP_MIN", 10)
     if hs_mult > 1.0 and steps >= hs_min:
         raw *= hs_mult
+    # [PN162 2026-07-27, DARK] closed-loop calibration: multiply in the learned
+    # per-bucket k BEFORE rounding, so grant' = round100(steps x k_step x k).
+    # Identity (k == 1.0) unless GENESIS_ENABLE_PN162_BUDGET_CAL=1 and a
+    # well-formed ledger is readable; the lookup never blocks and never raises.
+    # NOT reached on the STEP_BUDGET_MAP branch above (it returns early) and
+    # refused there too — see pn162_budget_cal.budget_multiplier.
+    if _pn162 is not None:
+        raw *= _pn162.budget_multiplier(steps, ptok)
     rounded = int(round(raw / 100.0)) * 100
     return max(floor, min(ceil, rounded))
+
+
+def _pn162_ptok(request: Any) -> int | None:
+    """Rough prompt-token count for PN162's composite key schemas.
+
+    Only read when the ledger declares a composite `key_schema` (default
+    "steps" ignores it). `_prompt_chars` is uncapped and already on this path;
+    the sink's exact `prompt_tok` is what the updater bands on, so the two
+    agree only approximately — the reason a composite schema needs its own
+    screened boot before being switched on.
+    """
+    if _pn162 is None:
+        return None
+    try:
+        cpt = _env_float("GENESIS_PN162_CHARS_PER_TOK",
+                         _pn162.DEFAULT_CHARS_PER_TOK)
+        return int(_prompt_chars(request) / max(0.5, cpt))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _pn162_arm(request: Any, steps: int | None) -> tuple[int | None, int | None]:
+    """(steps_to_announce, steps_to_size) + the arm stamp. Dark no-op today.
+
+    PN162's exploration leg is the only counterfactual for "the announced N was
+    too low even though nothing bound" — the LEAN lane renders N into the
+    prompt (`_contract_v3_sized`), so an under-announced N self-fulfils and the
+    bound/slack loop never sees it. Disarmed unless GENESIS_ENABLE_PN162_
+    EXPLORE=1 with PN162_EXPLORE_EPS > 0.
+    """
+    if _pn162 is None:
+        return steps, steps
+    try:
+        ann, size, arm = _pn162.explore_arm(steps)
+        if arm is not None:
+            _pn162.stamp_xargs(request, arm=arm)
+        return ann, size
+    except Exception:  # noqa: BLE001 — never break a request for telemetry
+        log.debug("PN162: explore arm failed — identity", exc_info=True)
+        return steps, steps
+
+
+def _pn162_exact(request: Any, budget: int | None, key: str) -> int | None:
+    """Raise `budget` to this exact prompt's remembered bound grant.
+
+    `key` is PN100's own tier-cache key — sha256 of the flattened messages —
+    truncated to 32 hex chars; the middleware already computes it, so the hash
+    is free. Nothing populates the ledger's `exact` map today (the PN119 sink
+    carries no prompt hash), so this is inert in practice; the stamp below is
+    what makes wiring it a one-line router change. Separate flag, USER ruling
+    pending — it is a per-item history, which the bench rule forbids for bench
+    traffic.
+    """
+    if _pn162 is None or budget is None:
+        return budget
+    try:
+        if not (_pn162.is_enabled() and _pn162.exact_enabled()):
+            return budget
+        phash = key[:32]
+        _pn162.stamp_xargs(request, prompt_hash=phash)
+        return _pn162.exact_floor(phash, int(budget))
+    except Exception:  # noqa: BLE001
+        log.debug("PN162: exact leg failed — identity", exc_info=True)
+        return budget
 
 
 def _apply_budget(request: Any, budget: int) -> int:
@@ -971,13 +1064,16 @@ async def apply_hook_async(serving: Any, request: Any) -> None:
         _TIER_CACHE.move_to_end(key)
         _STATS["cache_hits"] += 1
         c_tier, c_steps = cached
-        cont = _continuous_budget(c_tier, c_steps)
+        c_ann, c_size = _pn162_arm(request, c_steps)      # PN162, dark no-op
+        cont = _pn162_exact(
+            request,
+            _continuous_budget(c_tier, c_size, _pn162_ptok(request)), key)
         if cont is not None and not (c_tier == 0 and allow_disable):
             applied = _apply_budget(request, cont)
         else:
             applied = _apply_tier(request, c_tier, allow_disable)
-        if applied > 0 and c_steps:
-            _stash_steps(request, c_steps)
+        if applied > 0 and c_ann:
+            _stash_steps(request, c_ann)
         log.info(
             "PN100: tier=%d -> %s (cached)",
             c_tier,
@@ -1039,13 +1135,16 @@ async def apply_hook_async(serving: Any, request: Any) -> None:
     tier = max(0, min(3, tier))
     _STATS["classified"] += 1
     _STATS[f"tier_{tier}"] += 1
-    cont = _continuous_budget(tier, steps)
+    ann_steps, size_steps = _pn162_arm(request, steps)    # PN162, dark no-op
+    cont = _pn162_exact(
+        request, _continuous_budget(tier, size_steps, _pn162_ptok(request)),
+        key)
     if cont is not None and not (tier == 0 and allow_disable):
         applied = _apply_budget(request, cont)
     else:
         applied = _apply_tier(request, tier, allow_disable)
-    if applied > 0 and steps:
-        _stash_steps(request, steps)
+    if applied > 0 and ann_steps:
+        _stash_steps(request, ann_steps)
     # [2026-07-23 T-sched SJF, DARK — PROD lane only] classify already knows
     # the expected length; expose it as vLLM's per-request priority (lower =
     # earlier) so an OPEN-arrival queue schedules short-first. Requires the

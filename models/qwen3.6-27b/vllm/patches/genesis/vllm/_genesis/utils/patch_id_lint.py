@@ -161,6 +161,16 @@ HOUSE_IDS_OUTSIDE_FIXES: dict[str, tuple[str, str]] = {
         "answer_rescue.py",
         "GENESIS_ENABLE_PN155_BUDGET_TRUTH",
     ),
+    # The closed-loop thinking-budget calibrator. Its own middleware module
+    # (auto_budget.py only calls into it), for the same reason as PN155: the
+    # mounted genesis tree IS the deployment artefact, so there is no
+    # `fixes/patch_pn162_*.py` for an applier to rewrite. The learning half is
+    # a HOST script (fixes/pn162_ledger_update.py) and is not a patch at all.
+    "PN162": (
+        "models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/middleware/"
+        "pn162_budget_cal.py",
+        "GENESIS_ENABLE_PN162_BUDGET_CAL",
+    ),
 }
 
 
