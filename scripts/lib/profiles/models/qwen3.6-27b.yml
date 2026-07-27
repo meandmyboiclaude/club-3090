@@ -1,0 +1,313 @@
+schema_version: 1
+id: qwen3.6-27b
+display_name: Qwen 3.6 27B
+family: qwen3-next-hybrid
+hidden_size: 5120
+num_hidden_layers: 64
+num_gdn_layers: 48
+num_attn_layers: 16
+num_attn_heads: 24
+num_kv_heads: 4
+head_dim_attn: 256
+linear_num_v_heads: 48
+linear_num_k_heads: 16
+linear_v_head_dim: 128
+linear_k_head_dim: 128
+linear_conv_kernel_dim: 4
+max_ctx_supported: 262144
+attention_k_eq_v: false
+weights:
+  autoround-int4:
+    path: qwen3.6-27b-autoround-int4
+    local_subdir: qwen3.6-27b-autoround-int4
+    size_gb: 17.5
+    format: autoround
+    status: production
+    hf_repo: Lorbus/Qwen3.6-27B-int4-AutoRound
+    hf_repos:
+      - Lorbus/Qwen3.6-27B-int4-AutoRound
+      - Intel/Qwen3.6-27B-int4-AutoRound
+    engine: vllm
+    kind: main
+    verify_glob: "*.safetensors"
+  awq:
+    path: qwen3.6-27b-awq-int4
+    local_subdir: qwen3.6-27b-awq-int4
+    hf_repo: cyankiwi/Qwen3.6-27B-AWQ-INT4
+    size_gb: 17.0
+    format: awq
+    status: experimental
+    engine: vllm
+    kind: main
+    verify_glob: "*.safetensors"
+  fp8:
+    path: qwen3.6-27b-fp8
+    local_subdir: qwen3.6-27b-fp8
+    size_gb: 29
+    format: fp8
+    status: experimental
+    hf_repo: Qwen/Qwen3.6-27B-FP8
+    engine: vllm
+    kind: main
+    verify_glob: "*.safetensors"
+    manual_note: "Official Qwen3.6-27B FP8 release (e4m3, dynamic act-scale): layer-split safetensors (layers-N.safetensors + outside.safetensors) with an embedded MTP head (mtp.safetensors) and the multimodal vision tower. Drives the 'max accuracy' tier (vllm/qwen-27b-dual-max + vllm/qwen-27b-multi-max). On Ampere sm_86 FP8 weights run via the Marlin W8A16 kernel (memory win, no FP8 compute speedup). Pull recipe wired (hf_repo above): WEIGHTS=fp8 bash scripts/setup.sh qwen3.6-27b (whole-repo fetch + per-file SHA verify). For a stall-resistant manual pull of this 29 GB layer-split repo, hf-download.sh also works."
+  nvfp4:
+    path: qwen3.6-27b-nvfp4
+    local_subdir: qwen3.6-27b-nvfp4
+    size_gb: 22
+    format: modelopt
+    status: experimental
+    hf_repo: nvidia/Qwen3.6-27B-NVFP4
+    engine: vllm
+    kind: main
+    verify_glob: "*.safetensors"
+    manual_note: "Official NVIDIA modelopt (v0.45) MIXED_PRECISION quant of Qwen/Qwen3.6-27B: NVFP4 (4-bit float, group_size 16) on the FFN linears + FP8 static on all self_attn/linear_attn projections + kv_cache_quant_algo=FP8 DECLARED in hf_quant_config (but NO k_scale/v_scale tensors ship — index-verified 2026-07-06; serves fp8 KV at scale=1.0, the #594-tied regime) + the mtp.* head kept UNQUANTIZED (ignore: mtp*). Full VLM (vision tower + preprocessor configs). NVIDIA-supported runtimes: vLLM on Hopper + Blackwell (sm >= 9.0) — NOT runnable on this rig's Ampere sm_86; drives the community-validated vllm/qwen-27b-{single,dual}-nvfp4 slugs (authored blind, gated required_sm=9.0). Serving recipe per the model card: --quantization modelopt. 21.9 GB across 3 safetensors shards."
+  awq-bf16-int4:
+    path: qwen3.6-27b-awq-bf16-int4
+    local_subdir: qwen3.6-27b-awq-bf16-int4
+    size_gb: 27
+    format: compressed-tensors
+    status: experimental
+    hf_repo: cyankiwi/Qwen3.6-27B-AWQ-BF16-INT4
+    engine: vllm
+    kind: main
+    verify_glob: "*.safetensors"
+    manual_note: "cyankiwi AWQ-BF16-INT4 (compressed-tensors pack-quantized, int4 group-32 asym body + BF16 mtp head + multimodal vision; embedded MTP head loads via method:mtp). Drives the 'balanced' tier (vllm/qwen-27b-dual-balanced): int4 weights (Marlin WNA16, fast-class speed) + int8-PTH KV. Loads on stock vLLM v0.22.0 via --quantization compressed-tensors."
+  dflash:
+    path: qwen3.6-27b-dflash
+    local_subdir: qwen3.6-27b-dflash
+    size_gb: 1.75
+    format: fp16
+    status: experimental
+    hf_repo: z-lab/Qwen3.6-27B-DFlash
+    engine: vllm
+    kind: draft
+    verify_glob: "*.safetensors"
+    setup_env: WITH_DFLASH_DRAFT=1
+  prism_eagle3:
+    path: qwen3.6-27b-prism-eagle3
+    local_subdir: qwen3.6-27b-prism-eagle3
+    size_gb: variable
+    format: safetensors
+    status: experimental
+    hf_repo: Ex0bit/Qwen3.6-27B-PRISM-EAGLE3
+    engine: sglang
+    kind: draft
+    verify_glob: "*.safetensors"
+    setup_env: WITH_PRISM_EAGLE3=1
+  mtp_head:
+    path: qwen3.6-27b-mtp-head
+    local_subdir: qwen3.6-27b-mtp-head
+    size_gb: variable
+    format: safetensors
+    status: historical
+    engine: vllm
+    kind: draft
+    verify_glob: "*.safetensors"
+    manual_note: "No direct download recipe is documented for qwen3.6-27b-mtp-head in this repo."
+  gguf:
+    path: qwen3.6-27b-gguf
+    local_subdir: qwen3.6-27b-gguf
+    size_gb: variable
+    format: gguf
+    status: production
+    engine: llama-cpp
+    kind: gguf
+    verify_glob: "*.gguf"
+  unsloth-q4km:
+    path: qwen3.6-27b-gguf/unsloth-mtp-q4km
+    local_subdir: qwen3.6-27b-gguf/unsloth-mtp-q4km
+    size_gb: variable
+    format: gguf
+    status: production
+    hf_repo: unsloth/Qwen3.6-27B-MTP-GGUF
+    files:
+      - Qwen3.6-27B-Q4_K_M.gguf
+    engine: llama-cpp
+    kind: gguf
+    verify_glob: "*.gguf"
+    setup_weights_key: gguf
+  gguf_mmproj_f16:
+    path: qwen3.6-27b-gguf
+    local_subdir: qwen3.6-27b-gguf
+    size_gb: variable
+    format: gguf
+    status: production
+    hf_repo: unsloth/Qwen3.6-27B-GGUF
+    files:
+      - mmproj-F16.gguf
+    engine: llama-cpp
+    kind: mmproj
+    verify_glob: "*.gguf"
+    setup_weights_key: gguf
+  ubergarm-iq4ks:
+    path: qwen3.6-27b-gguf/ubergarm-mtp-iq4ks
+    local_subdir: qwen3.6-27b-gguf/ubergarm-mtp-iq4ks
+    size_gb: variable
+    format: gguf
+    status: production
+    hf_repo: ubergarm/Qwen3.6-27B-GGUF
+    files:
+      - Qwen3.6-27B-MTP-IQ4_KS.gguf
+    engine: ik-llama
+    kind: gguf
+    verify_glob: "*.gguf"
+    setup_weights_key: iq4ks
+  beellama-q5ks-dflash:
+    path: qwen3.6-27b-gguf/unsloth-q5ks
+    local_subdir: qwen3.6-27b-gguf/unsloth-q5ks
+    size_gb: 17.7
+    format: gguf
+    status: experimental
+    hf_repo: unsloth/Qwen3.6-27B-GGUF
+    files:
+      - Qwen3.6-27B-Q5_K_S.gguf
+    engine: beellama
+    kind: gguf
+    verify_glob: "*.gguf"
+  beellama-q8kxl-mtp:
+    path: qwen3.6-27b-gguf/unsloth-mtp-q8kxl
+    local_subdir: qwen3.6-27b-gguf/unsloth-mtp-q8kxl
+    size_gb: 35.8
+    format: gguf
+    status: experimental
+    hf_repo: unsloth/Qwen3.6-27B-MTP-GGUF
+    files:
+      - Qwen3.6-27B-UD-Q8_K_XL.gguf
+    engine: beellama
+    kind: gguf
+    verify_glob: "*.gguf"
+  qwopus-coder-mtp-q5km:
+    path: qwopus3.6-27b-coder-gguf/jackrong-mtp-q5km
+    local_subdir: qwopus3.6-27b-coder-gguf/jackrong-mtp-q5km
+    size_gb: 18.2
+    format: gguf
+    status: experimental
+    hf_repo: Jackrong/Qwopus3.6-27B-Coder-MTP-GGUF
+    files:
+      - Qwopus3.6-27B-Coder-MTP-Q5_K_M.gguf
+    engine: beellama
+    kind: gguf
+    verify_glob: "*.gguf"
+    manual_note: "Jackrong coder fine-tune of Qwen3.6-27B — Q5_K_M GGUF with EMBEDDED MTP head (beellama --spec-type draft-mtp; no separate draft download). Drives beellama/qwopus-coder (single 3090, kvarn4 KV @ 160K + MTP; 230K no-MTP opt-in). disc #329."
+  carnice-v2-q5km:
+    path: carnice-v2-27b-gguf/stuchapin-q5km
+    local_subdir: carnice-v2-27b-gguf/stuchapin-q5km
+    size_gb: 18.7
+    format: gguf
+    status: experimental
+    hf_repo: stuchapin/Carnice-V2-27B-MTP-GGUF
+    files:
+      - Carnice-V2-27B-Q5_K_M-mtp.gguf
+    engine: beellama
+    kind: gguf
+    verify_glob: "*.gguf"
+    manual_note: "stuchapin Carnice-V2-27B (kai-os/Carnice-V2-27b — Hermes-style agentic SFT of Qwen3.6-27B) — Q5_K_M GGUF with EMBEDDED MTP head (beellama --spec-type draft-mtp; no separate draft download). mtp_num_hidden_layers=1 → DRAFT_N_MAX=1 (author: n=3 'wrong by a wide margin'). Drives beellama/carnice-v2-single-q5km-mtp (single 3090, kvarn4 KV @ 160K + MTP; 176K ceiling). 8-pack reasoning-on 110/150 (beats qwopus-coder 103). 2026-06-14."
+  carnice-v2-q8:
+    path: carnice-v2-27b-gguf/stuchapin-q8
+    local_subdir: carnice-v2-27b-gguf/stuchapin-q8
+    size_gb: 29.4
+    format: gguf
+    status: experimental
+    hf_repo: stuchapin/Carnice-V2-27B-MTP-GGUF
+    files:
+      - Carnice-V2-27B-Q8_0-mtp.gguf
+    engine: beellama
+    kind: gguf
+    verify_glob: "*.gguf"
+    manual_note: "Carnice-V2-27B Q8_0 GGUF (embedded MTP head) — the higher-quant DUAL-card variant (#403). Drives beellama/carnice-v2-dual-q8-mtp (embedded MTP, q8_0/q8_0 KV, full 262K). KV A/B chose q8_0 over the originally-spec'd kvarn6 (q8_0 +17% prefill, higher fidelity, reference path, fits 262K on dual — kvarn's compression only pays off on a tight single card). DFlash A/B ruled out (base-27B drafter ~10% accept on the fine-tune; no Carnice-matched drafter exists) → MTP-only. 2026-06-15."
+  pi-reasoning-q4km:
+    path: qwen3.6-27b-mtp-pi-reasoning-gguf/q4km
+    local_subdir: qwen3.6-27b-mtp-pi-reasoning-gguf/q4km
+    size_gb: 15.7
+    format: gguf
+    status: experimental
+    hf_repo: bytkim/Qwen3.6-27B-MTP-pi-reasoning-GGUF
+    files:
+      - Qwen3.6-27B-MTP-pi-reasoning-Q4_K_M.gguf
+    engine: beellama
+    kind: gguf
+    verify_glob: "*.gguf"
+    manual_note: "bytkim 'Pi-style' reasoning-supervised CODING/terminal-agent fine-tune of Qwen3.6-27B — Q4_K_M GGUF (~15.7 GiB) with EMBEDDED MTP head (--spec-type draft-mtp; no separate draft download). Drives llamacpp/qwen27b-pi-reasoning-single (MAINLINE llama.cpp b9246, single 3090, q4_0/q4_0 KV @ 200K-alloc/~188K usable + MTP n=2, reasoning-ON). CONFIG PER MODEL CARD: temp 1.0/top-p 0.95/top-k 0/min-p 0 (not the stack 0.6/20), card recommends n=3 (we kept on-rig-faster n=2, within noise). Context measured 2026-06-17: 200K-alloc fills ~188K with needle recall (~1.8GB free, ~23 t/s @188K); 262K-alloc OOMs ~176K (don't); author tested only 128K so >128K is engine-proven but card-unvalidated. FULL rebench-full validated 2026-06-18 (--with-8pack-thinking=both): bench @370W narrative 47.4/47.9, code 54.2/55.3 wall/decode, PP 1030 (n=5); @230W cap 28.5/32.9 (mainline -42% 370->230W). verify-stress 8/8 (NIAH→183K). 8-pack 104/150 think-off / 106/150 think-on. soak PASS (0 growth, 0/100 silent, p50 54.5, 102% retention). MTP head NOT weaker than base: matched-power A/B dead-even (73% vs 72% accept); 47.9/55.3 @370W ~on par with base 50.3/58.9. Verbose even thinking-off → generous max_tokens. 2026-06-18."
+  beellama-q8kxl-dflash:
+    path: qwen3.6-27b-gguf/unsloth-mtp-q8kxl
+    local_subdir: qwen3.6-27b-gguf/unsloth-mtp-q8kxl
+    size_gb: 35.8
+    format: gguf
+    status: experimental
+    hf_repo: unsloth/Qwen3.6-27B-MTP-GGUF
+    files:
+      - Qwen3.6-27B-UD-Q8_K_XL.gguf
+    engine: beellama
+    kind: gguf
+    verify_glob: "*.gguf"
+  anbeeld-dflash-iq4xs:
+    path: qwen3.6-27b-gguf/anbeeld-dflash-iq4xs
+    local_subdir: qwen3.6-27b-gguf/anbeeld-dflash-iq4xs
+    size_gb: 0.93
+    format: gguf
+    status: experimental
+    hf_repo: Anbeeld/Qwen3.6-27B-DFlash-GGUF
+    files:
+      - Qwen3.6-27B-DFlash-IQ4_XS.gguf
+    engine: beellama
+    kind: draft
+    verify_glob: "*.gguf"
+  ex0bit-prism-pro-dq:
+    path: qwen3.6-27b-gguf/ex0bit-prism-pro-dq
+    local_subdir: qwen3.6-27b-gguf/ex0bit-prism-pro-dq
+    size_gb: variable
+    format: gguf
+    # custom-named mixed-quant pack — quant_label read from the GGUF header
+    # (general.file_type=12 → Q3_K_M, verified 2026-07-06); catalog Weights column.
+    quant_label: q3km
+    status: community-experimental
+    hf_repo: Ex0bit/Qwen3.6-27B-PRISM-PRO-DQ
+    files:
+      - Qwen3.6-27B-PRISM-PRO-DQ.gguf
+    engine: ik-llama
+    kind: gguf
+    verify_glob: "*.gguf"
+  carnice-bf16mtp:
+    path: carnice-v2-27b-int4-recipe-d-bf16mtp
+    local_subdir: carnice-v2-27b-int4-recipe-d-bf16mtp
+    size_gb: 17.5
+    format: autoround
+    status: experimental
+    hf_repo: wasifb/Carnice_V2_27B_INT4_BF16MTP
+    hf_repos:
+      - wasifb/Carnice_V2_27B_INT4_BF16MTP
+    engine: vllm
+    kind: main
+    verify_glob: "*.safetensors"
+  qwopus-bf16mtp:
+    path: qwopus3.6-27b-int4-recipe-d-bf16mtp
+    local_subdir: qwopus3.6-27b-int4-recipe-d-bf16mtp
+    size_gb: 17.5
+    format: autoround
+    status: experimental
+    hf_repos:
+      - Jackrong/Qwopus3.6-27B-v1-preview
+    engine: vllm
+    kind: main
+    verify_glob: "*.safetensors"
+    manual_note: "This compose expects a local Recipe-D INT4+BF16MTP artifact. The repo only documents the BF16 source Jackrong/Qwopus3.6-27B-v1-preview, not a directly downloadable packed artifact."
+default_weight_variant: autoround-int4
+compatible_drafters:
+  - qwen-mtp-builtin
+  - zlab-qwen-dflash
+  - unsloth-mtp-gguf
+  - anbeeld-qwen-dflash
+valid_tp:
+  - 1
+  - 2
+  - 4
+# Strictly bootable on any vLLM nightly that supports the qwen3-next-hybrid
+# family. Genesis is REQUIRED for TQ3 KV (turboquant_3bit_nc — Genesis-only
+# feature). For non-TQ3 KV formats (fp8, bf16, q4_0, k8v4) Genesis is
+# recommended but not strictly needed: it adds Cliff 2 mitigations
+# (PN12/PN25/PN34) for long-context stability past ~21-26K. Composes encode
+# the engine choice via their `Engine-profile:` header — non-TQ3 composes
+# route to vllm-nightly-clean, TQ3 composes route to vllm-nightly-mtp.
+requires_genesis: false
+

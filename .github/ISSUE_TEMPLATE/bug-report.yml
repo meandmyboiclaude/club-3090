@@ -1,0 +1,96 @@
+name: Bug report
+description: Something isn't working — server crashes, OOM, wrong output, weird TPS regression, etc.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Before filing — try the 5-step triage ladder first
+
+        If you're hitting a boot OOM, weird MTP behavior, or TQ3 / long-context
+        budget issue, the [troubleshooting ladder in the FAQ](https://github.com/noonghunna/club-3090/blob/master/docs/FAQ.md#before-symptom-matching--boot-the-simplest-stack-first)
+        will tell you which layer of the stack is failing — usually in 5-15
+        minutes. Each step adds one variable on top of the previous (`vllm/minimal`
+        → `tools-text` → `long-text` → `dual` → `dual-turbo`). If step N works
+        and step N+1 fails, you've narrowed the bug to the new variable.
+
+        A lot of "should I file a bug" questions resolve at step 1 or 2 (often
+        re-running `bash scripts/setup.sh` after a `git pull` is the fix). Worth
+        15 min before opening an issue.
+
+        ## If you've run the ladder and still hit a real bug — paste a rig report
+
+        Pick the variant that matches your bug:
+
+        | Bug type | Command | Time |
+        |---|---|---|
+        | Boot crash, wrong output, tool-call regression | `bash scripts/report.sh --verify > my-rig.md` | ~2 min |
+        | OOM mid-conversation, hermes/openhands/IDE-agent failures, multi-turn cliff | `bash scripts/report.sh --soak > my-rig.md` | ~25 min — runs `SOAK_MODE=continuous` which is the **only** test that catches Cliff 2b |
+        | TPS regression / cross-rig perf comparison | `bash scripts/report.sh --bench > my-rig.md` | ~5 min |
+        | AI Studio — image / video / audio generation fails ("ComfyUI generation error", lane error) | `bash scripts/report.sh --studio > my-rig.md` | ~5 sec — adds the ComfyUI + director container log tails (the actual generation error) |
+        | Not sure / want to capture everything | `bash scripts/report.sh --full > my-rig.md` | ~35 min — verify + stress + soak + bench |
+
+        Whichever you pick, that single command captures hardware, GPU details
+        (incl. power caps), container state, Genesis patch status, KV pool sizing,
+        and the engine config — everything we'd otherwise have to ask for
+        individually.
+
+        Paths under your home, hostname, username, and any HF tokens are redacted
+        by default before output. Use `--no-redact` only for internal sharing.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: One-paragraph summary. What did you expect, what did you see instead?
+      placeholder: |
+        I started `dual-turbo.yml` and it OOMs after ~30 seconds of prefill on a 32K
+        message. Expected: stable serving like the README says. Actual: the
+        attached log line.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Exact commands. The `compose up` line, the curl/openai-client request, etc.
+      placeholder: |
+        cd models/qwen3.6-27b/vllm/compose
+        docker compose -f dual/autoround-int4/turbo.yml up -d
+        # then this curl request:
+        curl -s http://localhost:8020/v1/chat/completions -d '...'
+      render: bash
+    validations:
+      required: true
+
+  - type: textarea
+    id: rig-report
+    attributes:
+      label: Rig report — paste contents of `bash scripts/report.sh [--verify | --soak | --bench | --studio | --full]`
+      description: |
+        Pick the flag that matches your bug type (see table above). Run from the
+        repo root, then paste the contents here.
+
+        If you can't run the script (no shell access on the rig, etc.), note that
+        in "Anything else?" below and share whatever you have.
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: extras
+    attributes:
+      label: Anything else?
+      description: |
+        Custom env overrides (`.env`), non-default `MEM_UTIL`, distro oddities,
+        cross-references to related issues — anything beyond what `report.sh`
+        captures.
+
+        **If you couldn't run `scripts/report.sh`,** share what you can:
+
+        - `docker logs --tail 100 <container>`
+        - `nvidia-smi`
+        - GPU configuration (1× / 2× cards, NVLink yes/no, power cap)
+        - Compose variant + club-3090 commit (`git rev-parse --short HEAD`)

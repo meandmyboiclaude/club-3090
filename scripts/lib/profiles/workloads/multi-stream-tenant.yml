@@ -1,0 +1,14 @@
+schema_version: 1
+id: multi-stream-tenant
+display_name: Multi-tenant agent fleet
+description: Two to four concurrent agents, balanced context and throughput.
+priorities:
+  max_ctx: medium
+  concurrency: high
+  prefill_throughput: high
+  decode_throughput: high
+defaults:
+  max_num_seqs: 4
+  mtp_default: true
+requires_features: []
+

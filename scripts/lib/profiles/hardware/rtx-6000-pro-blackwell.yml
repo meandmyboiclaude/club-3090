@@ -1,0 +1,35 @@
+schema_version: 1
+id: rtx-6000-pro-blackwell
+display_name: NVIDIA RTX PRO 6000 Blackwell
+sm: 12.0
+vram_gb: 96
+arch: blackwell-workstation
+mem_util_safe: 0.96
+# NOTE: nvfp4 KV is DELIBERATELY NOT listed — it needs the trtllm-gen FP4 FMHA
+# kernel, built only for datacenter Blackwell (sm_100/103). This is CONSUMER
+# Blackwell (sm_120): FP4 weights work, but nvfp4 KV has no FMHA build and
+# crashes (vLLM #43562 / TRT-LLM #10241). fp8_e4m3 is the FP4-era KV here.
+supported_kv_formats:
+  - bf16
+  - fp16
+  - fp8_e5m2
+  - fp8_e4m3
+  - turboquant_3bit_nc
+  - int8_per_token_head
+  - q4_0
+  - q5_0
+  - q8_0
+  - k8v4
+kv_format_default:
+  long_context: fp8_e4m3
+  multi_stream: fp8_e4m3
+  balanced: fp8_e4m3
+cudagraph: full
+driver_pin_recommended:
+  min: "580.0"
+  notes: "CUDA 13 vLLM nightlies require a 580.x-class NVIDIA driver."
+nvlink_capable: true
+power_cap_w_optimal: 400
+power_cap_w_max: 600
+notes: "Bridge-capable workstation SKU; LocalMaxxing survey shows SGLang-heavy production use."
+

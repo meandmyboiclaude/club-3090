@@ -1,0 +1,35 @@
+schema_version: 1
+id: vllm-stable-next
+display_name: vLLM next-release candidate
+type: vllm
+stability: stable
+install:
+  method: pip
+  spec: "vllm>=0.21.0rc0,<0.21.0"
+min_sm: 7.5
+supported_model_families:
+  - dense
+  - qwen3-next-hybrid
+features:
+  int8_per_token_head: false
+  turboquant_3bit_nc: false
+  marlin_pad_sub_tile_n: false
+  qwen3_coder_tool_parser: stable_only
+supported_kv_formats:
+  - bf16
+  - fp16
+  - fp8_e5m2
+  - fp8_e4m3
+supported_drafters:
+  - eagle3
+supported_weight_formats:
+  - bf16
+  - fp16
+  - autoround
+  - awq
+  - gptq
+required_overlays: []
+vendored_overlays: []
+required_genesis: false
+notes: "RC-track placeholder for the next vLLM release; adjust the spec when an RC is published."
+

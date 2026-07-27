@@ -1,0 +1,187 @@
+schema_version: 1
+id: qwen3.6-35b-a3b
+display_name: Qwen 3.6 35B-A3B (MoE)
+family: qwen3-next-moe
+hidden_size: 2048
+num_hidden_layers: 40
+# Hybrid: 10 full_attention layers at indices 3,7,11,15,19,23,27,31,35,39
+# (one per 4-layer block, matching full_attention_interval=4 in config.json)
+num_gdn_layers: 30
+num_attn_layers: 10
+num_attn_heads: 16
+num_kv_heads: 2
+head_dim_attn: 256
+linear_num_v_heads: 32
+linear_num_k_heads: 16
+linear_v_head_dim: 128
+linear_k_head_dim: 128
+linear_conv_kernel_dim: 4
+max_ctx_supported: 262144
+attention_k_eq_v: false
+# MoE (from config.json text_config)
+num_experts: 256
+num_experts_per_tok: 8
+moe_intermediate_size: 512
+shared_expert_intermediate_size: 512
+active_params_b: 3.0
+# Built-in MTP drafter (1 dedicated MTP head)
+mtp_num_hidden_layers: 1
+attn_output_gate: true
+vision_capable: true
+weights:
+  autoround-int4:
+    path: qwen3.6-35b-a3b-autoround-int4
+    local_subdir: qwen3.6-35b-a3b-autoround-int4
+    size_gb: 20.0
+    format: autoround
+    status: production
+    # Repo provenance (#316, 2026-06-05): originally downloaded + benched 2026-04-20 as
+    # Intel/Qwen3.6-35B-A3B-int4-AutoRound (commit 3d5a2ed, 170.5 TPS TP=2). Intel renamed
+    # it -> -int4-mixed-AutoRound and re-quantized on 2026-05-01 (old name 404s now; current
+    # main HEAD 65f69c7 ships different bytes). The value previously here
+    # (Qwen/Qwen3-MoE-A3B-Instruct-AutoRound-Int4-mixed) never existed on HF — that was the bug.
+    # Re-validation of HEAD 65f69c7 tracked in BENCHMARKS.md "Qwen 3.6 35B-A3B" row.
+    hf_repo: Intel/Qwen3.6-35B-A3B-int4-mixed-AutoRound
+    hf_repos:
+      - Intel/Qwen3.6-35B-A3B-int4-mixed-AutoRound
+    engine: vllm
+    kind: main
+    verify_glob: "*.safetensors"
+  nvfp4:
+    path: qwen3.6-35b-a3b-nvfp4
+    local_subdir: qwen3.6-35b-a3b-nvfp4
+    size_gb: 24
+    format: modelopt
+    status: experimental
+    hf_repo: nvidia/Qwen3.6-35B-A3B-NVFP4
+    engine: vllm
+    kind: main
+    verify_glob: "*.safetensors"
+    manual_note: "Official NVIDIA modelopt MIXED_PRECISION quant of Qwen/Qwen3.6-35B-A3B (MoE): NVFP4 gs16 on the expert FFNs (161 targets) + FP8 static on self_attn/linear_attn projections (130 targets) + mtp.* kept UNQUANTIZED. KV: SAME as the 27B NVFP4 — hf_quant_config declares kv_cache_quant_algo=FP8 but NO k_scale/v_scale tensors ship (index-verified 2026-07-06; config.json kv_cache_scheme is null); fp8 KV runs at scale=1.0 on Qwen3-Next hybrid (calculate_kv_scales disabled), the same regime our production 27B fp8 tier quality-tied at (#594). Hopper/Blackwell only (sm >= 9.0) — NOT runnable on this rig's Ampere; drives the community-validated vllm/qwen-35b-a3b-{single,dual}-nvfp4 slugs. 23.4 GB / 3 shards."
+  nvfp4-fast:
+    path: qwen3.6-35b-a3b-nvfp4-fast
+    local_subdir: qwen3.6-35b-a3b-nvfp4-fast
+    size_gb: 24
+    format: compressed-tensors
+    status: experimental
+    hf_repo: unsloth/Qwen3.6-35B-A3B-NVFP4-Fast
+    engine: vllm
+    kind: main
+    verify_glob: "*.safetensors"
+    manual_note: "unsloth compressed-tensors MIXED quant of Qwen/Qwen3.6-35B-A3B (MoE): true W4A4 NVFP4 gs16 on the expert FFNs + FP8-dynamic W8A8 on attention/linear_attn/lm_head + mtp.* kept UNQUANTIZED bf16 (19 tensors — unlike llm-compressor's usual drop) + vision tower unquantized. KV: UNLIKE the nvidia export, ships kv_cache_scheme AND 32 real k_scale/v_scale tensors — load-on-Qwen-hybrid UNVERIFIED (runtime calc force-disabled on this family); treat as scale=1.0 until proven. Quant AUTO-DETECTS (do NOT pass --quantization modelopt). VALIDATED ON AMPERE 2026-07-11 (first MoE-FP4 fallback boot: MARLIN NvFp4 MoE backend): decode 179.5/179.4 + 8-pack 103/150 = double statistical tie with the AutoRound tier at full 262K, 22.46 GB/card — see BENCHMARKS. Native FP4 (sm_90+) UNVALIDATED; W4A4 activations there are the quality unknown (family is activation-quant-sensitive). chat_template.jinja byte-identical to the AutoRound checkpoint's. 23.6 GB / 5 shards."
+  gptq_int4:
+    path: qwen3.6-35b-a3b-gptq-int4
+    local_subdir: qwen3.6-35b-a3b-gptq-int4
+    hf_repo: palmfuture/Qwen3.6-35B-A3B-GPTQ-Int4
+    size_gb: 22.0
+    format: gptq
+    status: experimental
+    engine: vllm
+    kind: main
+    verify_glob: "*.safetensors"
+  gguf:
+    path: qwen3.6-35b-a3b-gguf
+    local_subdir: qwen3.6-35b-a3b-gguf
+    size_gb: 90.0
+    format: gguf
+    status: production
+    engine: llama-cpp
+    kind: gguf
+    verify_glob: "*.gguf"
+  dflash:
+    path: qwen3.6-35b-a3b-dflash
+    local_subdir: qwen3.6-35b-a3b-dflash
+    hf_repo: z-lab/Qwen3.6-35B-A3B-DFlash
+    size_gb: variable
+    format: autoround
+    status: experimental
+    engine: vllm
+    kind: draft
+    verify_glob: "*.safetensors"
+  dflash_gguf:
+    path: qwen3.6-35b-a3b-dflash-gguf
+    local_subdir: qwen3.6-35b-a3b-dflash-gguf
+    hf_repo: abhinand/Qwen3.6-35B-A3B-DFlash-GGUF
+    size_gb: variable
+    format: gguf
+    status: experimental
+    engine: llama-cpp
+    kind: gguf
+    verify_glob: "*.gguf"
+  mudler-apex-compact:
+    path: qwen3.6-35b-a3b-gguf/mudler-apex-mtp
+    local_subdir: qwen3.6-35b-a3b-gguf/mudler-apex-mtp
+    size_gb: variable
+    format: gguf
+    # custom-named mixed-quant pack — quant_label read from the GGUF header
+    # (general.file_type=15 → Q4_K_M, verified 2026-07-06); catalog Weights column.
+    quant_label: q4km
+    status: community-experimental
+    hf_repo: mudler/Qwen3.6-35B-A3B-APEX-MTP-GGUF
+    files:
+      - Qwen3.6-35B-A3B-APEX-MTP-I-Compact.gguf
+    engine: ik-llama
+    kind: gguf
+    verify_glob: "*.gguf"
+  byteshape-iq4xs:
+    path: qwen3.6-35b-a3b-gguf/byteshape-iq4xs
+    local_subdir: qwen3.6-35b-a3b-gguf/byteshape-iq4xs
+    size_gb: 18.6
+    format: gguf
+    status: community-experimental
+    hf_repo: byteshape/Qwen3.6-35B-A3B-MTP-GGUF
+    files:
+      - Qwen3.6-35B-A3B-IQ4_XS-4.19bpw.gguf
+    engine: ik-llama
+    kind: gguf
+    verify_glob: "*.gguf"
+  mudler-apex-quality:
+    path: qwen3.6-35b-a3b-gguf/mudler-apex-mtp
+    local_subdir: qwen3.6-35b-a3b-gguf/mudler-apex-mtp
+    size_gb: variable
+    format: gguf
+    # quant_label from the GGUF header via HTTP Range read of the HF artifact
+    # (general.file_type=18 → Q6_K, verified 2026-07-06); catalog Weights column.
+    quant_label: q6k
+    status: community-experimental
+    hf_repo: mudler/Qwen3.6-35B-A3B-APEX-MTP-GGUF
+    files:
+      - Qwen3.6-35B-A3B-APEX-MTP-I-Quality.gguf
+    engine: ik-llama
+    kind: gguf
+    verify_glob: "*.gguf"
+  morikomorizz-q6kp:
+    # Uncensored "HauhauCS-Aggressive" fine-tune of Qwen3.6-35B-A3B, Q6_K_P GGUF
+    # WITH embedded nextn MTP head (loads on mainline llama.cpp b9570). Dual-card.
+    path: qwen3.6-35b-a3b-uncensored-mtp-gguf/morikomorizz-q6kp
+    local_subdir: qwen3.6-35b-a3b-uncensored-mtp-gguf/morikomorizz-q6kp
+    size_gb: 30.0
+    format: gguf
+    status: community-experimental
+    hf_repo: morikomorizz/Qwen3.6-35B-A3B-Uncensored-HauhauCS-MTP
+    # Pin the exact commit our BENCHMARKS row + #411 were measured against (#319).
+    # Repo last-modified 2026-06-10 (predates our 2026-06-14 download); etag at this
+    # sha == our local file's sha256 (verified). Guards a silent upstream re-quant.
+    revision: 49a080db7406cd98f94f0f2a18539bbcc1520444
+    files:
+      - Qwen3.6-35B-A3B-Uncensored-HauhauCS-MTP-Q6_K_P.gguf
+    engine: llama-cpp
+    kind: gguf
+    verify_glob: "*.gguf"
+default_weight_variant: autoround-int4
+compatible_drafters:
+  - qwen-mtp-builtin
+# num_kv_heads=2 caps TP at 2 (each rank needs at least 1 KV head)
+valid_tp:
+  - 1
+  - 2
+# Strictly bootable on upstream vLLM (PR #42521 onwards). Genesis is
+# RECOMMENDED for production: it provides TQ3 KV (Genesis-only) plus the
+# Cliff 2 / DeltaNet stabilization patches that matter past ~21-26K ctx.
+# Preview/smoke composes target vllm-nightly-clean (no Genesis); production
+# composes (TBD — gated on Genesis v7.73.x re-anchor) target vllm-nightly-mtp.
+requires_genesis: false
+# kv-calc.py models the MoE + DeltaNet+attention hybrid as of v0.7.3.
+# Calibration is low-anchor (preview + preview-MTP rows only); add longer
+# context / max_num_seqs rows before treating projections as production-grade.
+kv_calc_supported: true

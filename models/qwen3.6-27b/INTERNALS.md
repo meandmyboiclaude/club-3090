@@ -1,0 +1,279 @@
+# Qwen3.6-27B — Internals
+
+Deep technical companion to this model's [README](README.md). Read this when you want to understand:
+
+- Why a 27 B-parameter model with vision works on a single 24 GB consumer card at all
+- What "Genesis patches" do under the hood and which patch fixes which bug
+- Why TP=2 (dual-card) doesn't double single-stream TPS
+- The Marlin pad-sub-tile-n patch we filed upstream
+- DFlash N=5 vs MTP — when each wins
+- The 9-probe forensics trail that isolated the upstream bugs we worked around
+- Current upstream-fix status
+
+If you just want to use the stack, the model README is enough.
+
+For engine-general docs (vLLM tuning, llama.cpp tradeoffs, SGLang status), see [`/docs/engines/`](../../docs/engines/).
+
+> **Note (2026-05-18):** This file describes the forensic chain that led to the v7.62.x stack. For the **current** state — **Cliff 2 REGRESSED on v7.72.2** (PN59 streaming-GDN doesn't engage on chunked-prefill, see [`docs/CLIFFS.md`](../../docs/CLIFFS.md)), **Cliff 1 closed** on TQ3 paths via PN12 Genesis-native v0.20+ integration. See [`docs/CLIFFS.md`](../../docs/CLIFFS.md) for the full up-to-date cliff status and [CHANGELOG.md](CHANGELOG.md) for the latest config state. The PN8 status table below is historical (still accurate for the FP8 path).
+
+---
+
+## Single-card: why this works where other recipes don't
+
+Three hurdles had to be cleared for this config to run on a single consumer 24 GB card:
+
+### 1. The published int4-AutoRound quant preserves `mtp.fc` at full precision
+
+A vanilla `auto-round` run on Qwen3.6-27B packs the MTP fusion layer (`mtp.fc`) as INT4. In that form, vLLM's `Qwen3_5MTP` loader silently skips loading it (param name mismatch: expects `fc.weight`, finds `fc.qweight`). Result: MTP "loads" with zero parameters and produces **0% draft acceptance**.
+
+Both [`Lorbus/Qwen3.6-27B-int4-AutoRound`](https://huggingface.co/Lorbus/Qwen3.6-27B-int4-AutoRound) and [`Intel/Qwen3.6-27B-int4-AutoRound`](https://huggingface.co/Intel/Qwen3.6-27B-int4-AutoRound) work around this — they ship `mtp.fc.weight` as a plain unquantized BF16 tensor. We use Lorbus because it's what we tested end-to-end.
+
+Quick check that whichever quant you use has the fix: look for `mtp.fc.weight` (not `mtp.fc.qweight`) in the safetensors index.
+
+### 2. Genesis patches bypass the TurboQuant hybrid gate
+
+`Qwen3.6-27B` is a Qwen3-Next hybrid model: interleaved DeltaNet (Gated Linear Attention) + standard attention layers. vLLM's TurboQuant KV cache refuses to initialize on hybrid models:
+
+```
+NotImplementedError: TurboQuant KV cache is not supported for hybrid
+(attention + Mamba) models. Boundary layer protection requires uniform
+attention layers.
+```
+
+[Sandermage's Genesis patches](https://github.com/Sandermage/genesis-vllm-patches) are a 20+-patch runtime monkey-patcher that, among other things, rewrites the hybrid gate to compute boundary protection only over attention layers. Works on Ampere SM 80–86.
+
+### 3. Our `patch_tolist_cudagraph.py` fixes CUDA graph capture
+
+Even with the hybrid gate bypassed, vLLM still crashed during engine warmup:
+
+```
+turboquant_attn.py:570  qsl = query_start_loc.tolist()
+RuntimeError: Cannot copy between CPU and CUDA tensors during CUDA graph
+capture unless the CPU tensor is pinned.
+```
+
+The continuation-prefill branch of `_prefill_attention` forces a GPU→CPU sync via `.tolist()`, which is illegal during CUDA graph capture. Our patch (`vllm/patches/patch_tolist_cudagraph.py`) is a disk-edit that wraps both `.tolist()` sites with `torch.cuda.is_current_stream_capturing()` guards — fall back to graph-safe fast path during capture, run the original at inference.
+
+Without this patch, the documented workaround is `--compilation-config.cudagraph_mode=none`, which costs **−55% short-prompt TPS** and makes the whole setup net-negative vs plain fp8 KV.
+
+---
+
+## Genesis v7.14 — the surgical fix for the silent tool-call cascade
+
+[Sandermage's Genesis v7.14](https://github.com/Sandermage/genesis-vllm-patches) shipped 2026-04-25 with the **P65** patch root-causing [vllm#40880](https://github.com/vllm-project/vllm/issues/40880):
+
+`TurboQuantAttentionImpl._prefill_attention`'s cudagraph-capture bypass treats spec-decode K+1 verify batches as first-chunk prefill (sets `cu_seqlens_k = cu_seqlens_q`), so the captured kernel ignores cached KV. Drafter and verifier both produce noise from the kernel-without-context path; for tool-call prompts they converge on the same high-bias special token (`<tool_call>`) and cascade.
+
+P65 downgrades `_cudagraph_support` from `UNIFORM_BATCH` to `UNIFORM_SINGLE_TOKEN_DECODE`. vLLM's compilation auto-detects and forces `cudagraph_mode=PIECEWISE` for spec-decode → eager continuation runs the correct branch. 1-token decode batches still get piecewise capture; only K+1 spec-verify batches go eager.
+
+This is a workaround. The proper fix is a custom multi-query Triton kernel (P67/P67b) that handles K+1 query against compressed cached KV. Genesis later shipped and generalized that path; direct upstream vLLM still does not have an equivalent that passes our Qwen3.6-27B TQ+MTP verify-stress matrix.
+
+---
+
+## Single-card: forensics trail — the 9-probe bug isolation
+
+**TurboQuant KV is frontier-level.** It landed in vLLM mainline only weeks before this repo's predecessor was published and is still under active development.
+
+Initial symptom: under the originally-shipped 125K config (TurboQuant KV + MTP spec-decode + cudagraph on), the model produces degenerate token loops on tool calls, long-context recall, and occasionally streaming. We isolated the bug through nine probes:
+
+| # | turboquant | spec-dec | cudagraph | torch.compile | result | TPS |
+|---|---|---|---|---|---|---|
+| 1 | ✅ | off | ✅ | ✅ | ✅ all tests pass | 40 |
+| 2 | ✅ | ngram n=3 | ✅ | ✅ | ✗ same loops as MTP | -- |
+| 3 (MiMo dense) | ✅ | MTP n=1 | ✅ | ✅ | ✗ first-token collapse | -- |
+| 4 | ✅ | MTP n=3 | ✅ | + `_CONTINUATION_DECODE_THRESHOLD=0` | ✗ | -- |
+| 5 | ✅ | MTP n=3 | ❌ | ❌ | ✅ all tests pass | 23 |
+| **6** | ✅ | MTP n=3 | **❌** | ✅ | **✅ all tests pass** | **33** |
+| 7 | ✅ | MTP n=3 (9-prompt structured-output sweep) | ❌ | ✅ | ✅ all 9 prompts pass | 33 |
+| 8 | ✅ | MTP n=3 + PR #40798 backport | ✅ | ✅ | ✗ same loops | 96 |
+| **9A** | ✅ | MTP n=3 + Genesis v7.13 (#40738 + parser fixes) | ✅ | ✅ | ✗ tool calls fail, recall truncates | -- |
+| **9C** | ✅ | ngram n=3 + `prompt_lookup_min=8` + Genesis v7.13 | ✅ | ✅ | ✅ short-ctx clean | 35 |
+
+**What this isolates:**
+
+- Probe 1 → TurboQuant alone is fine.
+- Probes 2-3 → bug isn't MTP-specific; isn't hybrid-attention-specific.
+- Probe 4 → bug isn't in the within-batch decode-fast-path routing.
+- Probe 5 → disabling **both** torch.compile and cudagraph fixes the bug — compilation machinery is the culprit.
+- Probe 6 → disabling **only** cudagraph (keeping torch.compile inductor on) also fixes the bug — **isolating to CUDA graph capture/replay specifically**.
+- Probe 7 → confirmed against [Sander's 9-prompt corruption-detection suite](https://github.com/vllm-project/vllm/issues/40831#issuecomment-4317214311) — all clean.
+- Probe 8 → backported PR #40798 (workspace-manager refactor). Bug persists.
+- **Probe 9A → Sander's v7.13 backports do NOT fix MTP × TurboQuant × cudagraph on Qwen3.6-27B.** Filed as [#40880](https://github.com/vllm-project/vllm/issues/40880).
+- **Probe 9C → ngram + `prompt_lookup_min=8` + v7.13 backports DO work** at short context (cross-confirmation of [#40875](https://github.com/vllm-project/vllm/issues/40875)).
+
+**The Triton kernels are correct when invoked dynamically. torch.compile inductor output is correct.** What corrupts the output is how the captured CUDA graph handles spec-decode's runtime shapes vs warmup-shape capture for the TurboQuant attention path.
+
+---
+
+## Dual-card: why TP=2 doesn't double single-stream TPS
+
+A common expectation: "I'm doubling the GPUs, I should get double the speed." Reality on PCIe-only consumer Ampere: per-stream TPS gain from TP=2 is small (~5%).
+
+**Why:** decode on a single batch is memory-bandwidth-bound, not compute-bound. With TP=2:
+
+- Each card holds half the weights (good — halves the per-card memory bandwidth requirement)
+- But after each layer's matmul, partial results must combine via NCCL **all-reduce** across both cards
+- All-reduce on **PCIe Gen 4** (~32 GB/s practical) is ~3-5× slower than NVLink (~600 GB/s on H100, ~200 GB/s on 3090 with bridge)
+- All-reduce overhead approximately cancels the memory-bandwidth halving
+
+Net: single-stream TPS per card ≈ same as single-card TPS. The TP=2 win is **concurrent** throughput — when 2-4 streams run simultaneously, all-reduce overhead amortizes across the larger batch and aggregate scales near-linearly to ~4 streams.
+
+This is why we measure both single-stream TPS and "concurrent throughput at full ctx" — the latter is what you'd get serving 4 simultaneous users.
+
+**When this would matter less:**
+- If you have NVLink (e.g., A6000 + bridge, or H100 SXM): single-stream gain from TP=2 is closer to 1.6-1.8×
+- If you're running attention-bound prefill, not decode, the TP win is bigger (prefill is more compute-bound)
+
+---
+
+## Dual-card: the Marlin pad-sub-tile-n patch (vllm#40361)
+
+**Symptom:** vLLM crashes during model-load on TP=2 with:
+```
+RuntimeError: GPTQ_MARLIN_MIN_THREAD_N (64) > out_features
+```
+
+**Root cause:** vLLM's Marlin INT4 GEMM kernel requires `out_features ≥ GPTQ_MARLIN_MIN_THREAD_N` (64). Lorbus's Qwen3.6-27B-int4-AutoRound has tensors with `out_features = 128` for some MTP-related layers. With TP=2, those split into 64 per card — exactly at the boundary. Some users hit smaller post-split shapes and crash instantly.
+
+**Our fix (PR #40361):** Pad the tensor's `out_features` dimension up to the kernel minimum (64) before dispatch, then slice the result back. Trade-off: one extra memcpy per Marlin call. Measured cost: <0.5% TPS overhead. Gain: works on any TP-shape that produces sub-tile layers.
+
+```python
+# Pseudo-code of the patch
+if out_features < GPTQ_MARLIN_MIN_THREAD_N:
+    pad_to = GPTQ_MARLIN_MIN_THREAD_N
+    weight_padded = pad_tensor(weight, pad_to)
+    output = marlin_gemm(weight_padded)
+    output = output[..., :out_features]  # slice back
+else:
+    output = marlin_gemm(weight)         # original fast path
+```
+
+Status: PR is **OPEN, MERGEABLE**, labeled `bug`, sitting in maintainer queue. When it lands, drop the marlin-pad overlay from the dual composes. Until then, the vendored overlay (`vllm/patches/vllm-marlin-pad/{marlin.py,MPLinearKernel.py}`, mounted read-only into the stock image by each dual compose) gives users the fix with no fork or clone.
+
+---
+
+## Dual-card: DFlash N=5 — what it does differently than MTP
+
+**MTP (default in single + dual fp8):** Qwen3.6 ships an integrated 1-token MTP head trained jointly with the main model. We run it with `num_speculative_tokens=3` — predicts 3 tokens forward, verifies, accepts what's correct. AL ~3.4 means 3.4 tokens accepted per spec-decode step on average.
+
+**DFlash (z-lab fork, dual-card only):** A separately-trained, larger draft model (5-token forward window) optimized specifically for **code workloads**. Runs in parallel with the main model on the same GPUs. AL ~4.7 on code prompts (vs 3.4 for MTP).
+
+Why DFlash beats MTP on code:
+- **Bigger draft model** = more accurate predictions per position (vs MTP's tiny ~1B head)
+- **Trained on code-heavy data** = higher AL on structured tokens (function names, syntax, brackets)
+- **N=5 vs N=3** = more shots per verify step when accept rate is high (which it is on code)
+
+Cost of DFlash:
+- Draft model adds ~500 MB VRAM (negligible on dual-3090)
+- ~20% extra compute per forward (the parallel draft) — but accept rate gain pays it back
+- Vision support is preserved in `dual-dflash.yml`, dropped in `dual-dflash-noviz.yml` (text-only path slightly faster + 200K vs 185K ctx)
+
+When MTP wins:
+- Narrative / chat workloads (code-token bias of DFlash doesn't help, AL drops to ~2.8)
+- Tool-call generation (structured but different patterns than code)
+- When you need full 262K ctx (DFlash caps at 185K with vision / 200K without due to draft-model VRAM)
+
+So the dual-card path ships both: default = fp8 + MTP for breadth, DFlash for code-heavy peak performance.
+
+---
+
+## Why we configure consumer-Ampere knobs differently than Sandermage's reference
+
+Sandermage tests on 2× A5000 (32 GB each). Their default `gpu-memory-utilization=0.92` and `max-num-batched-tokens=8192` work great there because A5000 has 33% more VRAM. On 24 GB 3090s, those defaults don't leave enough activation headroom for chunked-prefill peaks at 60K+ context.
+
+Our adjustments in the dual-Turbo variant:
+- `gpu-memory-utilization 0.92 → 0.85` — frees ~1.7 GB activation headroom per card
+- `max-num-batched-tokens 8192 → 4128` — smaller chunked-prefill chunks, smaller activation peak per forward
+
+Without these, deep-prefill (60K+) requests OOM. With them, the Turbo variant runs cleanly at full 262K with 4-stream concurrency.
+
+For Sandermage's documented numbers on his A5000 setup, see his [MODELS.md](https://github.com/Sandermage/genesis-vllm-patches). For our adjusted numbers on 3090s, see [/docs/SINGLE_CARD.md](../../docs/SINGLE_CARD.md) and [/docs/DUAL_CARD.md](../../docs/DUAL_CARD.md).
+
+---
+
+## LMCache KV-offload (opt-in, 🐣 incubating) — RAM & disk sizing
+
+`vllm/qwen-27b-dual-lmcache` (compose `vllm-lmcache/compose/dual/fp8/lmcache.yml`, club-3090 #133) layers an LMCache tiered persistent prefix-KV cache onto the dual-max fidelity profile (FP8 + int8-PTH KV + MTP n=3). It caches each session's prefix KV so long multi-turn / multi-session workloads reuse context instead of re-prefilling (cold→warm TTFT ~7–8×). **This is the measured mitigation for [Cliff 3](../../docs/CLIFFS.md#cliff-3--deltanet-ssm-state-is-not-prefix-cacheable-the-prefill-cliff)** — unlike vLLM's native prefix cache (which replays the DeltaNet state from token 0), LMCache's HMA hybrid support caches the recurrent state itself, so a warm prefix loads in 0.5–2.4 s instead of a full replay. Best for *resumed/repeated* prefixes; the *growing-loop* case is promising but not yet benchmarked end-to-end. **Zero decode penalty** — controlled A/B (toggle only the connector): 74 narr / 94 code TPS == without LMCache, MTP intact (~83% accept). The offload is async/overlapped.
+
+### Two KV rates — do not conflate them
+- **On-GPU live KV: ~18.9 KB/token** (int8-PTH) — this only sets the *max servable context* (a single 262K request needs ~4.72 GB of GPU KV pool). It is **NOT** the cache footprint.
+- **LMCache offload cache: ~131 KB/token, MEASURED** (L1 RAM 134, L2 disk 125 — from `lmcache_mp_l1_memory_usage_bytes` = 4.93 GB and 4.6 GB on disk, for a 36,808-token session). ~7× the GPU rate (LMCache stores a fuller representation). **Use this rate to size RAM and disk** — an earlier draft wrongly used the 18.9 GPU rate and overstated capacity ~7×.
+
+### Cache sizing — RAM (L1) & disk (L2) vs context cached
+Per warm session (~131 KB/token):
+
+| Context cached | cache size (RAM *or* disk) |
+|--:|--:|
+| 50K | ~6.5 GB |
+| 128K | ~17 GB |
+| 262K (full) | ~33 GB |
+
+How many sessions fit per tier:
+
+| Tier | ~50K sessions | ~262K sessions |
+|---|--:|--:|
+| **L1 RAM** `--l1-size-gb 30` (default; needs ~58 GB host RAM) | ~4 | <1 |
+| **L1 RAM** `--l1-size-gb 50` (cap on a 94 GB rig; ~78 GB host RAM) | ~7 | ~1.4 |
+| **L2 disk** 100 GB | ~15 | ~3 |
+| **L2 disk** 500 GB | ~76 | ~15 |
+| **L2 disk** 1 TB | ~155 | ~30 |
+
+**Rule of thumb:** a few *hot* sessions in L1 RAM, the long tail on L2 disk (rehydrate ~5 s vs ~43 s re-prefill — table below). L1 lives in shared memory, so `shm_size` must be ≥ `--l1-size-gb`.
+
+⚠️ **RAM sizing is preflight-gated.** `scripts/preflight.sh::preflight_lmcache_ram` hard-fails launch if available RAM < `l1-size-gb` + 28 GB reserve, **even under `--force`** (a 100 GB cache on this 94 GB rig once OOM'd the host and forced a reboot — the incident that motivated the guard); it also soft-warns on low L2 disk space. Cap L1 at ~50 GB here.
+
+**Operational gotcha fixed 2026-06-21:** LMCache's tunables are read by the in-container `bash -c` entrypoint (`$${LMCACHE_L1_GB:-30}`, `$${LMCACHE_L2:-0}`, etc.). Docker Compose only forwards host env into that process when the names are declared in `environment:`. The compose now declares `LMCACHE_L1_GB`, `LMCACHE_L2`, `LMCACHE_L2_ADAPTER`, and `LMCACHE_CHUNK_SIZE` with empty defaults, so bash still owns the fallback values. Regression guard: `scripts/tests/test-lmcache-env-passthrough.sh`. Verify a live launch with `docker exec <container> env | grep LMCACHE` and the `lmcache server` command line.
+
+### Disk (the optional L2 tier — `LMCACHE_L2_ADAPTER`, off by default)
+Set `LMCACHE_L2=1` to use the gitignored repo-root `lmcache-kv/` mount (`/lmcache-kv` in-container), or set `LMCACHE_L2_ADAPTER` to a JSON adapter spec to spill evicted (older) sessions from RAM to disk instead of dropping them, and to **survive container restarts**:
+```
+LMCACHE_L2=1
+LMCACHE_L2_ADAPTER='{"type":"fs","base_path":"/mnt/ssd/lmcache-kv"}'
+```
+Use the **`fs`** adapter (`base_path`), **not `nixl_store`** — this image's NIXL backend is broken (`libcudart.so.13` ImportError); `fs` is a plain filesystem store with no NIXL dependency. Disk footprint is **~125 KB/token measured** (4.6 GB for a 37K session → ~33 GB per full 262K session — LMCache's L2 stores ~7× lower-density than the int8-PTH GPU cache, so size disk accordingly), still effectively unbounded; LRU auto-evicts within the cap. Point custom `base_path` at an SSD dir — **not `/tmp`** (tmpfs, wiped on reboot, competes for RAM).
+
+**Measured on-rig (2026-06-17, 36,807-token session, ~1.9 GB/s disk):**
+
+| | TTFT | vs cold |
+|---|--:|--:|
+| Cold (re-prefill) | 43.3 s | 1× |
+| **L2 rehydrate** (from disk, after container restart) | **4.8 s** | **~9× faster** |
+| L1 hit (warm RAM) | 1.4 s | ~31× faster |
+
+**Cross-restart persistence confirmed**: after a full container restart (L1 RAM cleared), the log shows `46/46 retained keys (0 L1, 46 L2)` — the session rehydrated entirely from L2 disk. For restart tests, prefer a clean `docker compose down && docker compose up -d`; cross-rig #423 found `docker restart` can race GPU-memory release and crash-loop TP worker init on PCIe 3090 rigs.
+
+**Warm-L2 latency is compute-bound, not disk-bound (cross-rig confirmed 2026-06-24, #423).** alexpolo1's bare-metal 2× 3090 + **real NVMe** run breaks the warm-L2 TTFT down as **405 ms disk prefetch + 37 ms host→GPU + ~4.8 s recompute** (Mamba/GDN-state reconstruction) — disk is <10% of the number. A faster SSD barely moves warm-load on this hybrid (his NVMe 5.30 s ≈ the ~1.9 GB/s VM disk 4.8 s above, within recompute noise): **the L2 tier buys persistence + capacity, not warm-load speed.** Same run reconfirms the rates cross-rig — 131 KB/token, decode zero-penalty (83.8/81.0 narr · 101/104 code, within CV), and host RAM flat at the pre-pinned L1 pool (no per-session creep — size RAM once, up front).
+
+⚠️ **An aborted prefill banks only the completed prefix (#423, 2026-06-24).** LMCache commits a session's KV blocks **only when the request completes** — so a client disconnect / timeout *mid-prefill* leaves orphaned data on disk but indexes only the completed prefix (a resend showed `46/320` retained keys) and re-prefills from scratch. For the warm-session win on very long contexts, **the first prefill must run to completion** — don't let an upstream client timeout kill it (a full ~255K cold prefill exceeds 5 min).
+
+**No reduced-size L2 on this model (measured 2026-06-17).** LMCache's only built-in MP-mode compressor — the **fp8 serde** (`"serde":{"type":"fp8","fp8_dtype":"float8_e4m3fn"}` on the adapter) — **shape-errors on this model's KV**: `RuntimeError: shape '[2, 16, 1584, 260]' is invalid for input of size 53539200` (the serializer assumes a layout that doesn't match the hybrid GDN / head_dim-256 / int8-PTH source). Result: **60 serialize fails / 30 store fails, L2 stays empty (0 files)** — serving is unaffected (L1 works), but nothing reaches disk. **CacheGen** (the larger ~3–4× compressor) is "not implemented for MP mode yet — coming soon." So **don't add an fp8 serde** here; L2 is uncompressed (~131 KB/token) until one of those is fixed (re-test trigger). The plain `fs` adapter (no serde) is the working path.
+
+### Why incubating, not production
+Runs LMCache's third-party image (`lmcache/vllm-openai`, **DIGEST-pinned** — the tag is mutable and bundles a newer vLLM 0.23.1-dev than our v0.22.0 pin); L2 has no working compression yet (fp8 serde shape-errors on this model, CacheGen-MP pending); the 38 GB image is pulled on-demand. Promotion to ✅ wants LMCache installed into our own vLLM image. The earlier "LMCache halves decode" conclusion was an uncontrolled-measurement error, retracted — see [#133](https://github.com/noonghunna/club-3090/issues/133).
+
+---
+
+## Upstream status
+
+| Issue | Status | Notes |
+|---|---|---|
+| [vllm#40361](https://github.com/vllm-project/vllm/pull/40361) | **OPEN, MERGEABLE** | Our Marlin pad-sub-tile-n patch (dual-card dependency). Drops out as a dependency when this lands. |
+| [vllm#40334](https://github.com/vllm-project/vllm/pull/40334) | **OPEN, NOT MERGED** | DFlash `combine_hidden_states` dtype mismatch fix. Workaround in our DFlash composes: `--dtype bfloat16`. |
+| [vllm#40807](https://github.com/vllm-project/vllm/issues/40807) | Worked around locally | CUDA graph `.tolist()` crash (single-card). Our `patch_tolist_cudagraph.py` ships the fix. |
+| [vllm#40831](https://github.com/vllm-project/vllm/issues/40831) | Closed issue, direct-upstream gap remains | TurboQuant × spec-decode corruption. Round-4 2026-05-11 matrix shows TQ3/TQ4/k8v4 + MTP all fail long-context needles, while TQ3 no-MTP passes 7/7. |
+| [vllm#40880](https://github.com/vllm-project/vllm/issues/40880) | Worked around by Genesis | MTP × TurboQuant × cudagraph was the first visible failure mode. `--enforce-eager` no longer closes the full problem; Genesis P67/P67b is the working K+1 multi-query path. |
+| [vllm#40914](https://github.com/vllm-project/vllm/pull/40914) | **OPEN, negative locally** | Synthetic-args K+1 route. Local rebase stabilized acceptance but corrupted output (`!` flood) and broke tool/multi-turn; dropping it improved to 5/7 but did not close needles. Not a P67-equivalent for this stack. |
+| [PR #40798](https://github.com/vllm-project/vllm/pull/40798) | Hypothesized fix that didn't pan out | Workspace-manager refactor. Probe 8 backported it; bug persisted. Useful negative result documented on the PR thread. |
+
+When PR #40361 lands, we drop the marlin-pad overlay from dual composes. Do not assume PR #40914 alone makes Genesis-free TQ+MTP shippable; re-test only when upstream has a P67-equivalent multi-query correctness fix.
+
+---
+
+## See also
+
+- [Qwen3.6-27B README](README.md) — model overview, recommended configs, quick start
+- [/docs/SINGLE_CARD.md](../../docs/SINGLE_CARD.md) and [/docs/DUAL_CARD.md](../../docs/DUAL_CARD.md) — per-workload guides (chat, agents, code, RAG, vision, frontier ctx, multi-tenant)
+- [/docs/UPSTREAM.md](../../docs/UPSTREAM.md) — single source of truth for upstream issues / PRs (vLLM, Genesis, fla-org, llama.cpp, transformers, SGLang). Status emoji + what unblocks for us + workaround per row
+- [Qwen3.6-27B CHANGELOG](CHANGELOG.md) — dated history
+- [Cross-engine docs](../../docs/engines/) — comparison + per-engine deep dives
+- [Hardware notes](../../docs/HARDWARE.md) — Ampere SM 8.6+, NVLink, power, etc.

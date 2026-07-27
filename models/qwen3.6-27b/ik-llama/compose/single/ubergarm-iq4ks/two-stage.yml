@@ -1,0 +1,146 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Qwen3.6-27B (ubergarm MTP-IQ4_KS GGUF — imatrix IQK quant)
+#   Engine:    ik_llama.cpp (ghcr.io/ikawrakow/ik-llama-cpp@sha256:5f914f1ccade922417af58c94bd1cbb558052c8852d86678ead3fe693eec0143)
+#   Topology:  Single 3090 (TP=1)
+#   Drafter:   TWO-STAGE: ngram-mod (self-spec, context-matching) + MTP fallback
+#              Stage 1: ngram-mod n_max=4, n_min=2, ngram-size-n=16
+#              Stage 2: MTP n_max=3, p_min=0.0
+#              PR #1789 (merged 2026-05-15). ngram catches repeated patterns,
+#              MTP fills novel tokens. Best for code.
+#              (ngram n_max TUNED to 4 on this rig — the PR's default of 64
+#               OOMs the per-step checkpoint on a 24 GB card. See Status + the
+#               RECURRENT CHECKPOINT MODE note below.)
+#   KV:        q4_0 K + q4_0 V + -khad/-vhad Hadamard (same as iq4ks-mtp.yml)
+#   Template:  native (GGUF-embedded) — see iq4ks-mtp.yml for A/B rationale
+#   Vision:    NO (text-only; mmproj is a separate axis → iq4ks-mtp-vision.yml)
+#   Default ctx: 200000 (verify-stress validated — fills to 183K with correct
+#              needle recall at every rung, matching iq4ks-mtp.yml). Ceiling VRAM
+#              margin is ~833 MB at 183K — just under the script's 1024 MB
+#              sustained-agent-load guard, but recall still passes and there's
+#              ~540 MB real headroom after the ~292 MB agent overhead. For heavy
+#              agentic use right at the ceiling, set CTX_SIZE=180224 (~1.4 GB
+#              margin) or 163840 (~1.9 GB). The ngram stage's 0.6 GB per-step
+#              checkpoint is what costs the top slice vs MTP-only's clean 200K.
+#   Status:    ✅ Production — code-optimized single-card pick (sits alongside iq4ks-mtp.yml,
+#              the balanced/long-ctx ⭐). Tuned + validated on 1× 3090 @ 370 W
+#              (2026-05-24). ngram n_max swept {2,3,4,5,8,16}: code decode is an
+#              inverted-U peaking at n_max=4. At (ngram 4, MTP 3): code 97.8 TPS
+#              vs 72.4 for MTP-only (iq4ks-mtp.yml) = +35%; narrative ~tie
+#              (59 vs 60). Spec-dec is lossless: 8-pack 98/150 == MTP-only's
+#              100/150 and aider-polyglot 16/30 == MTP-only's 19/30, both within
+#              noise; verify-full all green. Same 200K ctx as iq4ks-mtp, ~0.8 GB
+#              leaner at idle. Use this for code; iq4ks-mtp for balanced/prose.
+#   Best for:  Code-heavy agentic workloads where context has repeated patterns
+#              (refactoring, test generation, boilerplate, import blocks).
+# ---------------------------------------------------------------------------
+# Qwen3.6-27B on ik_llama.cpp — single 3090, IQ4_KS + TWO-STAGE spec-dec.
+#
+# TWO-STAGE SPECULATIVE DECODING (PR #1789):
+#   Instead of MTP alone, this chains two speculators:
+#     1. ngram-mod (self-speculator) — looks up n-gram matches in the existing
+#        context. Zero VRAM cost, instant. Great at repeated patterns (code
+#        boilerplate, imports, test scaffolding, refactor targets).
+#     2. MTP (built-in head) — fallback for tokens ngram can't match. Slower
+#        but handles novel generation.
+#
+#   The engine always tries ngram first (faster, free). If ngram can't produce
+#   enough tokens (below n_min or no match), MTP takes over. Net: best of both
+#   worlds for code workloads where context is rich with repeated patterns.
+#
+#   Source: ik_llama.cpp PR #1789 (merged 2026-05-15). The PR's recommended
+#   ngram n_max=64 is WRONG for a 24 GB card — see RECURRENT CHECKPOINT MODE.
+#   We swept n_max on this rig; 4 is the code-decode optimum. Tuned config:
+#     --spec-type ngram-mod:n_max=4,n_min=2,ngram_size_n=16
+#     --spec-type mtp:n_max=3,p_min=0.0
+#
+# RECURRENT CHECKPOINT MODE:
+#   --recurrent-ckpt-mode auto (PR #1774) pre-allocates VRAM buffers for
+#   Qwen3.6's DeltaNet SSM state during speculative decoding. On draft
+#   rejection, restores SSM state instead of recomputing — cheaper rejections
+#   on hybrid models. 'auto' tries per-step, falls back to gpu-fallback if OOM.
+#   ⚠ The per-step buffer scales ~148 MB × (max(ngram_n_max, mtp_n_max) + 1).
+#   At the tuned (4, 3) defaults that's ~0.6 GB → per-step engages (fast). The
+#   PR's n_max=64 needs ~9.5 GB → OOMs → gpu-fallback re-decodes on every reject,
+#   which is SLOWER than no spec-dec at all (we measured narrative −31% there).
+#   Keep NGRAM_N_MAX small: it's the code-speed optimum AND frees KV headroom
+#   for longer contexts. Sweep on 1× 3090: code decode 81.5 (n=16) → 90.4 (n=8)
+#   → 97.8 (n=4) → 78.8 (n=2); narrative flat ~59 throughout.
+#
+# Quick start:
+#   1. Get the MTP-IQ4_KS GGUF (same as iq4ks-mtp.yml):
+#        hf download ubergarm/Qwen3.6-27B-GGUF Qwen3.6-27B-MTP-IQ4_KS.gguf \
+#          --local-dir $MODEL_DIR/qwen3.6-27b-gguf/ubergarm-mtp-iq4ks
+#   2. From this directory:
+#        MODEL_DIR=/your/models/dir docker compose -f iq4ks-two-stage.yml up -d
+#   3. curl http://localhost:8020/v1/models  → should list the model.
+#
+# Override defaults via .env or shell:
+#   MODEL_DIR              host dir to mount as /models
+#   GGUF_FILE             path under /models
+#   CTX_SIZE              KV pool size       (default: 200000 — see Default ctx)
+#   BATCH_SIZE            llama.cpp -b       (default: 4096)
+#   UBATCH_SIZE           llama.cpp -ub      (default: 1024)
+#   NP                    parallel slots     (default: 1)
+#   KV_TYPE               K and V quant type (default: q4_0)
+#   NGRAM_N_MAX           ngram max draft    (default: 4 — tuned; see above)
+#   NGRAM_N_MIN           ngram min accept   (default: 2)
+#   NGRAM_SIZE_N          ngram lookup size  (default: 16)
+#   MTP_N_MAX             MTP max draft      (default: 3)
+#   MTP_P_MIN             MTP accept floor   (default: 0.0)
+#   REASONING             thinking gate      (default: off)
+#   REASONING_FORMAT      reasoning routing  (default: deepseek)
+#   PORT                  host port          (default: 8020)
+#   CUDA_VISIBLE_DEVICES  which GPU          (default: 0)
+
+services:
+  ik-llama-qwen36-27b-two-stage:
+    image: ${IK_LLAMA_IMAGE:-ghcr.io/ikawrakow/ik-llama-cpp@sha256:5f914f1ccade922417af58c94bd1cbb558052c8852d86678ead3fe693eec0143}
+    container_name: "${ESTATE_CONTAINER:-ik-llama-qwen36-27b-two-stage}"
+    restart: unless-stopped
+    ports:
+      - "${ESTATE_PORT:-${PORT:-8020}}:8080"
+    volumes:
+      - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
+    # ⚠ -np 1 is intentional on a single 24 GB card — do NOT raise it to
+    #   "parallelize." One GPU is compute-bound: extra slots divide its
+    #   throughput, they don't multiply it. At -np 4 each slot fell to
+    #   ~14 tok/s here — slow enough to trip agentic clients' per-request
+    #   timeouts (aider ran 1/30) — and -np>1 also auto-disables MTP and
+    #   can OOM the spec-context buffer. On a higher-throughput card (e.g.
+    #   5090) or multi-GPU the trade may flip — re-validate before raising.
+    command: >-
+      --host 0.0.0.0
+      --port 8080
+      --model /models/${GGUF_FILE:-qwen3.6-27b-gguf/ubergarm-mtp-iq4ks/Qwen3.6-27B-MTP-IQ4_KS.gguf}
+      -ngl 99
+      --ctx-size ${CTX_SIZE:-200000}
+      -b ${BATCH_SIZE:-4096}
+      -ub ${UBATCH_SIZE:-1024}
+      -np ${NP:-1}
+      -ctk ${KV_TYPE:-q4_0}
+      -ctv ${KV_TYPE:-q4_0}
+      -khad
+      -vhad
+      -ngld 99
+      --spec-type ngram-mod:n_max=${NGRAM_N_MAX:-4},n_min=${NGRAM_N_MIN:-2},ngram_size_n=${NGRAM_SIZE_N:-16}
+      --spec-type mtp:n_max=${MTP_N_MAX:-3},p_min=${MTP_P_MIN:-0.0}
+      --recurrent-ckpt-mode auto
+      --merge-qkv
+      -fa on
+      --jinja
+      --parallel-tool-calls
+      --reasoning ${REASONING:-off}
+      --reasoning-format ${REASONING_FORMAT:-deepseek}
+      --temp ${TEMP:-${TEMPERATURE:-0.6}}
+      --top-p ${TOP_P:-0.95}
+      --top-k ${TOP_K:-20}
+      --min-p ${MIN_P:-0.0}
+      --repeat-penalty ${REPEAT_PENALTY:-1.0}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${ESTATE_GPUS:-${CUDA_VISIBLE_DEVICES:-0}}"]
+              capabilities: [gpu]

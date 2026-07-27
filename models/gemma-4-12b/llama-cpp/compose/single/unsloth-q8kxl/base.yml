@@ -1,0 +1,76 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Gemma-4-12B-it (gemma4_unified — Unsloth UD-Q8_K_XL GGUF, 13 GB)
+#   Engine:    llama.cpp (mainline ggml-org, rolling server-cuda)
+#   Topology:  Single 3090 (TP=1)
+#   Drafter:   none (no-spec). MTP needs gemma4-assistant arch (llama.cpp #23398, WIP) → mtp.yml (gated).
+#   KV:        q8_0 K + q8_0 V (FA-supported on STOCK ggml-org — no FA_ALL_QUANTS — and half of
+#              f16 so 256K fits one card). Set KV_TYPE=f16 for max fidelity at lower ctx.
+#   Vision:    no (text-only; pass MMPROJ_FILE for vision)
+#   Max ctx:   262144 (256K — the model card's FULL context). Trained max is 131072, but
+#              gemma4's native p-RoPE extrapolates cleanly past it — NIAH clean to 200K
+#              (validated on beellama; mainline shares the llama.cpp rope path). The blocker
+#              was llama.cpp's conservative n_ctx_train cap → lifted by
+#              `--override-kv gemma4.context_length=int:262144` (NOT YaRN — gemma4 ignores it).
+#   Genesis:   N/A — llama.cpp-family engine; Genesis is vLLM/Qwen3-Next-specific
+#   Status:    🧪 Experimental — stability soak PASS 2026-06-04 (fresh 20×5: 0/100 silent-empty,
+#              0 MiB growth, 100% TPS retention). Held 🧪 pending MTP — no Gemma-4 spec-dec on
+#              llama.cpp yet (llama.cpp#23398); promote when it lands (stability gate already met).
+#   Engine-profile: llama-cpp (rolling)
+#   Best for:  ⭐ FASTEST single-card Gemma-4-12B at full 256K — ~51 TPS (vs beellama ~47),
+#              one 3090, frees the 2nd card. (beellama's sibling uses q5_0/q4_1 turbo KV.)
+# ---------------------------------------------------------------------------
+# Mainline ggml-org serves gemma4 (the unified arch merged in llama.cpp #24077, 2026-06-03)
+# coherently, ~9% faster than beellama on the same Q8 weights (51 vs 47 TPS, f16/q8 KV).
+# It lacks FA_ALL_QUANTS (so no q5_0/q4_1 turbo KV) — q8_0 is the lean FA-OK KV here.
+# 256K via the metadata-cap override (same lever proven on beellama: native p-RoPE
+# extrapolates, NIAH clean at 150K + 200K). REQUIRES a recent rolling image (the gemma4
+# unified arch is days old); pin LLAMACPP_IMAGE to a digest before any Production promotion.
+#
+# Quick start:
+#   1. docker pull ghcr.io/ggml-org/llama.cpp:server-cuda
+#   2. GGUF on disk: gemma-4-12b-gguf/unsloth-ud-q8kxl/gemma-4-12b-it-UD-Q8_K_XL.gguf
+#      (else: hf download unsloth/gemma-4-12b-it-GGUF gemma-4-12b-it-UD-Q8_K_XL.gguf \
+#         --local-dir $MODEL_DIR/gemma-4-12b-gguf/unsloth-ud-q8kxl)
+#   3. MODEL_DIR=/your/models/dir docker compose -f base.yml up -d
+#   4. curl http://localhost:8069/v1/models
+#
+# Override: GGUF_FILE, CTX_SIZE (262144; override-kv tracks it — set 131072 for trained max),
+#   KV_TYPE (q8_0; f16 for fidelity at lower ctx), BATCH_SIZE/UBATCH_SIZE, NP, REASONING,
+#   PORT (8069), CUDA_VISIBLE_DEVICES, MMPROJ_FILE, LLAMACPP_IMAGE.
+
+services:
+  llama-cpp-gemma4-12b:
+    image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda-b9967}
+    container_name: "${ESTATE_CONTAINER:-llama-cpp-gemma4-12b}"
+    restart: unless-stopped
+    ports:
+      - "${ESTATE_PORT:-${PORT:-8069}}:8080"
+    volumes:
+      - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
+    command: >-
+      --host 0.0.0.0
+      --port 8080
+      -m /models/${GGUF_FILE:-gemma-4-12b-gguf/unsloth-ud-q8kxl/gemma-4-12b-it-UD-Q8_K_XL.gguf}
+      -ngl 99
+      --ctx-size ${CTX_SIZE:-262144}
+      --override-kv gemma4.context_length=int:${CTX_SIZE:-262144}
+      -b ${BATCH_SIZE:-2048}
+      -ub ${UBATCH_SIZE:-512}
+      -np ${NP:-1}
+      --cache-type-k ${KV_TYPE:-q8_0}
+      --cache-type-v ${KV_TYPE:-q8_0}
+      --flash-attn on
+      --jinja
+      --reasoning ${REASONING:-off}
+      --temp ${TEMP:-${TEMPERATURE:-1.0}}
+      --top-k ${TOP_K:-64}
+      --top-p ${TOP_P:-0.95}
+      --min-p ${MIN_P:-0.0}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${ESTATE_GPUS:-${CUDA_VISIBLE_DEVICES:-0}}"]
+              capabilities: [gpu]

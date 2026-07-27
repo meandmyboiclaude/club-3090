@@ -1,0 +1,166 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Qwen3.6-27B (ubergarm MTP-IQ4_KS GGUF) + mmproj-F16
+#   Engine:    ik_llama.cpp (ghcr.io/ikawrakow/ik-llama-cpp@sha256:5f914f1ccade922417af58c94bd1cbb558052c8852d86678ead3fe693eec0143)
+#   Topology:  Single 3090 (TP=1)
+#   Drafter:   MTP n=2, p-min 0.0 (built-in MTP head)
+#   KV:        q4_0 K + q4_0 V
+#   Template:  native (GGUF-embedded) — froggeric v19 A/B'd on the text sibling,
+#              native won the 8-pack 103 vs 99 (toolcall TIED); see iq4ks-mtp.yml
+#   Vision:    YES (mmproj-F16 mounted — multimodal input enabled)
+#   Defaults:  CTX_SIZE=163840 (160K) + IMAGE_MAX_TOKENS=1024 (1M-px images), -b 1024,
+#              on ONE 3090. MEASURED 2026-05-25 (full verify-stress [8/8]): completes
+#              + recalls to the 147K-fill ceiling (~503 MB free, no crash). The default
+#              image budget is 1M-px, NOT full-res: at 4M-px, 160K OOM-crashes under
+#              the agentic stress battery (llama.cpp vision too) — full-res is a
+#              documented override that trades ctx down (see VRAM RESIZING). The vision
+#              ceiling (~160K) sits below the text profile's 200K, and shrinking images
+#              does NOT raise it (180K still OOMs at fill) — gated by KV + fill-time
+#              runtime overhead, not the image-encode buffer.
+#   Status:    ✅ Production — config validated 2026-05-25 (full verify-stress [8/8]
+#              at the 160K + 1M-px default; graduated from EVAL #402). switch.sh /
+#              compose_registry wiring tracked as a follow-up. Sibling of iq4ks-mtp.yml.
+#   Best for:  Multimodal chat / screenshot-debugging on ik_llama IQ4_KS.
+# ---------------------------------------------------------------------------
+# This is the VISION sibling of iq4ks-mtp.yml. Everything matches that file
+# (config source, justified deviations, native-template A/B result) EXCEPT:
+#   + --mmproj + --image-{min,max}-tokens (vision projector mounted)
+#   + default ctx 160K + IMAGE_MAX_TOKENS 1024 (1M-px) + -b 1024 (vs text's 200K, no images)
+#
+# Why -b 1024 (NOT the text profile's 4096): on this ik_llama build the image-
+# encode graph makes the compute buffer scale hard with logical batch -b — at
+# -b 4096 it's ~4 GB (OOMs even at boot with vision); at -b 1024 it's ~1 GB,
+# which is what lets a full 4M-pixel image encode within 24 GB at 172K.
+# NOTE: -ub (UBATCH) is cosmetic here — the engine forces n_ubatch = n_batch,
+# so only -b moves the compute buffer. Validated 2026-05-21: 160K/-b1024 serves
+# a 2048² image at ~23.65 GB peak (~0.9 GB headroom).
+#
+# ⭐ VRAM RESIZING — trade context ↔ image resolution (single 3090, q4_0 KV).
+#   The 24 GB budget is split between KV (grows with CTX_SIZE) and the image-
+#   encode buffer (grows with IMAGE_MAX_TOKENS). The DEFAULT is 160K + 1M-px
+#   (IMAGE_MAX_TOKENS=1024). Full-res 4M-px (=4096, 2048² images) peaks ~23.65 GB
+#   on a single image AND OOM-crashes the verify-stress battery at 160K — it's an
+#   override (lower ctx to use it), not the default.
+#
+#   ► WANT HIGHER-RES IMAGES (sharp 4K UIs, fine-print docs)? Raise the image
+#     cap and pay for it by LOWERING context. Starting points (UNMEASURED —
+#     validate, see below):
+#       IMAGE_MAX_TOKENS=8192 CTX_SIZE=131072    # ~8M-px (2896²) images, 128K ctx
+#       IMAGE_MAX_TOKENS=6144 CTX_SIZE=147456    # ~6M-px images, 144K ctx
+#   ► WANT MORE CONTEXT? You CANNOT get it by shrinking images — MEASURED FALSE
+#     2026-05-25. Lowering IMAGE_MAX_TOKENS frees BOOT headroom but NOT the
+#     filled ceiling: the ctx ceiling is gated by the KV pool + fill-time runtime
+#     overhead (prompt-cache + context-checkpoint + activation, ~1.7 GB growth
+#     empty→fill), not the image-encode buffer. The old "IMAGE_MAX_TOKENS=1024
+#     CTX_SIZE=200000 → 200K ctx" row was wrong and is removed. If you genuinely
+#     need >160K context, that's a TEXT-ONLY capability — use iq4ks-mtp.yml (200K
+#     text default, no mmproj).
+#
+#   Measured ctx ladders on THIS rig (-b 1024):
+#     full-res 4M-px (2026-05-21): 160K → ~0.9 GB free (default) | 172K → ~0.7 |
+#       175K → ~0.6 | 192K → OOM
+#     reduced 1M-px / IMAGE_MAX_TOKENS=1024 (2026-05-25, full verify-stress [8/8]):
+#       160K → 503 MB free at the 147K-fill ceiling (all rungs recalled, no crash)
+#       180K → CUDA-OOM at the ~155K rung | 200K → 891 MB after one image, thinner
+#     ⇒ 160K is the completing ceiling at ANY image budget; 180K+ OOMs at fill.
+#   ⚠ Margin at 160K's ceiling is THIN: 503 MB free at 147K (91%) fill — under the
+#     1024 MB sustained-agent guard. It completes + recalls, but for prefill-heavy
+#     agentic vision (large tool messages, concurrent requests, screenshot loops)
+#     LOWER to CTX_SIZE=131072 for ≥1 GB margin. 160K is fine for image+light-text.
+#   ⚠ ALWAYS re-validate after resizing: boot, then run BOTH a real full-size
+#     image request AND `scripts/verify-stress.sh` (encode + prefill peaks are
+#     spiky; a tight config that serves one image can still OOM under load).
+#
+# Thinking-off: native (GGUF-embedded) template + --reasoning off — clean
+# suppression on ik_llama (validated 2026-05-22). froggeric v19 was A/B'd on
+# the text sibling and LOST the 8-pack (99 vs native 103, toolcall tied), so
+# both ik profiles default native. (vLLM keeps its own froggeric copy.)
+#
+# Quick start:
+#   1. GGUF + vision projector:
+#        hf download ubergarm/Qwen3.6-27B-GGUF Qwen3.6-27B-MTP-IQ4_KS.gguf \
+#          --local-dir $MODEL_DIR/qwen3.6-27b-gguf/ubergarm-mtp-iq4ks
+#        hf download unsloth/Qwen3.6-27B-GGUF mmproj-F16.gguf \
+#          --local-dir $MODEL_DIR/qwen3.6-27b-gguf
+#   2. MODEL_DIR=/your/models/dir docker compose -f iq4ks-mtp-vision.yml up -d
+#   3. curl http://localhost:8020/v1/models  → should list the model.
+#
+# Override defaults via .env or shell:
+#   MODEL_DIR             host dir to mount as /models
+#   GGUF_FILE            path under /models (default: …ubergarm-mtp-iq4ks/Qwen3.6-27B-MTP-IQ4_KS.gguf)
+#   MMPROJ_FILE          path under /models (default: qwen3.6-27b-gguf/mmproj-F16.gguf)
+#   IMAGE_MIN_TOKENS     min tokens / image (default: 1024)
+#   IMAGE_MAX_TOKENS     max tokens / image (default: 1024 = ~1M-px). RAISE for sharper
+#                        images, but LOWER CTX_SIZE to pay for it — see VRAM RESIZING.
+#   CTX_SIZE             KV pool size (default 163840 = 160K).
+#                        ⛔ DON'T RAISE past 160K. MEASURED 2026-05-25 (full
+#                        verify-stress [8/8], -b 1024): 160K completes + recalls
+#                        (503 MB free at the 147K-fill ceiling, no crash); 180K
+#                        CUDA-OOMs at fill; shrinking IMAGE_MAX_TOKENS does NOT
+#                        raise the ceiling (gated by KV + runtime overhead, not the
+#                        image buffer). For prefill-heavy agentic vision, LOWER to
+#                        131072 for ≥1 GB margin. >160K needs TEXT-only iq4ks-mtp.yml.
+#   BATCH_SIZE           llama.cpp -b       (default: 1024 — REQUIRED for vision; -b 4096 OOMs at boot)
+#   UBATCH_SIZE          llama.cpp -ub      (cosmetic — engine forces n_ubatch=n_batch; only -b matters)
+#   NP                   parallel slots     (default: 1)
+#   KV_TYPE              K and V quant type (default: q4_0; q8_0 = higher KV quality)
+#   MTP_DRAFT_N_MAX      MTP draft tokens   (default: 2)
+#   DRAFT_P_MIN          draft accept floor (default: 0.0)
+#   REASONING            thinking gate      (default: off)
+#   PORT                 host port          (default: 8020)
+#   CUDA_VISIBLE_DEVICES which GPU to use   (default: 0)
+
+services:
+  ik-llama-qwen36-27b-iq4ks-mtp-vision:
+    image: ${IK_LLAMA_IMAGE:-ghcr.io/ikawrakow/ik-llama-cpp@sha256:5f914f1ccade922417af58c94bd1cbb558052c8852d86678ead3fe693eec0143}
+    container_name: "${ESTATE_CONTAINER:-ik-llama-qwen36-27b-vision}"
+    restart: unless-stopped
+    ports:
+      - "${ESTATE_PORT:-${PORT:-8020}}:8080"
+    volumes:
+      - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
+    # server target ENTRYPOINT is /app/llama-server — args only below.
+    # ⚠ -np 1 is intentional on a single 24 GB card — do NOT raise it to
+    #   "parallelize." One GPU is compute-bound: extra slots divide its
+    #   throughput, they don't multiply it. At -np 4 each slot fell to
+    #   ~14 tok/s here — slow enough to trip agentic clients' per-request
+    #   timeouts (aider ran 1/30) — and -np>1 also auto-disables MTP and
+    #   can OOM the spec-context buffer. On a higher-throughput card (e.g.
+    #   5090) or multi-GPU the trade may flip — re-validate before raising.
+    command: >-
+      --host 0.0.0.0
+      --port 8080
+      --model /models/${GGUF_FILE:-qwen3.6-27b-gguf/ubergarm-mtp-iq4ks/Qwen3.6-27B-MTP-IQ4_KS.gguf}
+      --mmproj /models/${MMPROJ_FILE:-qwen3.6-27b-gguf/mmproj-F16.gguf}
+      --image-min-tokens ${IMAGE_MIN_TOKENS:-1024}
+      --image-max-tokens ${IMAGE_MAX_TOKENS:-1024}
+      -ngl 99
+      --ctx-size ${CTX_SIZE:-163840}
+      -b ${BATCH_SIZE:-1024}
+      -ub ${UBATCH_SIZE:-1024}
+      -np ${NP:-1}
+      -ctk ${KV_TYPE:-q4_0}
+      -ctv ${KV_TYPE:-q4_0}
+      -khad
+      -vhad
+      -ngld 99
+      --spec-type mtp:n_max=${MTP_DRAFT_N_MAX:-2},p_min=${DRAFT_P_MIN:-0.0}
+      --recurrent-ckpt-mode auto
+      --merge-qkv
+      -fa on
+      --jinja
+      --parallel-tool-calls
+      --reasoning ${REASONING:-off}
+      --reasoning-format ${REASONING_FORMAT:-deepseek}
+      --temp ${TEMP:-${TEMPERATURE:-0.6}}
+      --top-p ${TOP_P:-0.95}
+      --top-k ${TOP_K:-20}
+      --min-p ${MIN_P:-0.0}
+      --repeat-penalty ${REPEAT_PENALTY:-1.0}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${ESTATE_GPUS:-${CUDA_VISIBLE_DEVICES:-0}}"]
+              capabilities: [gpu]

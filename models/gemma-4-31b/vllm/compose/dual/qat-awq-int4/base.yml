@@ -1,0 +1,174 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Gemma 4 31B — cyankiwi QAT-AWQ INT4 (compressed-tensors, lm_head bf16)
+#   Topology:  Dual 3090 (TP=2, NVLink auto-detected via NVLINK_MODE)
+#   Drafter:   none — MTP DISABLED on v0.24.0 (see the ⏸️ MTP caveat block below)
+#   KV:        bf16 (engine-default; overlay-free — no #40391, no cliff)
+#   Vision:    yes
+#   Max ctx:   229376 (~224K) — bf16 KV pool ceiling on 2× 3090 @ util 0.95 (est. ~237K tok;
+#              ship below it for a healthy VRAM margin). Overridable via MAX_MODEL_LEN.
+#   Genesis:   N/A — Genesis is Qwen3-Next-specific
+#   Status:    ⚠️ Production w/ caveats
+#   Caveats:   (1) MTP (speculative decoding) DISABLED on vLLM v0.24.0 — Gemma-4 MTP×tool-calling
+#              is broken upstream (vLLM #39043; MTP fix #42006 closed-unmerged); plain chat + tools
+#              (without MTP) work. Re-enable when a stable vLLM ships the fix — see block below.
+#              (2) Context ceiling ~224K (bf16 KV is ~2×/token vs int8-PTH's 262K) — the overlay-free
+#              trade for retiring the 31b's vllm-gemma-stable dependence. int8-PTH+#40391 (262K)
+#              returns FREE when PR #40391 merges upstream.
+#   Quality:   rebench-full 2026-07-02 @0.95/229376: verify-full 9/9 (tools+streaming-tool-calls+
+#              reasoning clean, MTP-off) · verify-stress all 5 ceiling rungs to 210K (91%, VRAM
+#              margin 1162MB>1024 ✓) · bench decode ~59 TPS (CV 0.1%, TTFT 69ms) · soak PASS
+#              (0 err · 0 MiB growth · 0/100 silent · p50 58.7 · 99.6% retention). 8-pack deferred.
+#   Best for:  The Gemma-4-31B dual on v0.24.0 — OVERLAY-FREE (stock vllm-stable), vision + tools. ⭐
+# ---------------------------------------------------------------------------
+# Gemma-4-31B (cyankiwi QAT-AWQ-INT4) on 2× RTX 3090 TP=2, stock vLLM v0.24.0.
+#
+# WHY cyankiwi qat-AWQ-int4 (not autoround-int4): on v0.24.0, gemma4.py ties the
+# lm_head through its quant method, and AutoRound (which quantizes the tied
+# lm_head) raises NotImplementedError at model init. cyankiwi's compressed-tensors
+# checkpoint keeps lm_head EXCLUDED from quant (bf16), so the tie dispatches to the
+# unquantized path → boots clean. QAT-int4 is also ≥ AutoRound-int4 fidelity (§4a).
+#
+# WHY bf16 KV (this is the whole point of the v0.24.0 consolidation):
+#   bf16 is the engine-default KV — it needs NO overlay. Gemma-4's sliding_window=1024
+#   windows most layers, so bf16 KV is cheap enough to reach ~224–250K on 2× 3090.
+#   int8-PTH would give the full 262K but needs the #40391 page-align overlay, which is
+#   NOT native in v0.24.0 (it boots but SILENTLY craters recall past ~32K — verified
+#   2026-07-01, both cyankiwi + w4a16 checkpoints; PR #40391 is open/conflicting upstream).
+#   So the overlay-free 31b ships bf16; int8-PTH returns free when #40391 merges.
+#   (fp8 KV is dead on Gemma-4 Ampere: sm_86 lacks the fp8e4nv kernel; TurboQuant is
+#   arch-blocked — heterogeneous head dims force TRITON_ATTN, which rejects TQ dtypes.)
+#
+# ──────────────────────────────────────────────────────────────────────────
+# ⏸️ MTP (speculative decoding) DISABLED on v0.24.0 — re-enable when upstream lands.
+#   Why: Gemma-4 MTP × tool-calling is broken on stock v0.24.0 — with spec-decode ON,
+#   tool calls emit <pad> / leak raw <|tool_call> tokens instead of parsed calls.
+#   (Plain chat is fine; tools WITHOUT MTP are fine — A/B-verified on this rig 2026-07-01:
+#   MTP-off → tools PASS, MTP-on → tools FAIL.) Root cause = upstream vLLM #39043; the
+#   MTP fix (#42006) is closed-unmerged and NOT in v0.24.0.
+#   Re-enable trigger: a stable vLLM release carrying the #39043 / #42006 fixes. Check:
+#     gh api repos/vllm-project/vllm/issues/39043 --jq '.state, .state_reason'
+#     gh api repos/vllm-project/vllm/pulls/42006  --jq '.state, .merged_at'
+#   Then add the two --speculative-config lines + re-run a streaming multi-tool test
+#   (must return all args, no leak) before shipping:
+#     - --speculative-config
+#     - '{"model":"/root/.cache/huggingface/gemma-4-31b-it-assistant","num_speculative_tokens":${SPEC_N_MAX:-3}}'
+# ──────────────────────────────────────────────────────────────────────────
+#
+# Companion composes:
+#   single (TP=1) — Gemma-4-31B is DUAL-ONLY on 24 GB (weights fit a single card but leave
+#                   only a few-K ctx). Needs ≥32 GB for single-card long-context.
+#
+# Hardware metadata (parsed by scripts/preflight.sh):
+# Requires-min-vram-gb: 24
+# Engine-profile: vllm-stable
+# Requires-min-gpu-count: 2
+# Tensor-parallel: 2
+services:
+  vllm-gemma-4-31b-qat-awq-int4:
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.24.0}
+    container_name: "${ESTATE_CONTAINER:-vllm-gemma-4-31b-qat-awq-int4}"
+    restart: ${CLUB3090_RESTART:-unless-stopped}
+    ports:
+      - "${ESTATE_PORT:-${PORT:-8032}}:8000"
+    volumes:
+      - ${MODEL_DIR:-../../../../../../models-cache}:/root/.cache/huggingface
+      # torch.compile + Triton kernel caches — first boot warms (~5-7 min);
+      # subsequent boots reuse cached graphs (~3 min).
+      - ../../../cache/torch_compile_qatawq:/root/.cache/vllm/torch_compile_cache
+      - ../../../cache/triton_qatawq:/root/.triton/cache
+      # NVLink auto-detection — runs inside container at boot.
+      - ../../../../../../scripts/detect_nvlink.sh:/etc/club3090/detect_nvlink.sh:ro
+      # NO overlay mounts — overlay-free on stock v0.24.0 (bf16 KV needs no patch).
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=${ESTATE_GPUS:-${NVIDIA_VISIBLE_DEVICES:-all}}
+      # CUDA-level GPU mask — the runtime-agnostic half of GPU selection
+      # (#610): launch.sh --gpus exports GPU UUIDs here. CDI runtimes (NixOS,
+      # nvidia-ctk cdi) IGNORE NVIDIA_VISIBLE_DEVICES, so this mask is what
+      # actually pins cards there; on the classic runtime the UUID form is
+      # renumbering-proof. Unset → absent (no masking).
+      - CUDA_VISIBLE_DEVICES
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-${OFFLINE:-0}}
+      - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-${OFFLINE:-0}}
+      - VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - NVLINK_MODE=${NVLINK_MODE:-auto}
+      - NCCL_CUMEM_ENABLE=0
+      - NCCL_P2P_DISABLE=1
+      - VLLM_NO_USAGE_STATS=1
+      - OMP_NUM_THREADS=1
+      - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,max_split_size_mb:512}
+      - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+      - TRITON_CACHE_DIR=/root/.triton/cache
+    shm_size: "16gb"
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        # Overlay-free on v0.24.0 — no boot-time patch apply. Just NVLink autodetect + serve.
+        source /etc/club3090/detect_nvlink.sh
+        if [ "$${_NVLINK_ENABLED:-0}" = "1" ]; then
+          exec vllm serve "$$@"
+        else
+          exec vllm serve --disable-custom-all-reduce "$$@"
+        fi
+      - --
+    command:
+      - --override-generation-config
+      - '{"temperature":${TEMP:-${TEMPERATURE:-1.0}},"top_p":${TOP_P:-0.95},"top_k":${TOP_K:-64},"min_p":${MIN_P:-0.0},"repetition_penalty":${REPEAT_PENALTY:-1.0}}'
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --model
+      - /root/.cache/huggingface/gemma-4-31b-qat-awq-int4
+      - --served-model-name
+      - gemma-4-31b
+      - gemma-4-31b-qat-awq-int4
+      - --tensor-parallel-size
+      - "${TP:-2}"
+      - --pipeline-parallel-size
+      - "${PP:-1}"
+      # ---- KV format: bf16 (engine-default, overlay-free). `auto` resolves to the
+      #      model dtype (bf16). int8-PTH is NOT used here (needs #40391, unmerged →
+      #      silent recall cliff on v0.24.0). Ada/Blackwell users MAY override
+      #      KV_DTYPE=fp8_per_token_head; sm_86 Ampere cannot (no fp8e4nv kernel).
+      - --kv-cache-dtype
+      - "${KV_DTYPE:-auto}"
+      # ---- max-model-len: bf16 KV pool ceiling on 2× 3090 @ util 0.95 is ~237K tok;
+      #      ship at 224K for VRAM-margin headroom (verify-stress flagged a thin margin
+      #      at 91% fill on the tighter 0.97/245K config). Raise MAX_MODEL_LEN toward
+      #      ~237K only if you also lower it below the measured pool at boot.
+      - --max-model-len
+      - "${MAX_MODEL_LEN:-${CTX:-229376}}"
+      - --gpu-memory-utilization
+      - "${GPU_MEMORY_UTILIZATION:-0.95}"
+      # bf16 KV is ~2×/token vs int8-PTH → tighter pool. --max-num-seqs is a CAP:
+      #   2 = one un-preempted long-ctx agent (or 2 short) · 1 = single long request
+      # ⚠️ vision + near-max ctx: drop max-num-seqs/mem-util (thin headroom near 224K).
+      - --max-num-seqs
+      - "${MAX_NUM_SEQS:-2}"
+      # Vision tower: max_tokens_per_mm_item=2496 must fit in batched tokens.
+      - --max-num-batched-tokens
+      - "4096"
+      - --trust-remote-code
+      # Tool-call support — native gemma4 ParserEngine (#45588) on v0.24.0. Streaming
+      # multi-tool validated clean (all args, no <|tool_call> leak) 2026-07-01.
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - gemma4
+      # Route Gemma-4's <|channel>thought…<channel|> reasoning into reasoning_content.
+      - --reasoning-parser
+      - gemma4
+      - --chat-template
+      - /vllm-workspace/examples/tool_chat_template_gemma4.jinja
+      # ⏸️ MTP disabled — see the caveat block in the header. Do NOT add --speculative-config
+      #    on v0.24.0 (breaks tool-calling); restore it only when vLLM #39043/#42006 land.

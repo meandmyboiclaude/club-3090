@@ -1,0 +1,365 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Qwen3.6-27B (Lorbus AutoRound INT4 + BF16 mtp.fc preserved)
+#   Topology:  Dual 3090 PCIe (TP=2)
+#   Drafter:   MTP n=3 (built-in)
+#   KV:        turboquant_3bit_nc (TQ3)
+#   Vision:    yes
+#   Max ctx:   180K
+#   Genesis:   v7.72.2 (full PROD env stack)
+#   Status:    🗑️ Deprecated
+#   Best for:  Reasoning/coding workloads with bounded thinking budget
+#              via FSM-constrained scratchpad grammar — caps think budget,
+#              improves HE+/LCB scores, +24pp accuracy on max_tokens=4096
+# ---------------------------------------------------------------------------
+# Bounded-thinking variant — recommended grammar is the DeepSeek scratchpad
+# (PLAN/NOTE×0-15/VERDICT FSM at `tools/grammar-eval/deepseek-scratchpad.gbnf`).
+#
+# **Phase 3 bench 2026-05-04 final (full HE+ 164 + LCB v6 50, n=214):**
+#   - DeepSeek scratchpad: 93.9% HE+ / 66.0% LCB v6 / 87.4% combined.
+#     Doesn't lose combined accuracy vs the original andthattoo G/A/E
+#     grammar (delta = +0.47pp = 1 problem on n=214, well below noise),
+#     and gains +4pp on LCB v6 (= 2 problems on n=50, design signal not
+#     statistical proof).
+#   - andthattoo G/A/E (the originally-published structured-CoT grammar):
+#     94.5% HE+ / 62.0% LCB / 86.9% combined, tighter think budget
+#     (mean 134 tokens vs DeepSeek's 541). Slightly better on HE+ alone.
+#
+# We ship this single compose with DeepSeek as the recommended grammar
+# because preserving HE+ accuracy while gaining LCB headroom is the most
+# defensible per-workload posture — not because of a categorical accuracy
+# win. The compose itself is
+# grammar-agnostic — the grammar is selected client-side via
+# `extra_body={"structured_outputs": {"grammar": ...}}`. Users who want
+# tighter compression (the ~4× cheaper andthattoo grammar) can pass
+# `tools/grammar-eval/holiday-tagline.gbnf` (extreme 24-token compression,
+# wins LCB) or the original andthattoo G/A/E grammar from
+# https://github.com/andthattoo/structured-cot — see
+# docs/STRUCTURED_COT.md for the full Phase 3 comparison and grammar
+# decision table.
+#
+# Long-text 214K + structured-CoT grammar enforcement in the reasoning
+# channel. Compresses think tokens ~30× with iso-or-better accuracy on
+# coding benchmarks. See docs/STRUCTURED_COT.md for the full bench, the
+# grammar files, and the harness.
+#
+# ⚠️ NOT SAFE FOR IDE-AGENT WORKLOADS WITH TOOL SCHEMAS. Same Cliff 1 mech B
+# inductor compile-path leak as long-text/long-vision (club-3090#16). Use
+# `tools-text.yml` for IDE agents until Genesis PN25 lands default-on.
+#
+# Additional bug surfaced 2026-05-01 PM on this compose specifically:
+# `VLLM_SSM_CONV_STATE_LAYOUT=DS` + spec-decode + `mamba_cache_mode='align'`
+# + `num_accepted_tokens > 1` raises `NotImplementedError` on certain prompt
+# shapes (LCB/LeetCode-style problems triggered it on every request). Filed
+# as Sandermage/genesis-vllm-patches#17. Pure long-form text generation with
+# bounded thinking is unaffected; LCB-style problem statements may crash.
+#
+# Stack: identical to long-text (vLLM nightly + Genesis v7.64 with PN12 anchor
+# sidecar + compile-safe sidecar + PN17 + P104 + P37/P38 + TurboQuant 3-bit KV
+# + MTP n=3 + 185K text-only at 0.975 mem-util) PLUS one extra flag:
+# --structured-outputs-config.enable_in_reasoning true. That single flag is
+# what makes structured-CoT work end-to-end on this stack — vLLM's default
+# is False, which restricts the grammar mask to post-`</think>` content. Bench
+# numbers don't reproduce without it (the model thinks freely regardless of
+# grammar; FREE and FSM produce identical token counts).
+#
+# Recommended client max_tokens: 4096. The whole design point of this compose
+# is bounded thinking — the grammar caps the think block to ~150-300 structured
+# tokens, then leaves comfortable budget for the answer. 4096 is plenty. (Use
+# 8192+ if you're calling this compose with FREE thinking, but at that point
+# you should be on long-text.yml — the structured-outputs flag costs ~10% TPS
+# for nothing if you're not actually using grammar.)
+#
+# When to pick this over long-text:
+#   - You're using grammar-constrained `<think>` blocks (xgrammar GBNF) to
+#     bound reasoning cost. See docs/STRUCTURED_COT.md for the harness +
+#     example grammars (HumanEval+ GOAL/APPROACH/EDGE; LiveCodeBench
+#     GOAL/STATE/ALGO/EDGE/VERIFY; or your own).
+#   - You want per-request bounded thinking with structural guarantee.
+#     PROMPT_TERSE alone (system prompt asking for terse format) often
+#     suffices on easy problems but loses discipline on hard ones; this
+#     compose adds the FSM safety net.
+#   - You're cost-bounded by output token spend and want ~30× cheaper
+#     thinking with no accuracy regression on coding workloads.
+#
+# When NOT to pick this:
+#   - Anything that doesn't use `structured_outputs.{grammar,json,...}` in
+#     extra_body — the flag is harmless then but you gain nothing. Use
+#     long-text instead.
+#   - Workloads where the model's *unstructured* free thinking is itself
+#     the product (chat-of-thought UIs, scratch-pad apps). Bounded thinking
+#     compresses the reasoning into structured slots — fine for code where
+#     you only consume the answer, not the trace.
+#   - Vision input — same as long-text, this drops the vision tower to free
+#     ~1 GB VRAM. Use long-vision-grammar (TODO) if you need both.
+#
+# Measured (full bench 2026-04-30 PM, RTX 3090):
+#   HumanEval+ 164:   FSM 92.7% pass@1, 96 think tok mean, +4.3pp vs FREE,
+#                     30.7× compression vs FREE thinking (2950 tok mean)
+#   LiveCodeBench v6: FSM 66.0% pass@1, 145 think tok mean, +24.0pp vs FREE,
+#                     26.2× compression vs FREE thinking (3797 tok mean)
+#   Sustained TPS:    ~53 (about 10% slower than long-text due to grammar
+#                     mask compute; but per-problem wall-clock 10× faster
+#                     because of the 30× smaller think output)
+#
+# Caveat:
+#   - Some of the +Δpp accuracy gain comes from FSM dodging the
+#     max_tokens=4096 truncation trap rather than pure reasoning gain.
+#     If you re-bench at max_tokens=8192 the headline shrinks toward
+#     andthattoo's published +0.6pp / +14pp. Compression effect is the
+#     reliably-real win. See docs/STRUCTURED_COT.md "Honest caveats".
+#   - Grammar × MTP non-determinism: greedy temp=0 runs on different cards
+#     can produce different verdicts on the same problem (sub-1% rate).
+#   - Cliff 2 (single-prompt ≥50–60K in GDN) still applies — same as
+#     long-text. 218K context is for STEADY-STATE accumulation, not
+#     stuffing 218K of fresh tokens in one request.
+#   - Cliff 1 mech B leak on real coding-agent workloads (OpenCode, Cline)
+#     with mixed sys-prompt + tool-schema prefill: same gap as long-text.
+#     PN12's eager-mode pool is bypassed by inductor-compiled FFN forward.
+#     See issue #16. Workarounds: switch to `tools-text.yml` (75K + fp8 +
+#     PN8 reaches compile path), or add `--enforce-eager` below (~20-30%
+#     TPS hit), or lower `--gpu-memory-utilization` to 0.94.
+#
+# Run with:
+#   cd <repo>/models/qwen3.6-27b/vllm/compose
+#   docker compose -f single/bounded-thinking.yml up -d
+#   # or via switch.sh:
+#   bash scripts/switch.sh vllm/bounded-thinking
+#
+# Then send requests with structured_outputs in extra_body — see
+# docs/STRUCTURED_COT.md for client examples.
+# ===========================================================================
+# Hardware metadata (parsed by scripts/preflight.sh):
+# Requires-min-vram-gb: 24
+# Engine-profile: vllm-nightly-mtp
+# Requires-min-gpu-count: 1
+# Tensor-parallel: 1
+services:
+  vllm-qwen36-27b-bounded-thinking:
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}
+    container_name: "${ESTATE_CONTAINER:-vllm-qwen36-27b-bounded-thinking}"
+    restart: ${CLUB3090_RESTART:-unless-stopped}
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8020}}:8000"
+    volumes:
+      - ${MODEL_DIR:-../../../../../../models-cache}:/root/.cache/huggingface
+      # torch.compile + Triton kernel caches — first boot warms (~60-90 sec);
+      # subsequent boots reuse cached graphs. Pattern from Sander's PROD launch.
+      # Closes club-3090 #22.
+      - ../../../cache/torch_compile:/root/.cache/vllm/torch_compile_cache
+      - ../../../cache/triton:/root/.triton/cache
+      - ../../../patches/genesis/vllm/_genesis:/usr/local/lib/python3.12/dist-packages/vllm/_genesis:ro
+      - ../../../patches/local/qwen3coder_tool_parser_deferred_commit.py:/patches/qwen3coder_tool_parser_deferred_commit.py:ro
+      # workspace_lock_disable — relaxes vllm#39226 strict assertion until
+      # Sandermage's P98 marker fix lands. v0.20-only requirement.
+      # vLLM PR #35936 required-tool fallback (drop when upstream lands).
+      # vLLM PR #35936 required-tool fallback — sidecar pattern (drop when upstream lands).
+      # Bind-mounted at side paths so install.sh can copy into vLLM's site-packages
+      # BEFORE Genesis runs — avoids the RO-mount conflict with Genesis P64/P68/P69
+      # which write to chat_completion/serving.py at vllm-import time. See
+      # patches/vllm-pr35936-required-fallback/install.sh + README.md.
+      - ../../../patches/vllm-pr35936-required-fallback/vllm/entrypoints/openai/chat_completion/serving.py:/etc/club3090/pr35936-chat-completion-serving.py:ro
+      - ../../../patches/vllm-pr35936-required-fallback/vllm/entrypoints/openai/engine/serving.py:/etc/club3090/pr35936-engine-serving.py:ro
+      - ../../../patches/vllm-pr35936-required-fallback/install.sh:/etc/club3090/install-pr35936.sh:ro
+      # vLLM PR #41800 (truncate_prompt_tokens kwarg) overlay — fixes opencode-style
+      # HTTP 400 on get_max_tokens(). No-op on post-fix nightlies.
+      # See ../../../patches/vllm-pr41800-truncate-prompt-tokens/README.md.
+      - ../../../patches/vllm-pr41800-truncate-prompt-tokens/install.sh:/etc/club3090/install-pr41800.sh:ro
+      # froggeric/Qwen-Fixed-Chat-Templates qwen3.6 — fixes 7 default-template
+      # bugs (empty <think></think> spam, </thinking> hallucination, unclosed
+      # think before tool call, no-user-query crash, developer role, etc.).
+      # See docs/UPSTREAM.md "Community templates / model assets" + the row at
+      # https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates
+      - ../../../patches/froggeric-chat-template/chat_template.jinja:/etc/qwen-froggeric-chat-template.jinja:ro
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=${ESTATE_GPUS:-${NVIDIA_VISIBLE_DEVICES:-all}}
+      # Uncomment the next line to pin to a specific GPU (e.g. GPU 0):
+      # - CUDA_VISIBLE_DEVICES=0
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-${OFFLINE:-0}}
+      - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-${OFFLINE:-0}}
+      - VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - NCCL_CUMEM_ENABLE=0
+      - NCCL_P2P_DISABLE=1
+      - VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0
+      - VLLM_NO_USAGE_STATS=1
+      # expandable_segments:True crashes boot on some setups (likely cuMemMap path).
+      # Known: JusefPol on NVLink (PR #31), WSL2 single-card 3090 Ti.
+      # Override via .env: PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
+      - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,max_split_size_mb:512}
+      - VLLM_FLOAT32_MATMUL_PRECISION=high
+      - VLLM_USE_FLASHINFER_SAMPLER=1
+      - OMP_NUM_THREADS=1
+      - CUDA_DEVICE_MAX_CONNECTIONS=8
+      - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+      - VLLM_MARLIN_USE_ATOMIC_ADD=1
+      - TRITON_CACHE_DIR=/root/.triton/cache
+      # FULL Genesis v7.65 PROD env-var set — same as long-text.yml.
+      - GENESIS_ENABLE_P4=1
+      - GENESIS_ENABLE_P58_ASYNC_PLACEHOLDER_FIX=1
+      - GENESIS_ENABLE_P60_GDN_NGRAM_FIX=1
+      - GENESIS_ENABLE_P60B_TRITON_KERNEL=1
+      - GENESIS_ENABLE_P61_QWEN3_MULTI_TOOL=1
+      - GENESIS_ENABLE_P61B_STREAMING_OVERLAP=1
+      - GENESIS_ENABLE_P62_STRUCT_OUT_SPEC_TIMING=1
+      - GENESIS_ENABLE_P64_QWEN3CODER_MTP_STREAMING=1
+      # P65 dropped 2026-05-03 (mutually exclusive with P67/P67b in v7.69)
+      - GENESIS_ENABLE_P66_CUDAGRAPH_SIZE_FILTER=1
+      - GENESIS_ENABLE_P67_TQ_MULTI_QUERY_KERNEL=1
+      - GENESIS_ENABLE_P68_AUTO_FORCE_TOOL=1
+      - GENESIS_ENABLE_P69_LONG_CTX_TOOL_REMINDER=1
+      - GENESIS_P68_P69_LONG_CTX_THRESHOLD_CHARS=50000
+      - GENESIS_ENABLE_P72_PROFILE_RUN_CAP=1
+      - GENESIS_PROFILE_RUN_CAP_M=4128
+      - GENESIS_ENABLE_P74_CHUNK_CLAMP=1
+      - GENESIS_ENABLE_P83=1
+      # P85 dropped 2026-05-03 (requires P84 which we don't enable in v7.69)
+      - GENESIS_ENABLE_P87=1
+      - GENESIS_ENABLE_P91=1
+      - GENESIS_ENABLE_P94=1
+      - GENESIS_ENABLE_P98=1
+      # PN34: active env-opt-in workspace-lock relaxation. P98 above auto-skips
+      # on v0.20 (UNIFORM_SINGLE_TOKEN_DECODE drift-marker false-positive — see
+      # docs/UPSTREAM.md), so PN34 is what's actually firing today. Belt+suspenders
+      # pattern matches default + long-text composes. Propagated from #82 audit.
+      - GENESIS_ENABLE_PN34_WORKSPACE_LOCK_RELAX=1
+      - GENESIS_ENABLE_P99=1
+      - GENESIS_ENABLE_P100=1
+      - GENESIS_ENABLE_P101=1
+      - GENESIS_ENABLE_P103=1
+      - GENESIS_ENABLE_PN8_MTP_DRAFT_ONLINE_QUANT=1
+      - GENESIS_ENABLE_PN9_INDEPENDENT_DRAFTER_ATTN=1
+      - GENESIS_ENABLE_PN11_GDN_AB_CONTIGUOUS=1
+      - GENESIS_ENABLE_PN12_FFN_INTERMEDIATE_POOL=1
+      - GENESIS_ENABLE_PN13_CUDA_GRAPH_LAMBDA_ARITY=1
+      - GENESIS_ENABLE_PN14_TQ_DECODE_OOB_CLAMP=1
+      - GENESIS_ENABLE_PN17_FA2_LSE_CLAMP=1
+      - GENESIS_ENABLE_PN19_SCOPED_MAX_SPLIT=1
+      - GENESIS_ENABLE_PN22_LOCAL_ARGMAX_TP=1
+      - GENESIS_ENABLE_PN26_SPARSE_V=1
+      - GENESIS_ENABLE_PN59_STREAMING_GDN=1
+      - GENESIS_PN26_SPARSE_V_BLOCK_KV=8
+      - GENESIS_PN26_SPARSE_V_NUM_WARPS=4
+      - GENESIS_PN26_SPARSE_V_THRESHOLD=0.01
+      - GENESIS_ENABLE_P38B_COMPILE_SAFE=1
+      - GENESIS_ENABLE_P15B_FA_VARLEN_CLAMP=1
+      - GENESIS_ENABLE_PN25_SILU_INDUCTOR_SAFE=1
+      # PN30 — RE-ENABLED with our local dst-shaped temp fix
+      # (patch_pn30_dst_shaped_temp_fix.py, applied during setup.sh).
+      - GENESIS_ENABLE_PN30_DS_LAYOUT_SPEC_DECODE=1
+      - GENESIS_PREALLOC_TOKEN_BUDGET=4128
+      - GENESIS_BUFFER_MODE=shared
+      # P40 — TQ k8v4 GQA grouping kernel (+15-30% on compute-regime GPUs, L2>=24MB).
+      # Default off (RTX 3090: 6MB L2 = no gain). Enable on RTX 5090/A100/H100.
+      - GENESIS_ENABLE_P40=${GENESIS_ENABLE_P40:-0}
+      # PN54 — GDN contiguous-call deduplication (Cliff 2b OOM mitigation).
+      - GENESIS_ENABLE_PN54=${GENESIS_ENABLE_PN54:-0}
+      # Explicit OFFs to match Sandermage's PROD env-var set verbatim:
+      # P78 (P78_TOLIST_CAPTURE_GUARD) — superseded by our patch_tolist_cudagraph.py
+      # P81 (FP8 block-scaled M<=8) — FP8-specific, no-op on our TQ3 path
+      # P82 — biased on small-batch single-stream Lorbus INT4 + MTP K=3 (Sander PROD)
+      - GENESIS_ENABLE_P78_TOLIST_CAPTURE_GUARD=0
+      - GENESIS_ENABLE_P81_FP8_BLOCK_SCALED_M_LE_8=0
+      - GENESIS_ENABLE_P82=${GENESIS_ENABLE_P82:-0}
+      - GENESIS_P82_THRESHOLD_SINGLE=0.3
+      # VLLM_SSM_CONV_STATE_LAYOUT=DS — RE-ENABLED with our local PN30
+      # dst-shaped temp fix (patch_pn30_dst_shaped_temp_fix.py, applied at
+      # setup time). Without our fix, Sander's PN30 a9977d8 corrupts DS row
+      # strides on spec-decode AL>1. With our fix, PN30 builds destination-
+      # shaped temp via collect_mamba_copy_meta. +6% TPS retained.
+      - VLLM_SSM_CONV_STATE_LAYOUT=DS
+      - VLLM_USE_FUSED_MOE_GROUPED_TOPK=1
+    shm_size: "16gb"
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        set -e
+        pip install xxhash pandas scipy -q
+        # Pre-flight: Genesis patches must be populated. Empty volume mount
+        # = silent no-op apply_all = boot fails later with cryptic upstream
+        # error (e.g. "TurboQuant KV not supported for hybrid models", #13).
+        if [ ! -f /usr/local/lib/python3.12/dist-packages/vllm/_genesis/patches/apply_all.py ]; then
+          echo "ERROR: Genesis patches missing — host volume models/qwen3.6-27b/vllm/patches/genesis/ is empty." >&2
+          echo "       Run from repo root before 'docker compose up':" >&2
+          echo "         bash scripts/setup.sh qwen3.6-27b" >&2
+          exit 1
+        fi
+        # Install PR #35936 overlay BEFORE Genesis runs so Genesis can write hooks
+        # to chat_completion/serving.py without hitting RO-mount errors.
+        bash /etc/club3090/install-pr35936.sh
+        bash /etc/club3090/install-pr41800.sh
+        python3 -m vllm._genesis.patches.apply_all
+        # Tool-parser deferred-commit fix for qwen3coder SSE-silence bug (issue #72).
+        # Drops out when vllm-project/vllm lands the upstream fix.
+        python3 /patches/qwen3coder_tool_parser_deferred_commit.py
+        # VLLM_ENFORCE_EAGER=1 in compose/.env disables CUDA graphs — use on
+        # hardware where Cliff 2 GDN activation spikes occur at runtime.
+        exec vllm serve ${VLLM_ENFORCE_EAGER:+--enforce-eager} "$@"
+      - --
+    command:
+      - --model
+      - /root/.cache/huggingface/qwen3.6-27b-autoround-int4
+      - --served-model-name
+      - qwen3.6-27b-autoround
+      - --quantization
+      - auto_round
+      - --dtype
+      - float16
+      - --tensor-parallel-size
+      - "${TP:-1}"
+      - --pipeline-parallel-size
+      - "${PP:-1}"
+      # 180K + 0.95 — parity with long-text.yml. Backed off from 214K + 0.985
+      # on 2026-05-02 to give activation headroom for the PN12+PN25 FFN pool
+      # residence + DeltaNet GDN buffer. See long-text.yml for full rationale.
+      # WSL2 / laptop users: override via compose/.env (gitignored):
+      #   GPU_MEMORY_UTILIZATION=0.94   # RTX 5090 Laptop: ~1.31 GiB boot overhead
+      #   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False,max_split_size_mb:512
+      #   VLLM_ENFORCE_EAGER=1          # Cliff 2 GDN spike workaround; ~20-30% TPS
+      - --max-model-len
+      - "${MAX_MODEL_LEN:-180000}"
+      - --gpu-memory-utilization
+      - "${GPU_MEMORY_UTILIZATION:-0.95}"
+      - --max-num-seqs
+      - "1"
+      - --max-num-batched-tokens
+      - "4128"
+      - --kv-cache-dtype
+      - "${KV_CACHE_DTYPE:-turboquant_3bit_nc}"
+      - --language-model-only
+      - --trust-remote-code
+      # froggeric chat-template override (see volumes block + docs/UPSTREAM.md)
+      - --chat-template
+      - /etc/qwen-froggeric-chat-template.jinja
+      - --reasoning-parser
+      - qwen3
+      # The whole reason this variant exists. Default is False, which limits
+      # the grammar mask to post-`</think>` content. With this set to true,
+      # xgrammar enforces the GBNF inside the reasoning channel — which is
+      # what structured-CoT is for. Without this flag the grammar is silently
+      # ignored on the `<think>` block and you get FREE-mode token counts.
+      - --structured-outputs-config.enable_in_reasoning
+      - "true"
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - qwen3_coder
+      - --enable-prefix-caching
+      - --enable-chunked-prefill
+      - --no-scheduler-reserve-full-isl
+      - --speculative-config
+      - '{"method":"mtp","num_speculative_tokens":3}'
+      - --override-generation-config
+      - '{"temperature":${TEMP:-${TEMPERATURE:-0.6}},"top_p":${TOP_P:-0.95},"top_k":${TOP_K:-20},"min_p":${MIN_P:-0.0},"repetition_penalty":${REPEAT_PENALTY:-1.0}}'
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"

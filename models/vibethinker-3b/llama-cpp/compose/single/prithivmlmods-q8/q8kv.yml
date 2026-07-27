@@ -1,0 +1,104 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     VibeThinker-3B (WeiboAI — prithivMLmods Q8_0 GGUF; a verifiable-
+#              reasoning SFT+RL fine-tune of Qwen2.5-Coder-3B. Qwen2 dense, GQA 16h/2kv.)
+#   Engine:    llama.cpp (mainline server-cuda, rolling)
+#   Topology:  Single 3090 (TP=1)
+#   Drafter:   none (no MTP head in this GGUF — plain qwen2 conversion; no matched draft model)
+#   KV:        q8_0 K + q8_0 V (storage-only — Q8 weights stay intact; halves the cache vs f16)
+#   Vision:    no (text-only)
+#   Template:  native (GGUF-embedded) via --jinja
+#   Max ctx:   131072 (full native)
+#   Genesis:   N/A — llama.cpp engine
+#   Status:    🐣 Incubating  (pre-experimental — hidden from `switch.sh --list`; see `--list --all`)
+#   Engine-profile: llama-cpp-local
+#   Quality:   tool-free packs (benchlocal, temp 0.6, 2026-06-16, thinking-ON = the model's only
+#              real mode). Reasoning/math: gsm-symbolic-30 30/30 (100%) · reasonmath-15 12/15 (80%).
+#              One-shot coding (sandbox executes the code, no tool-calls): humaneval-plus-30 29/30
+#              (97%) · lcb-v6-30 25/30 (83%, 2 losses = token_limit on hardest). Instruction/format:
+#              instructfollow-15 15/15 (100%) · structoutput-15 12/15 (80%) · dataextract-15 6/15
+#              (40%, genuine extraction ceiling — sweep {temp 0/0.6/1.0}=27/40/27%, value mismatches,
+#              not config). toolcall/hermes/cli/aider N/A (no tool-calling) → verify-full 5/9 by design.
+#   Caveats:   Does NOT pass the standard functional gate (verify-full 5/9, same as the vLLM
+#              sibling): an always-reasoning model (emits <think> before every answer, no way to
+#              disable) that FAILS fixed-small-budget checks + has NO tool-calling. Niche math/code/
+#              STEM reasoning specialist, not a general/agentic serve. llama.cpp's reasoning parser
+#              (deepseek) does NOT split this model's <think> (template doesn't declare reasoning) →
+#              the trace stays inline in `content` (answer after </think> is clean). temp 1.0 (card
+#              default) is unstable on short prompts; TEMP=0.6 is steadier.
+#   Best for:  single-card verifiable reasoning — competition math / coding / STEM. The
+#              performance-max VibeThinker path: ~166 TPS, ~6.2 GB @131K, quality intact. ⭐
+# ---------------------------------------------------------------------------
+# VibeThinker-3B on llama.cpp — single 3090, Q8_0 weights + q8_0 KV, 131K ctx.
+#
+# Why llama.cpp Q8 over the vLLM bf16 sibling (`vllm/vibethinker-3b-single`): on a quant-
+# sensitive 3B, llama.cpp's Q8_0 (near-lossless) keeps quality where vLLM's fp8 weight-quant
+# BROKE it (non-terminating empty output). Measured 2026-06-16, single 3090, q8_0 KV, 131K:
+#   - decode ~166 TPS (vs ~110 on vLLM bf16), narrative ≈ code, CV 0.1%
+#   - prefill ~6,630 tok/s with -b 4096 -ub 2048 (+20% over -b 2048/-ub 512; -ub is the lever,
+#     -b 8192 adds nothing). KV-type/-b tuning here genuinely moves prefill, unlike beellama.
+#   - ~6.2 GB total at full 131K (3.3 GB Q8 weights + ~2.6 GB q8_0 KV + overhead) — light enough
+#     to co-reside with a 27B on one box.
+# No MTP head in this GGUF (plain qwen2 conversion) → no self-spec-dec; not needed at this speed.
+#
+# Reasoning: VibeThinker emits Qwen-style <think>...</think>, but llama.cpp's deepseek reasoning
+# parser doesn't extract it (the Qwen2.5 template doesn't DECLARE reasoning; the model emits the
+# tags as learned behavior). So the trace stays in `content`; the answer after </think> is clean.
+# ⚠️ Always-reasoning: give clients a generous max_tokens (8K-40K) — a tiny budget truncates
+# mid-<think> with no answer. This is intrinsic (no system prompt / reasoning-off control).
+#
+# Override defaults via .env or shell:
+#   MODEL_DIR        host dir mounted as /models  (default: ../../../../../../models-cache)
+#   GGUF_FILE        path under /models  (default: vibethinker-3b-gguf/prithivmlmods-q8/VibeThinker-3B.Q8_0.gguf)
+#   CTX_SIZE         KV pool size        (default: 131072 — full native)
+#   BATCH_SIZE       llama.cpp -b        (default: 4096 — +20% prefill vs 2048)
+#   UBATCH_SIZE      llama.cpp -ub       (default: 2048 — the prefill lever)
+#   KV_TYPE          K and V quant type  (default: q8_0)
+#   NP               parallel slots      (default: 1 — single concurrency)
+#   SERVED_NAME      --alias value       (default: vibethinker-3b)
+#   TEMP/TOP_P/TOP_K/MIN_P                (defaults: 0.6 / 0.95 / 20 / 0.0; card uses temp 1.0 but
+#                                          it's unstable on short prompts — 0.6 is steadier)
+#   REASONING / REASONING_FORMAT         (defaults: on / deepseek — note: doesn't split this model)
+#   REPEAT_PENALTY   anti-loop           (default: 1.0 = card-faithful; set 1.1 if loops appear)
+#   PORT             host port           (default: 8075)
+#   CUDA_VISIBLE_DEVICES  which GPU      (default: 0 — single card, leaves GPU 1 free)
+#   LLAMACPP_IMAGE   engine image        (default: rolling server-cuda; launcher injects engine pin)
+services:
+  llama-cpp-vibethinker-3b:
+    image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda-b9967}
+    container_name: "${ESTATE_CONTAINER:-llama-cpp-vibethinker-3b}"
+    restart: ${CLUB3090_RESTART:-unless-stopped}
+    ports:
+      - "${ESTATE_PORT:-${PORT:-8075}}:8080"
+    volumes:
+      - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
+    environment:
+      - CUDA_VISIBLE_DEVICES=${ESTATE_GPUS:-${CUDA_VISIBLE_DEVICES:-0}}
+    command: >-
+      --host 0.0.0.0
+      --port 8080
+      -m /models/${GGUF_FILE:-vibethinker-3b-gguf/prithivmlmods-q8/VibeThinker-3B.Q8_0.gguf}
+      --alias ${SERVED_NAME:-vibethinker-3b}
+      -c ${CTX_SIZE:-131072}
+      -b ${BATCH_SIZE:-4096}
+      -ub ${UBATCH_SIZE:-2048}
+      -ngl 99
+      -fa on
+      --cache-type-k ${KV_TYPE:-q8_0}
+      --cache-type-v ${KV_TYPE:-q8_0}
+      -np ${NP:-1}
+      --jinja
+      --reasoning ${REASONING:-on}
+      --reasoning-format ${REASONING_FORMAT:-deepseek}
+      --temp ${TEMP:-${TEMPERATURE:-0.6}}
+      --top-p ${TOP_P:-0.95}
+      --top-k ${TOP_K:-20}
+      --min-p ${MIN_P:-0.0}
+      --repeat-penalty ${REPEAT_PENALTY:-1.0}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

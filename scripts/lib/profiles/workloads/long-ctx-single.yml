@@ -1,0 +1,15 @@
+schema_version: 1
+id: long-ctx-single
+display_name: Long context, single stream
+description: Solo agent, max context, prefer accuracy and context safety over throughput.
+priorities:
+  max_ctx: high
+  concurrency: low
+  prefill_throughput: medium
+  decode_throughput: medium
+defaults:
+  max_num_seqs: 1
+  mtp_default: true
+  enable_thinking: false
+requires_features: []
+

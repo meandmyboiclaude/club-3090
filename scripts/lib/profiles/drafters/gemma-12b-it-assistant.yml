@@ -1,0 +1,22 @@
+schema_version: 1
+id: gemma-12b-it-assistant
+display_name: Google Gemma 4 12B MTP assistant
+spec_method: mtp_assistant
+model_compat:
+  - gemma-4-12b
+n_default: 4
+n_max: 4
+download:
+  hf_repo: google/gemma-4-12B-it-assistant
+  size_gb: 0.85
+  format: bf16
+vram_footprint_gb: 0.85
+status: experimental
+# Grounded verbatim from the shipped `--speculative-config` JSON in
+# models/gemma-4-12b/vllm/compose/dual/bf16/mtp.yml
+# ('{"model":"/root/.cache/huggingface/gemma-4-12b-it-assistant","num_speculative_tokens":4}').
+# local_model_path is the container path the compose passes (model-cache
+# volume maps host models-cache -> /root/.cache/huggingface; dir on this
+# stack at /mnt/models/huggingface/gemma-4-12b-it-assistant).
+speculative_config_template: '{"model":"{LOCAL_MODEL_PATH}","num_speculative_tokens":{N}}'
+local_model_path: /root/.cache/huggingface/gemma-4-12b-it-assistant

@@ -1,0 +1,113 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Gemma-4-12B-it (Intel AutoRound INT8 — W8A16 on Ampere)
+#   Engine:    vLLM (vllm/vllm-openai:gemma4-unified — Gemma-4 arch-preview image)
+#   Topology:  Single 3090 (TP=1)
+#   Drafter:   assistant external drafter, n=4 default (google/gemma-4-12B-it-assistant ~0.5B)
+#   KV:        bf16 / auto — single kv-dtype (gemma4-unified has no fp8/INT8-PTH path)
+#   Vision:    yes (gemma4_unified is multimodal; served text-only here)
+#   Max ctx:   256K (262144) — MTP fits the FULL ctx on one card (KV pool ~310K tok,
+#              1.18x at 262K, ~20.7 GB). The ~0.5B drafter stays resident at full ctx.
+#              Config ships max_position_embeddings=262144.
+#   Genesis:   N/A — Genesis is Qwen3-Next-specific
+#   Status:    ⚠️ Production w/ caveats — validated single 3090 sm_86 2026-06-04 (bench +
+#              256K NIAH + 8-pack 105/150 + soak PASS). n-sweep (code-gen, @262144): n2 96.7 /
+#              n3 115.5 / n4 117.0 / n5 122.5 TPS (accept_len 2.62/3.33/3.67/4.06) vs ~50
+#              undrafted. n=4 = robust default (near-peak, matches dual); SPEC_N=5 for code-max.
+#   Caveats:   Ephemeral arch-preview image `vllm/vllm-openai:gemma4-unified` (0.1.dev) — pin a
+#              digest before relying on it. Promotes to ✅ Production when gemma4_unified ships
+#              in a STABLE vLLM release.
+#   Quality:   8-pack 105/150 (70%) thinking-OFF — on par with the bf16 dual's 94/150
+#              (no INT8 degradation; MTP is output-lossless). 2026-06-04.
+#   Best for:  one 3090, Gemma-4-12B INT8 at the FULL 256K + spec-decode speedup — the
+#              high-fidelity single-card vLLM path (~50 TPS undrafted; ~117 TPS code here).
+# ---------------------------------------------------------------------------
+# INT8 single-card + the assistant external-drafter speculative-decode (mirrors
+# the gemma-4-31b / gemma-12b dual --speculative-config). External drafter is
+# tool-grammar-neutral (does NOT amplify attractors like a built-in MTP head).
+# Sweep n via SPEC_N (=2/3/4/5) to find the accept-rate vs draft-cost sweet spot.
+#
+# Weights (base): hf download Intel/gemma-4-12B-it-int8-AutoRound \
+#     --local-dir $MODEL_DIR/gemma-4-12b-autoround-int8
+# Drafter (google, gated):
+#   hf download google/gemma-4-12B-it-assistant --local-dir $MODEL_DIR/gemma-4-12b-it-assistant
+# The arch-preview image tag may be ephemeral — pin a digest before shipping.
+services:
+  vllm-gemma-4-12b-int8-mtp:
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:gemma4-unified}
+    container_name: "${ESTATE_CONTAINER:-vllm-gemma-4-12b-int8-mtp}"
+    restart: ${CLUB3090_RESTART:-unless-stopped}
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8038}}:8000"
+    volumes:
+      - ${MODEL_DIR:-../../../../../../models-cache}:/root/.cache/huggingface
+      - ../../../cache/torch_compile:/root/.cache/vllm/torch_compile_cache
+      - ../../../cache/triton:/root/.triton/cache
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=${ESTATE_GPUS:-${NVIDIA_VISIBLE_DEVICES:-all}}
+      # CUDA-level GPU mask — the runtime-agnostic half of GPU selection
+      # (#610): launch.sh --gpus exports GPU UUIDs here. CDI runtimes (NixOS,
+      # nvidia-ctk cdi) IGNORE NVIDIA_VISIBLE_DEVICES, so this mask is what
+      # actually pins cards there; on the classic runtime the UUID form is
+      # renumbering-proof. Unset → absent (no masking).
+      - CUDA_VISIBLE_DEVICES
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-${OFFLINE:-0}}
+      - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-${OFFLINE:-0}}
+      - VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - NCCL_CUMEM_ENABLE=0
+      - NCCL_P2P_DISABLE=1
+      - VLLM_NO_USAGE_STATS=1
+      - OMP_NUM_THREADS=1
+      - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+      - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+    shm_size: "16gb"
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        exec vllm serve ${VLLM_ENFORCE_EAGER:+--enforce-eager} "$@"
+      - --
+    command:
+      - --model
+      - /root/.cache/huggingface/${MODEL_SUBDIR:-gemma-4-12b-autoround-int8}
+      - --served-model-name
+      - ${SERVED_NAME:-gemma-4-12b-int8}
+      - --quantization
+      - auto_round
+      - --dtype
+      - float16
+      - --tensor-parallel-size
+      - "${TP:-1}"
+      - --pipeline-parallel-size
+      - "${PP:-1}"
+      - --max-model-len
+      - "${MAX_MODEL_LEN:-${CTX:-262144}}"
+      - --gpu-memory-utilization
+      - "${GPU_MEMORY_UTILIZATION:-0.92}"
+      - --max-num-seqs
+      - "${MAX_NUM_SEQS:-4}"
+      - --speculative-config
+      - '{"model":"/root/.cache/huggingface/${SPEC_MODEL_SUBDIR:-gemma-4-12b-it-assistant}","num_speculative_tokens":${SPEC_N:-4}}'
+      - --trust-remote-code
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - gemma4
+      - --reasoning-parser
+      - gemma4
+      - --chat-template
+      - /vllm-workspace/examples/tool_chat_template_gemma4.jinja
+      - --override-generation-config
+      - '{"temperature":${TEMP:-${TEMPERATURE:-1.0}},"top_p":${TOP_P:-0.95},"top_k":${TOP_K:-64},"min_p":${MIN_P:-0.0},"repetition_penalty":${REPEAT_PENALTY:-1.0}}'
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"

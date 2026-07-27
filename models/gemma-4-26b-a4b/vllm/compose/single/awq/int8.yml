@@ -1,0 +1,177 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Gemma 4 26B-A4B MoE (cyankiwi AWQ-4bit, compressed-tensors)
+#   Topology:  Single 3090 (TP=1)
+#   Drafter:   MTP n=4 — google/gemma-4-26B-A4B-it-assistant (external, ~0.97 GB)
+#   KV:        int8_per_token_head (1 byte/token, via vendored PR #40391 overlay)
+#   Vision:    off (limit-mm-per-prompt image=0 audio=0)
+#   Max ctx:   176K default (single-card boot ceiling ~185K WITH the external MTP
+#              drafter loaded at mem_util 0.94; INT8-PTH KV NIAH-clean to 240K on
+#              the no-drafter pool — the ceiling here is VRAM budget, not recall)
+#   Genesis:   N/A — Genesis is Qwen3-Next-specific
+#   Status:    ⚠️ Production w/ caveats
+#   Quality:   8-pack 109/150 (73%, --full --enable-thinking) · 98/150 (65%, think-OFF)
+#                — ToolCall 13/15 · InstructFollow 14/15 · StructOutput 14/15
+#                · DataExtract 9→11/15 · ReasonMath 13→14/15 · BugFind 13/15
+#                · HermesAgent 10/20 · cli-40 12→21/40 (rebench gemma-26ba4b-int8r, 2026-06-06).
+#                On par with gemma-4-31B's think-ON 107/150.
+#   Caveats:   (1) Requires the vendored PR #40391 per-token-head-KV overlay (not in
+#              stock v0.22.0; engine vllm-gemma-stable). (2) max-model-len 176K @
+#              mem_util 0.94 — the 262K ceiling is reachable only WITHOUT the MTP
+#              drafter (its weights + cudagraph capture cost ~86K tok; 0.96 OOMs the
+#              capture tail). (3) think-OFF agentic/extraction is softer (cli-40 30%,
+#              DataExtract 60%) — recovers with thinking (52% / 73%); keep thinking
+#              OFF for tool/agent traffic per docs/FAQ. Gate PASS 2026-06-06:
+#              verify-full ✓ · verify-stress ✓ (NIAH→161K) · soak 20×5 PASS 0-growth.
+# ---------------------------------------------------------------------------
+# Gemma 4 26B-A4B-it (cyankiwi AWQ-4bit) — long-context single-card MoE.
+#
+# Engine: vLLM v0.22.0 (vllm-gemma-stable). The compressed-tensors AWQ (pure
+# uint4) experts resolve to the Marlin WNA16 MoE backend on sm_86, unlike the
+# AutoRound int4-MIXED packing (uint8b128) which has no Ampere kernel.
+#
+# KV format = int8_per_token_head. On Ampere sm_86, Gemma 4's two head_dims
+# (sliding/local 256, global 512) make bf16 the no-overlay default and fp8 KV
+# hardware-dead (fp8_e5m2 hits the gemma4 query-quant allowlist assert; fp8_e4m3
+# hits the Triton fp8e4nv kernel sm_86 doesn't implement). int8_per_token_head
+# is the THIRD KV option: a Triton-backend per-token-head INT8 quant that
+# dispatches to standard torch.int8 ops (not the fp8e4nv kernel), so it runs on
+# sm_86. PR #40391 adds Gemma 4's hybrid-SWA KV page-size handling so the per-
+# token-head (sliding 520 vs global 1032 byte) page sizes unify and the engine
+# boots — it's the ONLY reason this compose is pinned to a vendored overlay.
+# bf16 KV needs no overlay but caps the single-card pool far lower (the prior
+# single/awq path was bf16 + 16K). INT8-PTH (1 byte/token) lifts the single-3090
+# ceiling to long context (NIAH-clean to 240K, 2026-06-06).
+#
+# Vendored overlay — ONE:
+#   vLLM PR #40391 — gemma4 per-token-head KV page-size alignment. STILL OPEN
+#   upstream → REBASED onto stock v0.22.0, delivered as a lean boot-time diff-
+#   apply (~240-line patch + 1 new helper file via install.sh), NOT full-module
+#   mounts. Model-scoped copy of the 31b overlay (patches are <model>/<engine>-
+#   scoped). See ../../../patches/vllm-pr40391-v0.22.0/README.md.
+#     gh api repos/vllm-project/vllm/pulls/40391 --jq '.state, .merged_at'  # drop overlay when MERGED
+#
+# Companion compose:
+#   dual/awq/mtp.yml — vllm/gemma-26ba4b-dual: TP=2, bf16 KV, 262K (no overlay)
+# ===========================================================================
+# Hardware metadata (parsed by scripts/preflight.sh):
+# Requires-min-vram-gb: 24
+# Engine-profile: vllm-gemma-stable
+# Requires-min-gpu-count: 1
+# Tensor-parallel: 1
+# Requires-sm: 7.5+
+services:
+  vllm-gemma-26b-a4b-awq-int8-tp1:
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.22.0}
+    container_name: "${ESTATE_CONTAINER:-vllm-gemma-26b-a4b-awq-int8-tp1}"
+    restart: ${CLUB3090_RESTART:-unless-stopped}
+    ports:
+      - "${ESTATE_PORT:-${PORT:-8040}}:8000"
+    volumes:
+      - ${MODEL_DIR:-../../../../../../models-cache}:/root/.cache/huggingface
+      # Separate cache dirs from the bf16/no-overlay single (the overlay file
+      # set differs → cudagraph capture re-keys on the patched kernel paths).
+      - ../../../cache/torch_compile_int8:/root/.cache/vllm/torch_compile_cache
+      - ../../../cache/triton_int8:/root/.triton/cache
+      # ---- vLLM PR #40391 — LEAN diff-apply overlay (install_script) ----
+      # Mounts the patch dir (the ~240-line #40391 diff + the one new helper
+      # file) and applies it to stock v0.22.0 at boot via install.sh. Drop the
+      # whole dir when #40391 merges. See ../../../patches/vllm-pr40391-v0.22.0/README.md.
+      - ../../../patches/vllm-pr40391-v0.22.0:/etc/club3090/pr40391:ro
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=${ESTATE_GPUS:-${NVIDIA_VISIBLE_DEVICES:-all}}
+      # CUDA-level GPU mask — the runtime-agnostic half of GPU selection
+      # (#610): launch.sh --gpus exports GPU UUIDs here. CDI runtimes (NixOS,
+      # nvidia-ctk cdi) IGNORE NVIDIA_VISIBLE_DEVICES, so this mask is what
+      # actually pins cards there; on the classic runtime the UUID form is
+      # renumbering-proof. Unset → absent (no masking).
+      - CUDA_VISIBLE_DEVICES
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-${OFFLINE:-0}}
+      - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-${OFFLINE:-0}}
+      - VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - NCCL_CUMEM_ENABLE=0
+      - NCCL_P2P_DISABLE=1
+      - VLLM_NO_USAGE_STATS=1
+      - OMP_NUM_THREADS=1
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:512
+      - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+      - TRITON_CACHE_DIR=/root/.triton/cache
+    shm_size: "16gb"
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        # vLLM PR #40391 (Gemma 4 per-token-head KV) — apply the lean diff to
+        # stock v0.22.0 BEFORE vllm imports. Fail-loud: a non-zero exit aborts
+        # boot rather than serving a half-patched engine.
+        bash /etc/club3090/pr40391/install.sh
+        exec vllm serve "$@"
+      - --
+    command:
+      - --override-generation-config
+      - '{"temperature":${TEMP:-${TEMPERATURE:-1.0}},"top_p":${TOP_P:-0.95},"top_k":${TOP_K:-64},"min_p":${MIN_P:-0.0},"repetition_penalty":${REPEAT_PENALTY:-1.0}}'
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --model
+      - /root/.cache/huggingface/gemma-4-26b-a4b-awq-4bit
+      - --served-model-name
+      - gemma-4-26b-a4b-awq
+      - --tensor-parallel-size
+      - "${TP:-1}"
+      - --pipeline-parallel-size
+      - "${PP:-1}"
+      # ---- KV format ----
+      # int8_per_token_head is the only quantized-KV path on Ampere sm_86 (fp8
+      # PTH needs Ada/Blackwell). Requires PR #40391 (mounted above) to boot.
+      - --kv-cache-dtype
+      - "${KV_DTYPE:-int8_per_token_head}"
+      # ---- max-model-len (TP=1, INT8 PTH KV + MTP drafter) ----
+      # 176K default. Live boot ladder 2026-06-06 on 1x 3090 (24 GB):
+      #   - mem_util 0.96: KV pool 232,251 tok BUT OOM'd in the drafter's LATE
+      #     cudagraph-capture pass (240 MiB free, needed 256) — 0.96 + the
+      #     external MTP drafter over-commits a single card.
+      #   - mem_util 0.94: clean drafter capture, KV pool est. max-len 185,504.
+      # So 0.94 is the headroom the drafter graphs need; 176K sits ~9K below the
+      # 185,504 ceiling so a single full-context request never preempts. (The
+      # no-drafter 262K boot was NIAH-clean to 240K — INT8-PTH KV recall quality
+      # is unaffected; this ceiling is a single-card VRAM budget shared with the
+      # drafter, not a recall limit. Drop the drafter to reclaim ctx if needed.)
+      - --max-model-len
+      - "${MAX_MODEL_LEN:-176000}"
+      - --gpu-memory-utilization
+      - "${GPU_MEMORY_UTILIZATION:-0.94}"
+      - --max-num-seqs
+      - "${MAX_NUM_SEQS:-256}"
+      - --max-num-batched-tokens
+      - "4096"
+      - --limit-mm-per-prompt
+      - '{"image":0,"audio":0}'
+      - --trust-remote-code
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - gemma4
+      # Route Gemma-4's <|channel>thought…<channel|> trace into reasoning_content
+      # (vLLM Gemma4ReasoningParser). No-ops with thinking OFF (no channel tokens);
+      # required for verify-full check 6. Matches gemma-4-31b/12b composes.
+      - --reasoning-parser
+      - gemma4
+      - --chat-template
+      - /vllm-workspace/examples/tool_chat_template_gemma4.jinja
+      - --enable-prefix-caching
+      - --enable-chunked-prefill
+      # External MTP assistant drafter — n=4 per gemma-26b-it-assistant DrafterProfile.
+      # Same external-drafter path as the dual; bypasses MoE expert routing.
+      - --speculative-config
+      - '{"model":"/root/.cache/huggingface/gemma-4-26b-a4b-it-assistant","num_speculative_tokens":4}'
+# Engine-profile: vllm-gemma-stable

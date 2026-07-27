@@ -1,0 +1,122 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Qwen 3.6 35B-A3B MoE (AutoRound INT4, ~20 GB weights)
+#   Topology:  Single 3090 (TP=1)
+#   Drafter:   none (smoke compose — built-in MTP head added in a follow-up
+#              once base boot is validated)
+#   KV:        fp8_e5m2 (no TQ3 — Genesis-only, not available here)
+#   Vision:    off (limit-mm-per-prompt image=0 audio=0) for first boot
+#   Max ctx:   8K (conservative — KV pool tight after 20 GB weights on 24 GB card)
+#   Genesis:   N/A — stock vLLM v0.22.0 (vllm-stable); Genesis path retired (#254)
+#   Status:    👁️ Preview — v0.7.3 MoE onboarding smoke
+#   Caveats:   Cliff 2 mitigations UNAVAILABLE (Genesis path retired #254). Do
+#              NOT use past ~21-26K accumulated context — risk of OOM / instability.
+#              The production 35B-A3B path is the dual-card vllm/qwen-35b-a3b-dual
+#              (262K, vision, MTP) on stock v0.22.0; this is the 1x3090 preview.
+# ---------------------------------------------------------------------------
+# Qwen 3.6 35B-A3B (AutoRound INT4) — single-card preview of the Qwen3-Next MoE.
+#
+# Engine: stock vLLM v0.22.0 (vllm-stable), which includes PR #42521
+# (qwen3_5_moe weight loading). The former Genesis-anchored nightly path was
+# retired in #254 (Genesis on hold upstream) — this compose now runs Genesis-free
+# on the immutable stable image. Trade-off: no Genesis Cliff-2 mitigations and no
+# TQ3 KV — fine for low-ctx single-card use, not for long-ctx production.
+#
+# Models:
+#   target: Intel/Qwen3.6-35B-A3B-int4-mixed-AutoRound (path:
+#           qwen3.6-35b-a3b-autoround-int4, arch:
+#           Qwen3_5MoeForConditionalGeneration, ~20 GB on disk)
+#   draft : none on this compose
+#
+# KV format:
+#   - fp8_e5m2 chosen over fp8_e4m3 (Triton fp8e4nv unsupported on sm_86).
+#   - TQ3 not available without Genesis.
+# ===========================================================================
+# Hardware metadata (parsed by scripts/preflight.sh):
+# Requires-min-vram-gb: 24
+# Engine-profile: vllm-stable
+# Requires-min-gpu-count: 1
+# Tensor-parallel: 1
+# Requires-sm: 7.5+
+services:
+  vllm-qwen36-35b-a3b-preview:
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.24.0}
+    container_name: "${ESTATE_CONTAINER:-vllm-qwen36-35b-a3b-preview}"
+    restart: ${CLUB3090_RESTART:-unless-stopped}
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8050}}:8000"
+    volumes:
+      - ${MODEL_DIR:-../../../../../../models-cache}:/root/.cache/huggingface
+      - ../../../cache/torch_compile:/root/.cache/vllm/torch_compile_cache
+      - ../../../cache/triton:/root/.triton/cache
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=${ESTATE_GPUS:-${NVIDIA_VISIBLE_DEVICES:-all}}
+      # CUDA-level GPU mask — the runtime-agnostic half of GPU selection
+      # (#610): launch.sh --gpus exports GPU UUIDs here. CDI runtimes (NixOS,
+      # nvidia-ctk cdi) IGNORE NVIDIA_VISIBLE_DEVICES, so this mask is what
+      # actually pins cards there; on the classic runtime the UUID form is
+      # renumbering-proof. Unset → absent (no masking).
+      - CUDA_VISIBLE_DEVICES
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-${OFFLINE:-0}}
+      - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-${OFFLINE:-0}}
+      - VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - NCCL_CUMEM_ENABLE=0
+      - NCCL_P2P_DISABLE=1
+      - VLLM_NO_USAGE_STATS=1
+      - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+      - OMP_NUM_THREADS=1
+    shm_size: "16gb"
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command:
+      - --override-generation-config
+      - '{"temperature":${TEMP:-${TEMPERATURE:-0.6}},"top_p":${TOP_P:-0.95},"top_k":${TOP_K:-20},"min_p":${MIN_P:-0.0},"repetition_penalty":${REPEAT_PENALTY:-1.0}}'
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --model
+      - /root/.cache/huggingface/qwen3.6-35b-a3b-autoround-int4
+      - --served-model-name
+      - qwen3.6-35b-a3b-autoround
+      - --quantization
+      - auto_round
+      - --dtype
+      - float16
+      - --tensor-parallel-size
+      - "${TP:-1}"
+      - --pipeline-parallel-size
+      - "${PP:-1}"
+      - --max-model-len
+      - "${MAX_MODEL_LEN:-8192}"
+      # 0.95 (was 0.92): v0.22.0 CUDA-graph memory profiling (default since
+      # v0.21.0) trims effective KV — at 0.92 the single-card KV check OOM'd on
+      # v0.22.0 (~20 GB weights leave too little KV on one 24 GB card). 0.95 is
+      # the documented headless-Linux single-card default; WSL2 → 0.94 via .env.
+      - --gpu-memory-utilization
+      - "${GPU_MEMORY_UTILIZATION:-0.95}"
+      - --max-num-seqs
+      - "1"
+      - --max-num-batched-tokens
+      - "4096"
+      - --limit-mm-per-prompt
+      - '{"image":0,"audio":0}'
+      - --kv-cache-dtype
+      - "${KV_CACHE_DTYPE:-fp8_e5m2}"
+      - --trust-remote-code
+      - --reasoning-parser
+      - qwen3
+      - --default-chat-template-kwargs
+      - '{"enable_thinking": false}'
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - qwen3_coder
+      - --enable-prefix-caching
+      - --enable-chunked-prefill

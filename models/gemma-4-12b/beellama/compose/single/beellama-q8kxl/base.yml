@@ -1,0 +1,100 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Gemma-4-12B-it (gemma4_unified — Unsloth UD-Q8_K_XL GGUF, 13 GB)
+#   Engine:    beellama.cpp (Anbeeld llama.cpp fork — v0.3.0 STABLE)
+#   Topology:  Single 3090 (TP=1)
+#   Drafter:   none — NO spec-dec available for gemma-4-12b (see notes). Plain decode.
+#   KV:        q5_0 K + q4_1 V (Anbeeld turbo KV — needs FA_ALL_QUANTS, present in v0.3.0)
+#   Vision:    no (mmproj NOT mounted; gemma4_unified is multimodal — pass MMPROJ_FILE for vision)
+#   Max ctx:   262144 (256K — the model card's FULL context). Trained
+#              max_position_embeddings is 131072, but gemma4's native p-RoPE EXTRAPOLATES
+#              cleanly past it on llama.cpp — NIAH recalls clean at 150K AND 200K
+#              single-card (2026-06-04). The only blocker was llama.cpp's conservative
+#              n_ctx_train cap → lifted by `--override-kv gemma4.context_length=int:<ctx>`
+#              (NOT YaRN — gemma4 ignores rope-scaling overrides). vLLM CANNOT match this:
+#              it CUDA-OOB-crashes on large prefill past 131K (vllm#39914). Q8 @ 256K ≈
+#              15 GB on one 24 GB card. Decode ~34 TPS @ 200K ctx (~47 short-ctx).
+#   Genesis:   N/A — beellama is a llama.cpp-family engine; Genesis is vLLM/Qwen3-Next-specific
+#   Status:    🧪 Experimental — stability soak PASS 2026-06-04 (fresh 20×5: 0/100 silent-empty,
+#              0 MiB growth, 100% TPS retention). Held 🧪 pending MTP — no Gemma-4 spec-dec on
+#              llama.cpp yet (llama.cpp#23398); promote when it lands (stability gate already met).
+#   Engine-profile: beellama-local
+#   Best for:  single-card Gemma-4-12B on one 3090 (frees the 2nd card) + a live check of
+#              the beellama v0.3.0 STABLE image on the gemma4_unified arch.
+# ---------------------------------------------------------------------------
+# WHY no-spec (the honest constraint): gemma-4-12b has NO beellama-usable drafter —
+#   • NO DFlash drafter GGUF published (Anbeeld/gemma-4-12B-it-DFlash-GGUF = 404), and
+#   • NO MTP-GGUF published; beellama's gemma MTP path also fails arch-load
+#     (`unknown model architecture: gemma4_mtp`, seen on the 31B v0.3.0).
+#   So this is plain Q8 decode — functionally ≈ mainline llama.cpp (~53 TPS single-card).
+#   The value here is (a) a single-card gemma path and (b) validating that the v0.3.0
+#   STABLE image serves gemma4 COHERENTLY — the *dev*-branch image (efe856397) served
+#   gemma-4-12b DEGENERATE ("thought thought…"); the stable 96fd1fed is a newer base that
+#   may have picked up mainline's gemma4_unified support. COHERENCE IS THE FIRST TEST.
+#   If a gemma-4-12b DFlash or MTP GGUF later ships → add a dflash.yml / mtp.yml sibling.
+#
+# beellama is a llama.cpp fork; the server ENTRYPOINT is /app/llama-server, so `command:`
+# below is server flags only (same shape as the ik-llama / llama-cpp composes).
+#
+# Quick start:
+#   1. docker pull ghcr.io/anbeeld/beellama.cpp:server-cuda-v0.3.0      (sm_86/89 = 3090/4090)
+#   2. GGUF already on disk: gemma-4-12b-gguf/unsloth-ud-q8kxl/gemma-4-12b-it-UD-Q8_K_XL.gguf
+#      (else: hf download unsloth/gemma-4-12b-it-GGUF gemma-4-12b-it-UD-Q8_K_XL.gguf \
+#         --local-dir $MODEL_DIR/gemma-4-12b-gguf/unsloth-ud-q8kxl)
+#   3. MODEL_DIR=/your/models/dir docker compose -f base.yml up -d
+#   4. curl http://localhost:8067/v1/models  → should list the model.
+#
+# Override defaults via .env or shell:
+#   MODEL_DIR             host dir mounted as /models   (default: ../../../../../../models-cache)
+#   GGUF_FILE            target GGUF under /models      (default: …unsloth-ud-q8kxl/gemma-4-12b-it-UD-Q8_K_XL.gguf)
+#   CTX_SIZE             KV pool size                   (default: 262144 = 256K; --override-kv
+#                        lifts llama.cpp's n_ctx_train cap so native p-RoPE extrapolates. Set
+#                        131072 for the conservative trained max; override-kv tracks this value.)
+#   BATCH_SIZE / UBATCH_SIZE   llama.cpp -b / -ub       (default: 2048 / 512)
+#   KV_TYPE_K / KV_TYPE_V      cache quant              (default: q5_0 / q4_1; set f16/f16 to isolate coherence from KV-quant)
+#   NP                   parallel slots                 (default: 1)
+#   REASONING            thinking gate                  (default: off; 'on' is token-efficient on Gemma-4)
+#   PORT                 host port                      (default: 8067)
+#   CUDA_VISIBLE_DEVICES which GPU                      (default: 0)
+#   MMPROJ_FILE          mmproj GGUF for vision         (unset = text-only)
+#   BEELLAMA_IMAGE       override engine image          (default: official stable server-cuda-v0.3.0)
+
+services:
+  beellama-gemma4-12b:
+    image: ${BEELLAMA_IMAGE:-ghcr.io/anbeeld/beellama.cpp:server-cuda-v0.3.0}
+    container_name: "${ESTATE_CONTAINER:-beellama-gemma4-12b}"
+    restart: unless-stopped
+    ports:
+      - "${ESTATE_PORT:-${PORT:-8067}}:8080"
+    volumes:
+      - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
+    # server target ENTRYPOINT is /app/llama-server — args only below.
+    command: >-
+      --host 0.0.0.0
+      --port 8080
+      -m /models/${GGUF_FILE:-gemma-4-12b-gguf/unsloth-ud-q8kxl/gemma-4-12b-it-UD-Q8_K_XL.gguf}
+      -ngl all
+      --ctx-size ${CTX_SIZE:-262144}
+      --override-kv gemma4.context_length=int:${CTX_SIZE:-262144}
+      -b ${BATCH_SIZE:-2048}
+      -ub ${UBATCH_SIZE:-512}
+      -np ${NP:-1}
+      --kv-unified
+      --cache-type-k ${KV_TYPE_K:-q5_0}
+      --cache-type-v ${KV_TYPE_V:-q4_1}
+      --flash-attn on
+      --cache-ram 0
+      --no-host
+      --jinja
+      --reasoning ${REASONING:-off}
+      --temp ${TEMP:-${TEMPERATURE:-1.0}}
+      --top-k ${TOP_K:-64}
+      --top-p ${TOP_P:-0.95}
+      --min-p ${MIN_P:-0.0}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${ESTATE_GPUS:-${CUDA_VISIBLE_DEVICES:-0}}"]
+              capabilities: [gpu]

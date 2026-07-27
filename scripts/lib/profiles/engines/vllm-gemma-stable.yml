@@ -1,0 +1,57 @@
+schema_version: 1
+id: vllm-gemma-stable
+display_name: vLLM Gemma stable v0.22.0
+type: vllm
+stability: stable
+install:
+  method: docker_image
+  spec: vllm/vllm-openai:v0.22.0
+min_sm: 7.5
+supported_model_families:
+  - gemma4-swa-dense
+  - gemma4-swa-moe        # Gemma 4 26B-A4B MoE — INT8-PTH long-ctx single (#465)
+features:
+  int8_per_token_head: true
+  turboquant_3bit_nc: false
+  marlin_pad_sub_tile_n: false
+  qwen3_coder_tool_parser: false
+feature_provenance:
+  int8_per_token_head: vllm-pr40391-rebased   # 31b dual; the 26b-a4b single carries its own copy (gemma-a4b-vllm-pr40391-rebased)
+supported_kv_formats:
+  - bf16
+  - fp16
+  - fp8_e4m3
+  - int8_per_token_head
+supported_drafters:
+  - mtp
+  - mtp_assistant
+supported_weight_formats:
+  - bf16
+  - fp16
+  - autoround
+  - awq                   # cyankiwi AWQ-4bit weights_variant (gemma-4-26b-a4b MoE, #465)
+  - compressed-tensors    # the AWQ pack's actual `format:` — C14 matches on this (Marlin WNA16 on sm_86)
+required_overlays: []
+vendored_overlays:
+  - id: vllm-pr40391-rebased
+    pr_url: https://github.com/vllm-project/vllm/pull/40391
+    upstream_status: filed
+    upstream_merged_in_version: null
+    local_status: vendored
+    delivery: install_script   # diff-apply at boot (dir models/gemma-4-31b/vllm/patches/vllm-pr40391-v0.22.0)
+    purpose: "Gemma 4 per-token-head KV cache page-size support — the ONLY overlay still vendored. REBASED onto stock v0.22.0 (the v0.21.0-era full-module copies ImportError'd on v0.22.0: they lacked v0.22.0's get_kv_cache_spec_kind) and re-delivered as a ~240-line diff applied at boot, not 7 full-module mounts. Live-validated 2026-05-31 (int8_per_token_head KV inits, KV pool 447K @ 262K, coherent generation). Mounted by the int8 compose only."
+  - id: vllm-gemma4-tool-parser-fixes
+    pr_url: https://github.com/vllm-project/vllm/pull/42006
+    upstream_status: filed
+    upstream_merged_in_version: null
+    local_status: vendored
+    delivery: install_script   # single-file diff-apply at boot (dir vllm-pr42006-v0.22.0); carried by BOTH duals
+    purpose: "Gemma 4 MTP streaming multi-tool-call fix. Briefly dropped 2026-05-31 on a 'minimal surface' call, then RE-INSTATED on BOTH duals the same day once the bug was reproduced live on stock v0.22.0 (a streamed 2+ tool-call response drops the args of every call except the last; non-streaming is fine). Rebased to a ~210-line single-file diff (the formerly-stacked #41991 is now in stock v0.22.0 → dropped)."
+  - id: vllm-pr41800-truncate-prompt-tokens
+    pr_url: https://github.com/vllm-project/vllm/pull/41800
+    upstream_status: merged
+    upstream_merged_in_version: v0.22.0
+    local_status: dropped
+    purpose: "truncate_prompt_tokens compatibility. DROPPED 2026-05-31 — merged upstream 2026-05-06, present in stock v0.22.0 (and v0.21.0)."
+required_genesis: false
+notes: "Gemma 4 vLLM path on immutable v0.22.0. 31B (gemma-bf16-mtp + gemma-int8-mtp) carry the #42006 streaming-multi-tool-call fix; gemma-int8-mtp ALSO carries #40391 (its 262K per-head-KV path). The 26B-A4B MoE single (gemma-26ba4b-single, AWQ/compressed-tensors → Marlin WNA16) ALSO rides #40391 for its INT8-PTH long-ctx KV — a separate model-scoped copy (gemma-a4b-vllm-pr40391-rebased) since patches are <model>/<engine>-scoped. fp8 KV is hardware-dead on Ampere sm_86 — int8_per_token_head is the only quantized-KV path (use bf16 otherwise)."

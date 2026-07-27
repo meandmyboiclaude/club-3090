@@ -1,0 +1,53 @@
+schema_version: 1
+id: diffusiongemma-26b-a4b
+display_name: DiffusionGemma 26B-A4B (discrete-diffusion dLLM)
+# Gemma4-SWA-MoE backbone (structurally identical to gemma-4-26b-a4b) PLUS
+# block-diffusion decode (canvas_length=256, max_denoising_steps=48): denoises a
+# whole block in parallel via bidirectional attention. vLLM's first dLLM (blog
+# 2026-06-10). Arch class DiffusionGemmaForBlockDiffusion.
+family: diffusion-gemma
+hidden_size: 2816
+intermediate_size: 2112
+num_hidden_layers: 30
+# Hybrid SWA pattern: 5 full_attention layers at indices [5, 11, 17, 23, 29]
+num_full_attn_layers: 5
+num_sliding_attn_layers: 25
+num_attn_heads: 16
+num_kv_heads: 8                       # sliding-layer KV head count
+num_global_kv_heads: 2                # global-layer KV head count (asymmetric)
+head_dim_sliding: 256
+global_head_dim: 512
+sliding_window: 1024
+max_ctx_supported: 262144
+attention_k_eq_v: true                # Gemma 4 family default — K and V share storage
+# MoE (from config.json)
+num_experts: 128
+num_experts_per_tok: 8                # config field: top_k_experts
+moe_intermediate_size: 704
+active_params_b: 3.8
+mtp_num_hidden_layers: null           # diffusion LM — no AR spec-dec / MTP
+vision_capable: false                 # text dLLM (we serve text)
+# diffusion-specific (informational; not consumed by kv-calc):
+# diffusion=true, canvas_length=256, max_denoising_steps=48, sampler=entropy_bound
+weights:
+  fp8:
+    path: diffusiongemma-26b-a4b-it-fp8-dynamic
+    local_subdir: diffusiongemma-26b-a4b-it-fp8-dynamic
+    size_gb: 25.3
+    format: compressed-tensors         # float-quantized fp8 → Marlin W8A16 on sm_86 (via the marlin-k-pad K-pad in the overlay)
+    status: experimental
+    hf_repo: RedHatAI/diffusiongemma-26B-A4B-it-FP8-dynamic
+    hf_repos:
+      - RedHatAI/diffusiongemma-26B-A4B-it-FP8-dynamic
+    engine: vllm-diffusion-gemma
+    kind: main
+    verify_glob: "*.safetensors"
+    setup_weights_key: fp8
+default_weight_variant: fp8
+# diffusion LM — no AR drafters
+valid_tp:
+  - 1
+  - 2
+requires_genesis: false               # Gemma 4 family — no DeltaNet quirks
+# Diffusion canvas/KV is NOT modeled by kv-calc → compose entry uses kvcalc_key=SKIP.
+kv_calc_supported: false

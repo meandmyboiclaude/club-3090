@@ -1,0 +1,205 @@
+# git-cliff config for club-3090 — generates GitHub Release notes from
+# commits since the last tag. Categorizes by conventional-commit prefix
+# OR by content keywords (cliff/regression/pin-bump). Both direct-to-master
+# commits and squash-merged PRs flow through the same parsers.
+#
+# Workflow: tag with CalVer (`git tag v2026.MM.DD && git push origin v...`)
+# → .github/workflows/release.yml runs → git-cliff generates the body
+# → release published.
+
+[changelog]
+# Header rendered once at top of CHANGELOG.md (preserved across full regens).
+# Use `--strip header` on `--latest` for GitHub Release bodies so they don't
+# duplicate this intro on every release page.
+header = """
+# Changelog
+
+Auto-generated from commit subjects by [git-cliff](https://git-cliff.org/) on tag
+push. Click any commit SHA below to see the full message body (why / how /
+validation data) — those live in `git log`, not here. Don't hand-edit; the file
+is regenerated on every tag.
+
+**Versioning:** SemVer in `0.x` — treat any minor bump as potentially breaking
+until `1.0`. Past CalVer tags (`v2026.05.09`, `v2026.05.10`) are preserved for
+history; SemVer takes over from `v0.3.0` onward.
+
+| CalVer tag | SemVer equivalent | Date |
+|---|---|---|
+| `v2026.05.09` | (≈ v0.1.0) | 2026-05-09 — first tagged release |
+| `v2026.05.10` | (≈ v0.2.0) | 2026-05-10 — stack reorg + Gemma 4 INT8 PTH unblock |
+
+---
+
+"""
+
+# Body template — rendered per release. For `--latest` (GitHub Release) only
+# the most recent block renders; for full regen of CHANGELOG.md, every tagged
+# block renders in reverse-chronological order.
+#
+# **Subject-line only** — the commit's first line, with a link to the full
+# commit. Full body (why/how/validation data) lives in `git log` and is one
+# click away via the SHA link. Keeps CHANGELOG.md skim-readable.
+body = """
+{% if version %}\
+## {{ version }}{% if timestamp %} — {{ timestamp | date(format="%Y-%m-%d") }}{% endif %}
+
+{% else %}\
+## Unreleased
+
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group }}
+
+{% for commit in commits %}\
+- {{ commit.message | split(pat="\\n") | first | trim }}{% if commit.github.pr_number %} ([#{{ commit.github.pr_number }}](https://github.com/noonghunna/club-3090/pull/{{ commit.github.pr_number }}) by @{{ commit.github.username }}){% else %} ([{{ commit.id | truncate(length=7, end="") }}](https://github.com/noonghunna/club-3090/commit/{{ commit.id }})){% endif %}
+{% endfor %}
+{% endfor %}
+
+{% if version %}[Pin: `git checkout {{ version }}`]{% if previous.version %} · [Full diff](https://github.com/noonghunna/club-3090/compare/{{ previous.version }}...{{ version }}){% endif %}
+{% endif %}
+"""
+
+footer = ""
+
+# Strip leading/trailing whitespace from rendered body.
+trim = true
+
+# Don't include a postprocessor — keep the markdown raw.
+postprocessors = []
+
+[git]
+# Treat the message as conventional-commit format where possible, but don't
+# discard non-conforming messages (filter_unconventional = false).
+conventional_commits = false
+filter_unconventional = false
+
+# Don't split commits on newline — keep multi-line bodies intact.
+split_commits = false
+
+# Parse commits in order they appear in `git log`.
+topo_order = false
+
+# Sort commits within each group by date descending.
+sort_commits = "newest"
+
+# Skip merge commits — squash-merged PRs show as regular commits, --no-ff
+# merges create noise. (PR titles still come through via the squashed commit.)
+filter_commits = false
+
+# Patterns for matching commit messages → groups. First match wins, so order
+# matters: PREFIX-BASED parsers run first (deterministic, low false-positive),
+# keyword-based parsers act as fallback for unprefixed messages (catches
+# `Document Cliff 1 closure` or `Add Gemma 4` style un-prefixed commits).
+#
+# Patterns match against the full commit message (subject + body), so we must
+# anchor with `^` to scope to subject when we want a prefix match.
+commit_parsers = [
+    # --- Skip merge-commit headers ---
+    # Squashed-merge PR commits already carry the proper title; --no-ff merges
+    # add noise.
+    { message = "^Merge pull request", skip = true },
+    { message = "^Merge branch", skip = true },
+    { message = "^Merge remote-tracking", skip = true },
+
+    # --- Skip release-machinery noise ---
+    # The release.yml workflow auto-commits a CHANGELOG.md regen with this
+    # subject after every tag push. Hide it from release notes — it's pure
+    # machine traffic, not a user-visible change.
+    { message = "^chore\\(changelog\\): regenerate for v", skip = true },
+
+    # --- Prefix-based (deterministic, anchored to subject line) ---
+    # New models / new compose paths
+    { message = "^models[(:]", group = "🎯 New models + serving paths" },
+    { message = "^composes?[(:]", group = "🎯 New models + serving paths" },
+
+    # Benchmarks
+    { message = "^bench[(:]", group = "📊 Benchmarks + cross-rig data" },
+
+    # Scripts / tooling / CI
+    { message = "^scripts?[(:]", group = "🛠️ Scripts + tooling" },
+    { message = "^tools?[(:]", group = "🛠️ Scripts + tooling" },
+    { message = "^ci[(:]", group = "🛠️ Scripts + tooling" },
+    { message = "^build[(:]", group = "🛠️ Scripts + tooling" },
+
+    # Bug fixes
+    { message = "^fix[(:]", group = "🐛 Bug fixes" },
+    { message = "^bugfix[(:]", group = "🐛 Bug fixes" },
+    { message = "^hotfix[(:]", group = "🐛 Bug fixes" },
+
+    # Features
+    { message = "^feat[(:]", group = "✨ Features" },
+    { message = "^feature[(:]", group = "✨ Features" },
+
+    # Documentation
+    { message = "^docs?[(:]", group = "📝 Documentation" },
+    { message = "^README", group = "📝 Documentation" },
+
+    # Maintenance
+    { message = "^chore[(:]", group = "🧹 Maintenance" },
+    { message = "^refactor[(:]", group = "🧹 Maintenance" },
+    { message = "^style[(:]", group = "🧹 Maintenance" },
+    { message = "^test[(:]", group = "🧹 Maintenance" },
+
+    # --- Keyword-based fallback (only fires if no prefix matched) ---
+    # Pin bumps — keyword-based since they sometimes use no prefix.
+    { message = "(?i)^.*\\b(pin bump|bump (genesis|vllm|sglang|llama|llamacpp)|genesis v[0-9])", group = "🔧 Pin bumps + upstream" },
+
+    # Un-prefixed model/compose additions (e.g. `Add Gemma 4 + DFlash compose`)
+    { message = "(?i)^(add|introduce)\\s+(gemma|qwen|llama|mixtral|deepseek|kimi|qwopus|new model|.*compose)", group = "🎯 New models + serving paths" },
+    { message = "(?i)^add[/]?vllm-", group = "🎯 New models + serving paths" },
+
+    # Documentation written without `docs:` prefix (e.g. `AGENTS.md: codify...`,
+    # `Add docs/CLIFFS.md`, `Document Cliff 1 closure`).
+    { message = "^[A-Z][A-Z_]+\\.md[:\\s]", group = "📝 Documentation" },
+    { message = "^Add docs[/]", group = "📝 Documentation" },
+    { message = "^Document\\s+", group = "📝 Documentation" },
+    { message = "^README", group = "📝 Documentation" },
+
+    # Cliffs / regressions in subject line (anchored with ^.* to require it
+    # appear in the subject, not just the body)
+    { message = "(?i)^.*\\b(cliff|regression|gotcha)\\b", group = "⚠️ Cliffs, gotchas, regressions" },
+
+    # Tool/script names used as prefix (e.g. `power-cap-sweep:`, `setup.sh:`,
+    # `verify-full.sh:`) — these are de-facto scripts/tooling commits.
+    { message = "^[a-z][a-z0-9_-]*\\.(sh|py|toml|yml)[:\\s]", group = "🛠️ Scripts + tooling" },
+    { message = "^power-cap-sweep[:\\s]", group = "🛠️ Scripts + tooling" },
+    { message = "^verify-[a-z]+[:\\s]", group = "🛠️ Scripts + tooling" },
+    { message = "^launch\\.sh", group = "🛠️ Scripts + tooling" },
+    { message = "^preflight[:\\s]", group = "🛠️ Scripts + tooling" },
+    { message = "^Add scripts[/]", group = "🛠️ Scripts + tooling" },
+    { message = "^Split verify-", group = "🛠️ Scripts + tooling" },
+
+    # Charts / changelog / results — documentation-adjacent
+    { message = "^charts?[:\\s]", group = "📝 Documentation" },
+    { message = "^changelog[:\\s]", group = "📝 Documentation" },
+    { message = "^results?[:\\s]", group = "📊 Benchmarks + cross-rig data" },
+    { message = "^docs\\s*[+]", group = "📝 Documentation" },
+
+    # Substantive verbs without prefix — common in this repo's history
+    { message = "(?i)^restructure", group = "🧹 Maintenance" },
+    { message = "(?i)^audit\\b", group = "🧹 Maintenance" },
+    { message = "(?i)^remove\\b", group = "🧹 Maintenance" },
+    { message = "(?i)^drop\\b", group = "🧹 Maintenance" },
+    { message = "(?i)^migrate", group = "🧹 Maintenance" },
+    { message = "(?i)^reconcile", group = "🧹 Maintenance" },
+    { message = "(?i)^(ship|push|land)\\s+", group = "✨ Features" },
+    { message = "(?i)^verify\\s+", group = "✨ Features" },
+    { message = "(?i)\\bclosure\\b", group = "✨ Features" },
+    { message = "(?i)\\bship verified\\b", group = "✨ Features" },
+
+    # --- Catch-all ---
+    # Everything that didn't match — keeps unconventional messages visible
+    # rather than silently dropped.
+    { message = ".*", group = "🧹 Other" },
+]
+
+# Tag pattern for CalVer (year.month.day)
+tag_pattern = "v[0-9]+\\.[0-9]+\\.[0-9]+"
+
+# When generating, ignore tags that don't match the pattern.
+ignore_tags = ""
+
+# GitHub remote — used by --github-repo or for PR/contributor enrichment.
+[remote.github]
+owner = "noonghunna"
+repo = "club-3090"

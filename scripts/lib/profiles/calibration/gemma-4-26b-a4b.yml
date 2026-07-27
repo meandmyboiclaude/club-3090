@@ -1,0 +1,8 @@
+schema_version: 1
+model: gemma-4-26b-a4b
+# The gemma-4-26b-a4b AWQ slugs (vllm/gemma-26ba4b-single, vllm/gemma-26ba4b-dual)
+# use kvcalc_key="SKIP" — experimental, not kv-calc-projected — so no calibration
+# rows are required. The prior AutoRound/nightly anchor rows were dropped with the
+# #326 AWQ-on-stable-v0.22.0 wiring (2026-06-06). Add measured rows here if these
+# slugs are promoted past experimental (rebench-full + soak).
+rows: []

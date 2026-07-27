@@ -1,0 +1,112 @@
+name: Numbers from your rig
+description: Cross-rig TPS / context-ceiling contribution. We collect these and add them to BENCHMARKS.
+title: "[bench] "
+labels: ["bench-contribution"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for benching! Your numbers help us tell which results are
+        rig-dependent vs. universal. High-signal contributions land in our
+        benchmarks table with attribution.
+
+        The fastest way to share everything we need:
+
+        ```bash
+        bash scripts/report.sh --full > my-rig.md
+        ```
+
+        That captures rig hardware (GPUs, power caps, NVLink, driver, OS), stack
+        version (commit, Genesis pin, vLLM image SHA), boot log highlights (engine
+        config, KV pool sizing, patches applied), runs **verify-full + verify-stress
+        7/7 + SOAK_MODE=continuous + canonical bench** — all in one ~35-min pass.
+        Paste the file contents below.
+
+        Soak-continuous is the only test that catches Cliff 2b (multi-turn
+        accumulating-context cliff at ~25K tokens). Until upstream lands a fix,
+        we ask for it on every cross-rig contribution. See
+        [docs/CLIFFS.md](https://github.com/noonghunna/club-3090/blob/master/docs/CLIFFS.md).
+
+        If 35 min is too long, swap `--full` for `--bench` to skip verify/stress/soak
+        — the bench numbers alone are still useful, but flag in Notes that you
+        haven't run soak-continuous so we don't assume Cliff 2b is clean on your rig.
+
+        The bench prompts are pinned so your numbers are directly comparable to
+        ours:
+
+        > **Narrative prompt:** "Write a detailed 800-word essay explaining transformer attention."
+        > `max_tokens=1000, temperature=0.6, top_p=0.95, top_k=20, enable_thinking=false`
+        >
+        > **Code prompt:** "Write a Python implementation of quicksort with comments explaining each step."
+        > `max_tokens=800`, same sampling.
+
+  - type: textarea
+    id: rig-bench-report
+    attributes:
+      label: Rig + bench report — paste contents of `bash scripts/report.sh --full` (or `--bench` if you couldn't run the full chain)
+      description: |
+        Full output. The script captures hardware, stack, boot state, AND canonical
+        bench numbers in one pass.
+
+        Paths, hostname, username, and HF tokens are redacted by default. Use
+        `--no-redact` only for internal sharing.
+      render: markdown
+    validations:
+      required: true
+
+  - type: dropdown
+    id: soak-verdict
+    attributes:
+      label: Soak-continuous verdict
+      description: |
+        Which is closest to your rig's soak-continuous result? **Required field.** The
+        verdict is the single most-cited number when triaging cross-rig contributions —
+        it's how we know if Cliff 2b is open on your rig class. See
+        [docs/CLIFFS.md](https://github.com/noonghunna/club-3090/blob/master/docs/CLIFFS.md).
+
+        - If you ran `bash scripts/report.sh --full`, soak ran automatically — pick PASS or FAIL
+          based on the `[soak]` block in the report you pasted above.
+        - If you ran `--bench` only, you can run soak after-the-fact:
+          `bash scripts/soak-test.sh --continuous` (auto-detects endpoint + container).
+        - If you genuinely can't run it, pick "Skipped" + give a reason in Notes.
+      options:
+        - PASS — clean (no errors, 0 silent-empty turns, <200 MiB VRAM growth)
+        - PASS — borderline (within thresholds but worth flagging — see Notes)
+        - FAIL — VRAM accretion or growth-threshold overshoot (Cliff 2b suspect)
+        - FAIL — silent-empty turns or errors mid-soak
+        - Skipped — rig couldn't spare ~25 min (explain in Notes)
+        - Not yet run — will follow up in a comment
+    validations:
+      required: true
+
+  - type: textarea
+    id: soak-continuous
+    attributes:
+      label: Soak-continuous summary excerpt (optional — paste the `[soak]` block if not in main report)
+      description: |
+        If you used `bash scripts/report.sh --full` above, soak-continuous is
+        already in the main report — leave this blank.
+
+        If you ran soak separately, paste just the `[soak]` summary block:
+
+        ```bash
+        bash scripts/soak-test.sh --continuous   # auto-detects endpoint + container
+        ```
+      render: markdown
+    validations:
+      required: false
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes (optional)
+      description: |
+        Anything beyond what `report.sh --bench` captures — surprising failures,
+        custom flags you tested, comparison context vs other configs, etc.
+
+        **If you couldn't run `scripts/report.sh --bench`,** share what you can:
+
+        - GPU configuration + power caps
+        - Compose variant + club-3090 commit
+        - Output of `bash scripts/bench.sh`
+        - Peak VRAM per card during bench (`nvidia-smi --query-gpu=memory.used --format=csv`)
