@@ -498,6 +498,9 @@ services:
       # NOT the same as message.reasoning_content — that field does not exist on
       # this pin (renamed to `reasoning`); a client reading it gets null always.
       - GENESIS_ENABLE_BUG158_REASONING_TOKENS=${GENESIS_ENABLE_BUG158_REASONING_TOKENS:-0}
+      - GENESIS_ENABLE_BUG077_REPETITION_DETECT=${GENESIS_ENABLE_BUG077_REPETITION_DETECT:-0}
+      - BUG077_REP_SCOPE=${BUG077_REP_SCOPE:-nothink}
+      - GENESIS_ENABLE_PN136_INBOUND_NEUTRALIZE=${GENESIS_ENABLE_PN136_INBOUND_NEUTRALIZE:-0}
       # ===== MUST-INCLUDE WAVE-1 (2026-07-14): pristine(107)∩qwen3.6-templates + house dedup =====
       # USER: enable everything, none skipped; crash/quality-breakers FIXED not ditched.
       # PN77=0 (degenerate token-soup, quality killer). PN399 deduped→/fixes PN79 (IMA gone).
@@ -960,6 +963,10 @@ services:
         # counting method -> byte-inert on content/reasoning/tool_calls by
         # construction. DARK unless GENESIS_ENABLE_BUG158_REASONING_TOKENS=1.
         python3 /fixes/patch_bug158_reasoning_token_attribution.py
+        # BUG-077 repetition detect (nothink lane) + PN136 inbound control-token
+        # neutraliser: both DARK unless their GENESIS_ENABLE_* flag is 1.
+        python3 /fixes/patch_bug077_repetition_detection_default.py
+        python3 /fixes/patch_pn136_inbound_control_token_neutralize.py
         python3 /fixes/patch_pn71_reasoning_alias.py
         python3 /fixes/patch_pn72_streaming_toolcall_content_recover.py
         # [PN76 — 2026-06-26] Engine-level deferred tool-call commit: holds the <tool_call>
