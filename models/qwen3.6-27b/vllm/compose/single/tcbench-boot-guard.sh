@@ -18,11 +18,22 @@
 # exactly the documented manual recovery. Never bricks boot (always exits 0);
 # logs every decision to the journal. Covers the whole stale-degraded-boot
 # class (BUG-126 note, 112-patch class), not just cold-JIT.
+#
+# BUG-172 / review 2026-07-27 M2: RestartCount>0 alone cannot tell "engine died
+# from cold JIT" (recycle helps) from "a /fixes applier refused to apply"
+# (recycle can NEVER help — /fixes is a read-only bind mount, so the fresh
+# container re-runs the same applier against the same drifted anchor and dies
+# identically, costing 2x WAIT_S and destroying the container for nothing).
+# The banked log carries the discriminator: every applier prints
+# "[patch_<name>] FATAL ..." before exit 1. Grep for it and skip the recycle.
 set -u
 C=vllm-tcbench-8021
 COMPOSE_DIR=/home/user/club-3090/models/qwen3.6-27b/vllm/compose/single
 COMPOSE_FILE=tcbench8021.yml
 WAIT_S=${TCBENCH_BOOT_GUARD_WAIT_S:-900}
+# Matches the /fixes applier convention: LOG = "[patch_<module>]" (35 appliers)
+# plus patch_oom_resilience.py's "[oom_resilience]".
+FATAL_RE='\[(patch_[A-Za-z0-9_]+|oom_resilience)\] FATAL'
 
 log() { echo "[tcbench-boot-guard] $*"; }
 
@@ -52,10 +63,25 @@ case "$outcome" in
     ;;
   restarted)
     log "WARN mid-boot engine death detected (RestartCount>0, BUG-128 class)"
-    log "banking container log, then ONE clean recycle (stop -> rm -> fresh up)"
+    log "banking container log"
     ts=$(date +%Y%m%d-%H%M%S)
-    podman logs "$C" > "/home/user/shared/tcbench-bootguard-recycle-$ts-container.log" 2>&1 \
+    banked="/home/user/shared/tcbench-bootguard-recycle-$ts-container.log"
+    podman logs "$C" > "$banked" 2>&1 \
       || log "WARN could not bank container log"
+
+    # Cheap discriminator (M2): an applier FATAL is not the cold-JIT class.
+    if grep -Eq "$FATAL_RE" "$banked" 2>/dev/null; then
+      log "PATCH-FATAL a /fixes applier refused to apply — NOT recycling"
+      grep -Ehm 5 "$FATAL_RE" "$banked" 2>/dev/null \
+        | while IFS= read -r line; do log "PATCH-FATAL   $line"; done
+      log "PATCH-FATAL a recycle cannot fix anchor drift (/fixes is a read-only"
+      log "PATCH-FATAL bind mount; a fresh container re-runs the same applier)."
+      log "PATCH-FATAL fix the applier under /home/user/club-3090/fixes, then"
+      log "PATCH-FATAL restart the unit. Banked log: $banked"
+      exit 0
+    fi
+
+    log "no applier FATAL in the log — ONE clean recycle (stop -> rm -> fresh up)"
     podman stop -t 30 "$C" >/dev/null 2>&1 || true
     podman rm -f "$C" >/dev/null 2>&1 || true
     if ! (cd "$COMPOSE_DIR" && podman-compose -f "$COMPOSE_FILE" up -d); then

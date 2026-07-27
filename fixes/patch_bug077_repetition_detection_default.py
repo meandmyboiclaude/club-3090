@@ -158,6 +158,39 @@ def _fatal(msg):
     sys.exit(1)
 
 
+def _anchor_counts(src, anchor):
+    """(total, at_column_0) occurrences of `anchor`.
+
+    Column-anchoring is the difference between a loud FATAL and a quiet
+    half-apply: a bare ``class ChatCompletionRequest(`` also matches an INDENTED
+    occurrence (nested class, a doc/example string), and splicing a column-0
+    helper body next to an indented match produces an IndentationError at
+    ``vllm serve`` import time rather than here. Requiring the single match to
+    start at a line boundary makes an upstream re-indent fail this applier.
+    """
+    total = 0
+    col0 = 0
+    idx = src.find(anchor)
+    while idx != -1:
+        total += 1
+        if idx == 0 or src[idx - 1] == "\n":
+            col0 += 1
+        idx = src.find(anchor, idx + 1)
+    return total, col0
+
+
+def _require_unique_col0(src, anchor, label):
+    total, col0 = _anchor_counts(src, anchor)
+    if total != 1:
+        _fatal(f"{label} anchor {anchor!r} found {total}x, expected 1")
+    if col0 != 1:
+        _fatal(
+            f"{label} anchor {anchor!r} matches but NOT at column 0 (indented "
+            f"occurrence) — the target has been re-indented/re-nested; refusing "
+            f"to splice a module-level helper next to it"
+        )
+
+
 def main():
     if not CHAT.exists():
         _fatal(f"missing target {CHAT}")
@@ -175,18 +208,32 @@ def main():
             "the native repetition detector; the graft has nothing to default"
         )
 
-    n_helper = src.count(ANCH_HELPER)
-    if n_helper != 1:
-        _fatal(f"helper anchor {ANCH_HELPER!r} found {n_helper}x, expected 1")
-    n_call = src.count(ANCH_CALL)
-    if n_call != 1:
-        _fatal(f"call anchor {ANCH_CALL!r} found {n_call}x, expected 1")
+    _require_unique_col0(src, ANCH_HELPER, "helper")
+    _require_unique_col0(src, ANCH_CALL, "call")
 
     src = src.replace(ANCH_HELPER, HELPER_SRC.lstrip("\n") + "\n" + ANCH_HELPER, 1)
     src = src.replace(ANCH_CALL, REPL_CALL, 1)
 
+    # Compile BEFORE writing (house model: patch_bug158_…py:265-268). Without
+    # this a drifted anchor writes a syntactically broken module, the applier
+    # exits 0, `set -e` is satisfied, and the boot only dies ~30 appliers later
+    # at `exec vllm serve` import — the quiet half-apply class (review M1).
+    try:
+        compile(src, str(CHAT), "exec")
+    except SyntaxError as exc:
+        _fatal(f"patched file does not compile: {exc}")
+
     CHAT.write_text(src)
-    print(f"{LOG} applied to {CHAT} (dark: GENESIS_ENABLE_BUG077_REPETITION_DETECT unset)")
+    # Informational only — the AUTHORITATIVE state is the env at REQUEST time
+    # (the injected helper re-reads it on every call, so a flag flip needs no
+    # re-patch). This line reports the env as seen by THIS applier process.
+    _armed = os.environ.get("GENESIS_ENABLE_BUG077_REPETITION_DETECT", "0") == "1"
+    _state = (
+        "ARMED: GENESIS_ENABLE_BUG077_REPETITION_DETECT=1 at apply time"
+        if _armed
+        else "dark: GENESIS_ENABLE_BUG077_REPETITION_DETECT unset/0 at apply time"
+    )
+    print(f"{LOG} applied to {CHAT} ({_state})")
     return 0
 
 

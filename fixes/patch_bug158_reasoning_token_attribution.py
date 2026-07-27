@@ -277,10 +277,16 @@ def main():
             except OSError:
                 pass
 
-    print(
-        f"{LOG} applied to {TARGET} "
-        "(dark: GENESIS_ENABLE_BUG158_REASONING_TOKENS unset)"
+    # Informational only — the AUTHORITATIVE state is the env at REQUEST time
+    # (the injected helper re-reads it on every call, so a flag flip needs no
+    # re-patch). This line reports the env as seen by THIS applier process.
+    _armed = os.environ.get("GENESIS_ENABLE_BUG158_REASONING_TOKENS", "0") == "1"
+    _state = (
+        "ARMED: GENESIS_ENABLE_BUG158_REASONING_TOKENS=1 at apply time"
+        if _armed
+        else "dark: GENESIS_ENABLE_BUG158_REASONING_TOKENS unset/0 at apply time"
     )
+    print(f"{LOG} applied to {TARGET} ({_state})")
     return 0
 
 
