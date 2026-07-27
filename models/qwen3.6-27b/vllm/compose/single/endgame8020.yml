@@ -192,8 +192,8 @@ services:
       # 2026-07-26. Consequence worth knowing: setting the canonical name to 0
       # is a real kill-switch even if a stale legacy export says 1.
       - GENESIS_ENABLE_H119_LENS_ROUTER=1
-      - PN119_MODE=shadow
-      - PN119_TDEEP=0.5
+      - PN119_MODE=${PN119_MODE:-enforce}
+      - PN119_TDEEP=${PN119_TDEEP:-0.495}
       - GENESIS_PN119_PROBE=/pn119/probe.npz
       - PN119_SINK=/pn119-sink
       # [H119 route-consumer 2026-07-25] the ENFORCE decision's BUDGET half.
@@ -214,9 +214,9 @@ services:
       # respected — as a hard cap 800 truncates the upper half of the spend
       # distribution. DEEP=10240 = GENESIS_PN100_BUDGET_CEIL, the champion path's
       # own ceiling (binds only on runaways at ~1575 rtok/req measured).
-      - GENESIS_ENABLE_H119_ROUTE_BUDGET=${GENESIS_ENABLE_H119_ROUTE_BUDGET:-0}
+      - GENESIS_ENABLE_H119_ROUTE_BUDGET=${GENESIS_ENABLE_H119_ROUTE_BUDGET:-1}
       - H119_DEEP_BUDGET=${H119_DEEP_BUDGET:-10240}
-      - H119_LEAN_BUDGET=${H119_LEAN_BUDGET:-800}
+      - H119_LEAN_BUDGET=${H119_LEAN_BUDGET:-1600}
       - TRITON_CACHE_DIR=/root/.triton/cache
       # Genesis opt-ins
       # [BUG-071 CORRECTED 2026-07-14] GENESIS_PREALLOC_TOKEN_BUDGET=16384 REMOVED —
@@ -722,12 +722,12 @@ services:
       # ("around Step N, check whether your answer is settled"), so continuing is
       # framed as normal rather than as an exception.
       - GENESIS_PN100_TIER_BUDGETS=0,10240,10240,10240
-      - GENESIS_PN102_STATIC_BANNER=1
+      - GENESIS_PN102_STATIC_BANNER=${GENESIS_PN102_STATIC_BANNER:-0}
       # [v5 2026-07-19, BENCH ONLY] floorless stop + progress-conditional
       # continue. v4's checkpoint delay was measured as a hard floor (0 items
       # <500 rtok vs 36 in old auto); the unconditional keep-going fed the deep
       # band (73.4% of spend @ 60% acc). Takes precedence over STATIC_BANNER.
-      - GENESIS_PN102_BANNER_V5=1
+      - GENESIS_PN102_BANNER_V5=${GENESIS_PN102_BANNER_V5:-0}
       # Starvation backstop: one continuation resuming INSIDE the think region.
       # Non-streaming, bounded to one pass, every failure path returns the
       # original response unchanged. Reaches above the generous cap only for the
