@@ -54,6 +54,57 @@ with PN100's validated flat grid — because a sub-neutral k starves lean items
 (-6pt on a live full-100). Reclaiming below the flat grid is out of scope, and
 the k_min clamp IS the "decay only while k > 1.0" rule.
 
+THE GRANT-SATURATION KNEE — A BOUND ROW ABOVE IT IS INFORMATIONLESS
+--------------------------------------------------------------------
+MEASURED on this model (USER-confirmed accuracy-vs-cap sweep):
+
+    2048 -> 0.770   4096 -> 0.797   6144 -> 0.800   8192 -> 0.803
+
+Marginal accuracy is FLAT above ~6K reasoning tokens — the whole 4096->8192
+doubling buys +0.6pt. And the deep tail consumes ANY grant it is handed, so it
+keeps producing `bound` outcomes no matter how large the grant gets. Those two
+facts together mean a bound outcome at a grant already >= the knee carries no
+"needs more" information: it is the tail spending what it was given, at a cap
+where more tokens do not buy accuracy.
+
+So a bound row whose OWN grant is >= `--grant-knee` (default 6144, env
+PN162_GRANT_KNEE — the same name the consumer reads) votes ZERO for bumping and
+is counted in the audit field `bound_saturated`. It still appears in telemetry
+and in `n_evidence_total`: it happened, it is just not evidence for a bump.
+Slack decay is untouched, so a saturated bucket now DECAYS toward the knee and
+then toward neutral instead of climbing — which is exactly the live symptom
+this rule was written for (buckets 12/15/16 at k 2.6-3.0, i.e. grants
+7.5K-11.7K, with the old evidence still pushing up).
+
+Saturation is evaluated on the ROW's grant, independently of the era filter;
+era-consistency is unchanged. The consumer enforces the same knee on the grant
+itself (`pn162_budget_cal.knee_clamp`), so the two halves are safe to deploy in
+either order: updater-only stops the climb, consumer-only caps the grant
+regardless of what the ledger says.
+
+THE LANE KEY — THE EXPANSIVE LANE MUST NOT TEACH THE FRUGAL LANE
+-----------------------------------------------------------------
+The v5/deep banner free-runs (no announced N; v5-style treatments inflate rtok
+heavily); the v3/lean banner announces N and the model paces to it. Under a
+steps-ONLY key those two populations share a bucket, so the deep lane's bound
+votes raise a k that is then applied to anchored lean requests that never asked
+for it. The default key schema is therefore `steps_lane` (ledger schema 2):
+one cell per `(steps bucket, lane)`, key `"<bucket>|l<lane>"`, lane taken from
+the sink row's `route` (anything that is not "deep" — including a missing
+route — is "lean", the conservative side).
+
+A thin lane cell falls back to NEUTRAL 1.0, NOT to the steps-marginal cell:
+that marginal cell IS the mixture this key exists to kill. Concretely, under
+`steps_lane` the updater writes no marginal keys at all and credits no
+marginal votes, and `bucket_keys` returns a single key with no fallback.
+
+MIGRATION. On the first pass after the schema changes, the existing
+steps-keyed entries seed the LEAN cells only; the deep cells start at neutral
+1.0. That is deliberate and asymmetric: the historical mixture was dominated by
+the anchored lane at the low buckets, so carrying it into lean loses least,
+while starting deep at neutral means the expansive lane must re-earn every
+token from its own evidence. Counted as `migrated_lean_cells`.
+
 THE ERA-CONSISTENCY FILTER
 --------------------------
 A sink row is evidence about the grant IT WAS SERVED, not about the grant the
@@ -172,7 +223,7 @@ SINK_DEFAULT = "/home/user/shared/needfit/pn119-sink"
 LEDGER_DEFAULT = "/home/user/shared/needfit/pn119-live/pn162-ledger.json"
 CURSOR_DEFAULT = "/home/user/shared/needfit/pn162-cursor.json"
 
-LEDGER_SCHEMA = 1
+LEDGER_SCHEMA = 2         # 2 = lane-keyed cells (was 1: steps-only)
 CURSOR_SCHEMA = 1
 MAX_BUCKET = 16           # must equal pn162_budget_cal.MAX_BUCKET
 MAX_STEPS_SEARCH = 64     # ceil 10240 / 260 / k_min -> ~56
@@ -193,6 +244,11 @@ DEFAULTS = dict(
     # -6pt on the all-armed full-100. Decay now converges to neutral, not below.
     k_min=1.0,
     k_max=3.0,
+    # 2026-07-27 MEASURED accuracy-vs-cap knee (see the docstring). A bound row
+    # at or above this grant votes 0 — the deep tail eats any grant, and
+    # accuracy is flat up there, so the outcome carries no need-more signal.
+    # A MODEL PROPERTY to re-derive per model, NOT a tuning knob. 0 disables.
+    grant_knee=6144,
     max_step=1.5,          # per-pass cap on |k_new / k_old|
     min_generated=32,
     censor_slack=13,
@@ -203,7 +259,10 @@ DEFAULTS = dict(
     highstep_min=10,
     budget_floor=128,
     budget_ceil=10240,
-    key_schema="steps",     # "steps" | "steps_ptok"  (see bucket_keys)
+    # "steps" | "steps_ptok" | "steps_lane"  (see bucket_keys). DEFAULT since
+    # 2026-07-27: lane-keyed, so the free-running deep lane cannot teach the
+    # anchored lean lane's budget.
+    key_schema="steps_lane",
     min_cell=30,            # composite cells below this are not written
     # BUG-169 orphan bounds — how long an unpaired score line may pin the
     # cursor before it is dropped. See read_sink_since for what each one
@@ -265,8 +324,36 @@ def bucket_of(steps) -> int:
 # on it whenever a cell is missing or too thin.
 KEY_SCHEMA_STEPS = "steps"
 KEY_SCHEMA_STEPS_PTOK = "steps_ptok"
-KEY_SCHEMAS = (KEY_SCHEMA_STEPS, KEY_SCHEMA_STEPS_PTOK)
+KEY_SCHEMA_STEPS_LANE = "steps_lane"
+KEY_SCHEMAS = (KEY_SCHEMA_STEPS, KEY_SCHEMA_STEPS_PTOK, KEY_SCHEMA_STEPS_LANE)
 DEFAULT_PTOK_BANDS = (256, 1024, 4096)
+
+LANE_DEEP = "deep"
+LANE_LEAN = "lean"
+LANES = (LANE_LEAN, LANE_DEEP)
+
+
+def lane_of(route) -> str:
+    """Sink `route` -> lane key part. Anything that is not "deep" is "lean".
+
+    Note the asymmetry with the consumer's `lane_of`, which returns None for an
+    absent lane: here the row EXISTS and has to be filed somewhere, and "lean"
+    is the conservative side (the anchored lane's k is the one that must not be
+    inflated). The consumer, by contrast, is deciding whether to apply a k at
+    all, and an unknown lane there means identity.
+    """
+    s = str(route or "").strip().lower()
+    return LANE_DEEP if s == LANE_DEEP else LANE_LEAN
+
+
+def schema_has_marginal(schema) -> bool:
+    """Does this schema's lookup chain end at the bare steps bucket?
+
+    False for `steps_lane`: that marginal cell is the deep/lean MIXTURE the
+    lane axis exists to separate, so neither side may fall back to it and the
+    updater must not write or credit it. A thin lane cell is simply neutral.
+    """
+    return schema != KEY_SCHEMA_STEPS_LANE
 
 
 def band_index(value, edges) -> int:
@@ -282,9 +369,19 @@ def band_index(value, edges) -> int:
     return len(edges)
 
 
-def bucket_keys(steps, ptok=None, schema=KEY_SCHEMA_STEPS, bands=None) -> list:
-    """Lookup chain, most specific first, marginal steps bucket last."""
+def bucket_keys(steps, ptok=None, schema=KEY_SCHEMA_STEPS, bands=None,
+                lane=None) -> list:
+    """Lookup chain, most specific first, marginal steps bucket last.
+
+    `steps_lane` returns ONE key and no marginal fallback — see
+    `schema_has_marginal`. Mirrors `pn162_budget_cal.bucket_keys` exactly, with
+    one deliberate difference the cross-check encodes: the updater always has a
+    row to file, so `lane_of` maps an unknown route to "lean"; the consumer
+    returns an EMPTY chain (identity) when it cannot derive the lane.
+    """
     b = bucket_of(steps)
+    if schema == KEY_SCHEMA_STEPS_LANE:
+        return [f"{b}|l{lane_of(lane)}"]
     keys = []
     if schema == KEY_SCHEMA_STEPS_PTOK:
         idx = band_index(ptok, bands or DEFAULT_PTOK_BANDS)
@@ -302,17 +399,69 @@ def lookup_k(kmap: dict, keys: list, cfg: dict) -> float:
 
 
 # ── the PN100 grant grid, and its inverse ───────────────────────────────────
-def pn100_grant(steps: int, k: float, cfg: dict) -> int:
-    """Reproduce `_continuous_budget`'s k-path exactly (auto_budget.py)."""
+def _flat_raw(steps: int, cfg: dict) -> float:
+    """PN100's open-loop raw budget for `steps` — everything except k."""
     raw = steps * cfg["tok_per_step"]
     if cfg["highstep_mult"] > 1.0 and steps >= cfg["highstep_min"]:
         raw *= cfg["highstep_mult"]
-    raw *= k
-    return max(cfg["budget_floor"], min(cfg["budget_ceil"], round100(raw)))
+    return raw
+
+
+def pn100_grant(steps: int, k: float, cfg: dict, clamp_knee: bool = False) -> int:
+    """Reproduce `_continuous_budget`'s k-path exactly (auto_budget.py).
+
+    `clamp_knee=True` reproduces the CONSUMER-HALF-DEPLOYED variant, i.e. with
+    `pn162_budget_cal.knee_clamp` applied: `min(grant, max(knee, flat))`, and
+    only when k > 1. Both variants matter to this file because the two halves
+    can be live in either order — see `invert_candidates` and `era_stale`.
+    """
+    flat_raw = _flat_raw(steps, cfg)
+    raw = flat_raw * k
+    g = round100(raw)
+    if clamp_knee and k > 1.0:
+        knee = int(cfg.get("grant_knee") or 0)
+        if knee > 0:
+            g = min(g, max(knee, round100(flat_raw)))
+    return max(cfg["budget_floor"], min(cfg["budget_ceil"], g))
+
+
+def k_eff_max(steps: int, cfg: dict) -> float:
+    """The largest multiplier the consumer's knee clamp lets a bucket REALISE.
+
+        k_eff_max(b) = min(k_max, max(1.0, knee / flat_grant(b)))
+
+    A ledger k above this still exists — the clamp is on the grant, not on k —
+    but it buys nothing. Bucket 15 (flat 3900) tops out at 6144/3900 = 1.58,
+    i.e. 6144 tokens rather than the 11700 a k of 3.0 asks for.
+    """
+    knee = int(cfg.get("grant_knee") or 0)
+    flat = round100(_flat_raw(steps, cfg))
+    if knee <= 0 or flat <= 0:
+        return float(cfg["k_max"])
+    return min(float(cfg["k_max"]), max(1.0, knee / float(flat)))
+
+
+def grant_variants(steps: int, k: float, cfg: dict) -> list:
+    """`[(grant, effective_raw)]` — unclamped first, knee-clamped second.
+
+    The engine serves the unclamped grant on a boot that predates the knee
+    clamp and the clamped one after it, and NOTHING in a sink row says which
+    boot served it. Matching a row against both is what keeps the inversion
+    correct across the boot boundary; without it every post-boot saturated row
+    falls off the grid onto the naive quotient and is credited to a bucket that
+    never sized it.
+    """
+    flat_raw = _flat_raw(steps, cfg)
+    raw = flat_raw * k
+    out = [(pn100_grant(steps, k, cfg), raw)]
+    clamped = pn100_grant(steps, k, cfg, clamp_knee=True)
+    if clamped != out[0][0]:
+        out.append((clamped, float(clamped)))
+    return out
 
 
 def invert_candidates(grant: int, kmap: dict, cfg: dict,
-                      ptok=None) -> list:
+                      ptok=None, lane=None) -> list:
     """Every bucket whose CURRENT calibrated grant is `grant`, with vote weights.
 
     Inverts THROUGH the live key map so PN162's own multiplier cannot make the
@@ -348,30 +497,33 @@ def invert_candidates(grant: int, kmap: dict, cfg: dict,
     schema = cfg.get("key_schema", KEY_SCHEMA_STEPS)
     cands = []
     for b in range(1, MAX_STEPS_SEARCH + 1):
-        keys = bucket_keys(b, ptok, schema)
+        keys = bucket_keys(b, ptok, schema, None, lane)
         k = lookup_k(kmap, keys, cfg)
-        if pn100_grant(b, k, cfg) != grant:
+        # Either variant matching is a match: a row served before the knee
+        # clamp shipped carries the unclamped grant, one served after carries
+        # the clamped one (`grant_variants`).
+        hits = [raw for g, raw in grant_variants(b, k, cfg) if g == grant]
+        if not hits:
             continue
-        raw = b * tps * (cfg["highstep_mult"]
-                         if (cfg["highstep_mult"] > 1.0
-                             and b >= cfg["highstep_min"]) else 1.0) * k
-        cands.append((abs(raw - grant), abs(b - naive), b, keys))
+        cands.append((min(abs(raw - grant) for raw in hits),
+                      abs(b - naive), b, keys))
     if not cands:
         b = bucket_of(naive)
-        return [(b, bucket_keys(b, ptok, schema), 1.0)]
+        return [(b, bucket_keys(b, ptok, schema, None, lane), 1.0)]
     cands.sort()
     w = 1.0 / len(cands)
     return [(b, keys, w) for _d, _n, b, keys in cands]
 
 
-def invert_steps(grant: int, kmap: dict, cfg: dict, ptok=None) -> int:
+def invert_steps(grant: int, kmap: dict, cfg: dict, ptok=None,
+                 lane=None) -> int:
     """The single best bucket for `grant` — telemetry, keys and the era filter.
 
     Control does NOT go through this: an ambiguous grant splits its vote across
     `invert_candidates`. Ordering is nearest UNROUNDED calibrated grant, then
     nearest naive quotient, then lowest bucket.
     """
-    return bucket_of(invert_candidates(grant, kmap, cfg, ptok)[0][0])
+    return bucket_of(invert_candidates(grant, kmap, cfg, ptok, lane)[0][0])
 
 
 def _clamp_k(k, cfg) -> float:
@@ -627,26 +779,52 @@ def writable_keys(window: list, cfg: dict) -> set:
 
     This is the whole occupancy rule. A thin cell is simply never written, and
     the consumer's most-specific-first walk then lands on the marginal bucket.
+
+    EXCEPT under `steps_lane`, which has no marginal cell at all: the fallback
+    there is NEUTRAL 1.0, because the steps-only cell is the deep/lean mixture
+    the lane axis exists to separate. A thin lane cell is therefore not written
+    and its traffic runs on the flat PN100 grid until the cell fills.
     """
+    schema = cfg.get("key_schema", KEY_SCHEMA_STEPS)
+    if schema == KEY_SCHEMA_STEPS_LANE:
+        occ: dict = {}
+        for r in window:
+            for key in (r.get("_keys") or []):
+                occ[key] = occ.get(key, 0) + 1
+        return {k for k, n in occ.items() if n >= cfg["min_cell"]}
     marg = {str(r["_bucket"]) for r in window if r.get("_bucket")}
-    if cfg.get("key_schema", KEY_SCHEMA_STEPS) == KEY_SCHEMA_STEPS:
+    if schema == KEY_SCHEMA_STEPS:
         return marg
-    occ: dict = {}
+    occ = {}
     for r in window:
         for key in (r.get("_keys") or [])[:-1]:      # composite parts only
             occ[key] = occ.get(key, 0) + 1
     return marg | {k for k, n in occ.items() if n >= cfg["min_cell"]}
 
 
-def _pick_key(keys: list, bucket, allowed: set) -> str:
+def _pick_key(keys: list, bucket, allowed: set, marginal: bool = True):
+    """The ledger key a row's evidence lands on, or None.
+
+    None only happens under a schema with no marginal fallback (`steps_lane`)
+    when the row's cell has not yet cleared occupancy. The row is then held out
+    of control entirely rather than dumped into a mixed bucket — see
+    `writable_keys`.
+    """
     for key in (keys or []):
         if key in allowed:
             return key
+    if not marginal:
+        return None
     return str(bucket or 1)
 
 
 def _row_key(row: dict, allowed: set) -> str:
-    return _pick_key(row.get("_keys"), row.get("_bucket"), allowed)
+    """The key a row REPORTS under. Never None — telemetry files every row,
+    including the ones held out of control by the occupancy floor."""
+    key = _pick_key(row.get("_keys"), row.get("_bucket"), allowed)
+    if key in allowed or not (row.get("_keys") or []):
+        return key
+    return (row.get("_keys") or [key])[-1]
 
 
 def era_stale(row: dict, kmap: dict, cfg: dict) -> bool:
@@ -680,13 +858,40 @@ def era_stale(row: dict, kmap: dict, cfg: dict) -> bool:
         return False
     keys = row.get("_keys") or bucket_keys(b, row.get("prompt_tok"),
                                            cfg.get("key_schema",
-                                                   KEY_SCHEMA_STEPS))
-    now = pn100_grant(int(b), lookup_k(kmap, keys, cfg), cfg)
-    return grant < now if outcome == "bound" else grant > now
+                                                   KEY_SCHEMA_STEPS),
+                                           None, row.get("_lane"))
+    k = lookup_k(kmap, keys, cfg)
+    # The knee clamp may or may not be live in the engine (the two halves ship
+    # independently), so "what this bucket grants NOW" is a RANGE, not a point.
+    # Take the conservative end in each direction — the filter only exists to
+    # discard evidence, and discarding a live-era row is the expensive mistake.
+    now_un = pn100_grant(int(b), k, cfg)
+    now_kn = pn100_grant(int(b), k, cfg, clamp_knee=True)
+    if outcome == "bound":
+        return grant < min(now_un, now_kn)
+    return grant > max(now_un, now_kn)
+
+
+def grant_saturated(row: dict, cfg: dict) -> bool:
+    """Is this a BOUND row at a grant where more tokens buy no accuracy?
+
+    Evaluated on the ROW's own grant — a property of the observation, not of
+    the current ledger, and therefore independent of the era filter. See the
+    module docstring for the measured knee.
+    """
+    if row.get("_outcome") != "bound":
+        return False
+    knee = int(cfg.get("grant_knee") or 0)
+    if knee <= 0:
+        return False
+    try:
+        return int(row.get("budget_grant") or 0) >= knee
+    except (TypeError, ValueError):
+        return False
 
 
 _ZERO = ("bound", "slack", "ok", "bound_eff", "slack_eff",
-         "bound_stale", "slack_stale")
+         "bound_stale", "slack_stale", "bound_saturated")
 
 
 def update_buckets(rows: list, kmap: dict, cfg: dict,
@@ -705,17 +910,24 @@ def update_buckets(rows: list, kmap: dict, cfg: dict,
     """
     out = {key: _clamp_k(k, cfg) for key, k in kmap.items()}
     per: dict = {}
+    marginal = schema_has_marginal(cfg.get("key_schema", KEY_SCHEMA_STEPS))
     for r in rows:
         if r.get("_outcome") not in ("bound", "slack", "ok"):
             continue
         stale = bool(r.get("_stale"))
+        sat = bool(r.get("_saturated"))
         # One row is ONE vote, split across the buckets its grant is ambiguous
         # between (`invert_candidates`). Unambiguous rows — the overwhelming
         # majority — are a single (bucket, keys, 1.0).
         alias = r.get("_alias") or [(r["_bucket"], r.get("_keys"), 1.0)]
         for b, keys, w in alias:
-            key = _pick_key(keys, b, allowed) if allowed is not None else str(b)
-            marg = str(b)
+            if allowed is not None:
+                key = _pick_key(keys, b, allowed, marginal)
+                if key is None:
+                    continue      # thin lane cell — held out, never mixed in
+            else:
+                key = (keys or [str(b)])[0] if not marginal else str(b)
+            marg = str(b) if marginal else key
             # Credit the APPLIED key and, when they differ, the marginal bucket
             # too. Without the second credit a marginal bucket stops seeing any
             # traffic the moment its composite cells open, and it is precisely
@@ -726,8 +938,15 @@ def update_buckets(rows: list, kmap: dict, cfg: dict,
             for kk in ({key, marg} if key != marg else {key}):
                 c = per.setdefault(kk, {z: 0.0 for z in _ZERO})
                 c[r["_outcome"]] += w
-                if r["_outcome"] in ("bound", "slack"):
-                    c[r["_outcome"] + ("_stale" if stale else "_eff")] += w
+                if r["_outcome"] == "bound":
+                    # Saturation is checked FIRST and is exclusive: a bound row
+                    # above the knee carries no need-more information no matter
+                    # which era served it, so it is the whole story about that
+                    # row. bound == bound_eff + bound_stale + bound_saturated.
+                    c["bound_saturated" if sat else
+                      ("bound_stale" if stale else "bound_eff")] += w
+                elif r["_outcome"] == "slack":
+                    c["slack_stale" if stale else "slack_eff"] += w
     beta, gamma = float(cfg["beta"]), float(cfg["gamma"])
     for key, c in per.items():
         k0 = _clamp_k(out.get(key, 1.0), cfg)
@@ -823,6 +1042,9 @@ def roll_audit(prev: dict, per: dict, kmap: dict, kprev: dict,
             "slack_eff": round(c.get("slack_eff", 0), 3),
             "bound_stale": round(c.get("bound_stale", 0), 3),
             "slack_stale": round(c.get("slack_stale", 0), 3),
+            # bound rows at a grant >= the knee: real, telemetered, and worth
+            # zero for bumping. See `grant_saturated`.
+            "bound_saturated": round(c.get("bound_saturated", 0), 3),
             "step": round(float(c.get("step", 1.0)), 6),
             "k_prev": round(_clamp_k(kprev.get(key, 1.0), cfg), 4),
             "k": round(_clamp_k(kmap.get(key, 1.0), cfg), 4),
@@ -831,20 +1053,34 @@ def roll_audit(prev: dict, per: dict, kmap: dict, kprev: dict,
 
 
 def telemetry(window: list, kmap: dict, kprev: dict, per: dict,
-              oracle: dict, cfg: dict, audit: dict | None = None) -> dict:
-    """Per-bucket estimator-error + anchor telemetry. Records, never steers."""
+              oracle: dict, cfg: dict, audit: dict | None = None,
+              allowed: set | None = None) -> dict:
+    """Per-CELL estimator-error + anchor telemetry. Records, never steers.
+
+    The reporting axis is the ledger key a row lands on, so it follows the key
+    schema: bare steps buckets under "steps", and one row per (bucket, lane)
+    cell under the default "steps_lane" — where a steps-only rollup would be
+    the very mixture the lane key exists to separate.
+    """
     tps = float(cfg["tok_per_step"])
+    schema = cfg.get("key_schema", KEY_SCHEMA_STEPS)
+    marginal = schema_has_marginal(schema)
     edges = oracle.get("edges") or []
     by: dict = {}
     for r in window:
-        by.setdefault(r["_bucket"], []).append(r)
-    # Telemetry reports on the marginal steps axis. `update_buckets` always
-    # credits the marginal key as well as the applied one, so no rollup is
-    # needed — and summing composite cells in here would double-count.
-    per_marg = {k: v for k, v in per.items() if "|" not in k}
+        key = (str(r["_bucket"]) if marginal
+               else _row_key(r, allowed if allowed is not None else set()))
+        by.setdefault(key, []).append(r)
+    # Under a marginal schema `update_buckets` always credits the marginal key
+    # as well as the applied one, so reporting on it needs no rollup — and
+    # summing composite cells in here would double-count. Under `steps_lane`
+    # the cell IS the key, so `per` is read directly.
+    per_marg = ({k: v for k, v in per.items() if "|" not in k} if marginal
+                else dict(per))
     out = {}
-    for b in sorted(by):
-        rs = by[b]
+    for key in sorted(by, key=lambda k: (int(str(k).split("|")[0]), str(k))):
+        rs = by[key]
+        b = bucket_of(str(key).split("|")[0])
         rtoks = [r["rtok"] for r in rs if r["rtok"] is not None]
         grants = [r["budget_grant"] for r in rs if r["budget_grant"]]
         ans = [max(0, (r["generated"] or 0) - (r["rtok"] or 0))
@@ -857,9 +1093,9 @@ def telemetry(window: list, kmap: dict, kprev: dict, per: dict,
             bd = oracle.get("bands", {}).get(str(band_of(r.get("score"), edges)))
             if bd and bd.get("announce_bias") is not None:
                 biases.append(bd["announce_bias"])
-        pc = per_marg.get(str(b), {})
-        au = (audit or {}).get(str(b), {})
-        out[str(b)] = {
+        pc = per_marg.get(key, {})
+        au = (audit or {}).get(key, {})
+        out[key] = {
             "n": len(rs),
             "bound": sum(1 for r in rs if r["_outcome"] == "bound"),
             "slack": sum(1 for r in rs if r["_outcome"] == "slack"),
@@ -871,12 +1107,17 @@ def telemetry(window: list, kmap: dict, kprev: dict, per: dict,
             # voted, and how many were evidence about a dead k regime.
             "new_bound_stale": round(pc.get("bound_stale", 0), 3),
             "new_slack_stale": round(pc.get("slack_stale", 0), 3),
+            # bound rows at/above the accuracy knee: counted, never voting.
+            "new_bound_saturated": round(pc.get("bound_saturated", 0), 3),
             # cumulative evidence behind this bucket's k, and the step this
             # pass actually applied (post-rail, post-clamp). Audit trail.
             "n_evidence_total": au.get("n_evidence_total", 0),
             "step_applied": au.get("step", 1.0),
-            "k": round(_clamp_k(kmap.get(str(b), 1.0), cfg), 4),
-            "k_prev": round(_clamp_k(kprev.get(str(b), 1.0), cfg), 4),
+            "k": round(_clamp_k(kmap.get(key, 1.0), cfg), 4),
+            "k_prev": round(_clamp_k(kprev.get(key, 1.0), cfg), 4),
+            # the EFFECTIVE ceiling the consumer's knee clamp puts on this
+            # cell: k_eff_max = min(k_max, knee / flat_grant(bucket)).
+            "k_eff_max": _r2(k_eff_max(b, cfg)),
             "grant_med": _r2(_pct(grants, 0.5)),
             "rtok_med": _r2(_pct(rtoks, 0.5)),
             "rtok_p80": _r2(_pct(rtoks, 0.8)),
@@ -967,6 +1208,45 @@ def load_kmap(ledger: dict, cfg: dict) -> dict:
     return out
 
 
+def migrate_kmap(kmap: dict, was_schema, now_schema) -> tuple[dict, int]:
+    """Carry a steps-keyed ledger into the lane schema, LEAN ONLY.
+
+    Returns `(kmap, n_migrated)`; a no-op (and 0) unless the ledger on disk was
+    steps-keyed and this pass writes `steps_lane`.
+
+    The seeded lane is asymmetric on purpose. The historical steps cell is a
+    MIXTURE of both lanes, and it is dominated by the anchored lean lane at the
+    low buckets where most traffic lives — so seeding lean carries the least
+    wrong number forward, while the deep cells start at neutral 1.0 and have to
+    re-earn every token from their own evidence. Seeding deep from the mixture
+    would do the opposite: hand the expansive lane a k that the frugal lane's
+    votes helped build, on the side where over-granting is most expensive.
+
+    An existing lane-keyed entry is never overwritten, so re-running after a
+    partial pass cannot clobber learned cells.
+
+    DETECTION IS BY CONTENT, NOT BY THE HEADER (`was_schema` is advisory). A
+    pass that ran between the default flip and this function landing wrote
+    `key_schema: "steps_lane"` over a still-bare-keyed `bucket` map — and a
+    header-gated migration would then refuse to touch it for ever, stranding
+    every learned k behind a key the consumer cannot read (there is no marginal
+    fallback under this schema, §2.5). Keying off the bare keys themselves
+    makes the migration self-healing on the next tick.
+    """
+    if now_schema != KEY_SCHEMA_STEPS_LANE:
+        return kmap, 0
+    out = {k: v for k, v in kmap.items() if "|l" in k}
+    n = 0
+    for key, val in kmap.items():
+        if "|" in key:
+            continue                       # steps_ptok cells do not carry over
+        lane_key = f"{key}|l{LANE_LEAN}"
+        if lane_key not in out:
+            out[lane_key] = val
+            n += 1
+    return out, n
+
+
 def run_pass(cfg: dict, sink: str, ledger_path: str, cursor_path: str,
              dry_run: bool = False) -> dict:
     """One idempotent pass. Returns the ledger it wrote (or would write)."""
@@ -981,6 +1261,9 @@ def run_pass(cfg: dict, sink: str, ledger_path: str, cursor_path: str,
     if schema not in KEY_SCHEMAS:
         raise SystemExit(f"[pn162] unknown --key-schema {schema!r}; "
                          f"expected one of {KEY_SCHEMAS}")
+    kprev, migrated = migrate_kmap(kprev, ledger.get("key_schema"), schema)
+    if migrated:
+        counts["migrated_lean_cells"] = migrated
 
     new_rows, offsets = read_sink_since(
         sink, cursor.get("offsets") or {}, cfg, counts)
@@ -991,23 +1274,30 @@ def run_pass(cfg: dict, sink: str, ledger_path: str, cursor_path: str,
             r["_bucket"] = None
             r["_keys"] = None
         else:
+            # The lane is the row's own H119 route — the axis that keeps the
+            # free-running deep lane out of the anchored lean lane's cell.
+            r["_lane"] = lane_of(r.get("route"))
             r["_alias"] = invert_candidates(r["budget_grant"], kprev, cfg,
-                                            r.get("prompt_tok"))
+                                            r.get("prompt_tok"), r["_lane"])
             r["_bucket"] = r["_alias"][0][0]
             r["_keys"] = r["_alias"][0][1]
             # Era-consistency: judged against the k the ledger carries NOW
             # (kprev — the same map the inversion used), never against the k
             # this pass is about to write.
             r["_stale"] = era_stale(r, kprev, cfg)
+            # Saturation: a property of THIS row's grant, era-independent.
+            r["_saturated"] = grant_saturated(r, cfg)
     scored = [r for r in new_rows if r["_bucket"] is not None]
     counts["new_rows"] = len(new_rows)
     counts["new_scored"] = len(scored)
     counts["era_stale"] = sum(1 for r in scored if r.get("_stale"))
+    counts["bound_saturated"] = sum(1 for r in scored if r.get("_saturated"))
 
     # Rolling window: last N SCORED rows, carried in the cursor so a pass never
     # rereads consumed sink bytes. Trimmed to the fields telemetry needs.
     keep = ("ts", "route", "score", "rtok", "generated", "cap_hit",
-            "budget_grant", "prompt_tok", "arm", "_outcome", "_bucket", "_keys")
+            "budget_grant", "prompt_tok", "arm", "_outcome", "_bucket",
+            "_keys", "_lane")
     window = list(cursor.get("window") or []) + [
         {k: r.get(k) for k in keep} for r in scored]
     window = window[-cfg["window"]:]
@@ -1020,14 +1310,16 @@ def run_pass(cfg: dict, sink: str, ledger_path: str, cursor_path: str,
     audit = roll_audit(ledger.get("audit") or {}, per, kmap, kprev, cfg)
     audit = {k: v for k, v in audit.items() if k in kmap or k in kprev}
     oracle = announcement_oracle(window, cfg)
-    tel = telemetry(window, kmap, kprev, per, oracle, cfg, audit)
+    tel = telemetry(window, kmap, kprev, per, oracle, cfg, audit, allowed)
     ledger_out = {
         "schema": LEDGER_SCHEMA,
         "updated_ts": time.time(),
         "updated_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         # Versioned so the table can grow into composite shape keys without a
-        # rewrite: the consumer walks `bucket_keys(...)` most-specific-first
-        # and always has the marginal steps bucket to fall back to.
+        # rewrite: the consumer walks `bucket_keys(...)` most-specific-first.
+        # Under "steps" / "steps_ptok" that walk ends at the marginal steps
+        # bucket; under the default "steps_lane" there is no marginal cell and
+        # a missing key is neutral 1.0 (see `writable_keys`).
         "key_schema": schema,
         "key_bands": {"ptok": list(DEFAULT_PTOK_BANDS)},
         "bucket": {key: round(k, 4) for key, k in sorted(kmap.items())},
@@ -1129,28 +1421,38 @@ def main(argv=None) -> int:
     w = led["window"]
     print(f"[pn162] {'DRY-RUN ' if args.dry_run else ''}"
           f"new={w['new_scored']} era_stale={w['counts'].get('era_stale', 0)} "
+          f"saturated={w['counts'].get('bound_saturated', 0)} "
           f"window={w['n']} "
           f"(bound={w['bound']} slack={w['slack']} ok={w['ok']}) "
-          f"beta={cfg['beta']} gamma={cfg['gamma']} -> {args.ledger}")
+          f"beta={cfg['beta']} gamma={cfg['gamma']} knee={cfg['grant_knee']} "
+          f"-> {args.ledger}")
     print(f"[pn162] key_schema={led['key_schema']}"
-          + (f" cells={len(led['cells'])}" if led["cells"] else ""))
-    for b, k in sorted(led["bucket"].items(),
-                       key=lambda kv: (int(kv[0].split('|')[0]), kv[0])):
-        if "|" in b:
+          + (f" cells={len(led['cells'])}" if led["cells"] else "")
+          + (f" migrated_lean={w['counts']['migrated_lean_cells']}"
+             if w["counts"].get("migrated_lean_cells") else ""))
+    lane_keyed = led["key_schema"] == KEY_SCHEMA_STEPS_LANE
+    keys = sorted(set(led["bucket"]) | set(led["telemetry"]),
+                  key=lambda k: (int(str(k).split('|')[0]), str(k)))
+    for b in keys:
+        if "|" in b and not lane_keyed:
             continue                       # composite cells print below
+        k = led["bucket"].get(b, 1.0)
         t = led["telemetry"].get(b, {})
         if k == 1.0 and not t.get("n"):
             continue
-        print(f"  bucket {b:>3}  k={k:<6} step={t.get('step_applied', 1.0):<8} "
+        print(f"  cell {b:>9}  k={k:<6} kmax={t.get('k_eff_max', '-'):<5} "
+              f"step={t.get('step_applied', 1.0):<8} "
               f"n={t.get('n', 0):<4} ev={t.get('n_evidence_total', 0):<6} "
               f"bound={t.get('bound', 0):<4} slack={t.get('slack', 0):<4} "
+              f"sat={t.get('new_bound_saturated', 0)} "
               f"stale={t.get('new_bound_stale', 0)}/{t.get('new_slack_stale', 0)} "
               f"rtok_med={t.get('rtok_med')} "
               f"steps_real_med={t.get('steps_real_med')} "
               f"adherence={t.get('anchor_adherence')} "
               f"bias={t.get('announce_bias_est')}")
-    for key, meta in sorted(led["cells"].items()):
-        print(f"    cell {key:>8}  k={led['bucket'][key]:<6} n={meta['n']}")
+    if not lane_keyed:
+        for key, meta in sorted(led["cells"].items()):
+            print(f"    cell {key:>8}  k={led['bucket'][key]:<6} n={meta['n']}")
     drops = {k: v for k, v in w["counts"].items() if k.startswith("drop:")}
     if drops:
         print(f"  drops: {drops}")

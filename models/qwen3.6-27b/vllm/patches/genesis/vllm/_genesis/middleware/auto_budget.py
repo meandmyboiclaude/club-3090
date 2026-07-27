@@ -842,7 +842,8 @@ def _apply_tier(request: Any, tier: int, allow_disable: bool) -> int:
 
 
 def _continuous_budget(tier: int, steps: int | None,
-                       ptok: int | None = None) -> int | None:
+                       ptok: int | None = None,
+                       lane: str | None = None) -> int | None:
     """Continuous per-task budget from the classifier's own step estimate.
 
     [2026-07-22 USER] The tier bucket is too coarse — real traffic wants a
@@ -907,10 +908,68 @@ def _continuous_budget(tier: int, steps: int | None,
     # well-formed ledger is readable; the lookup never blocks and never raises.
     # NOT reached on the STEP_BUDGET_MAP branch above (it returns early) and
     # refused there too — see pn162_budget_cal.budget_multiplier.
+    #
+    # `flat` is PN100's own open-loop grant for this request (high-step
+    # multiplier included, k excluded). It is captured BEFORE k so the knee
+    # clamp can guarantee it never cuts below the validated flat grid.
+    flat = int(round(raw / 100.0)) * 100
+    rounded = flat
     if _pn162 is not None:
-        raw *= _pn162.budget_multiplier(steps, ptok)
-    rounded = int(round(raw / 100.0)) * 100
+        mult = _pn162.budget_multiplier(steps, ptok, lane)
+        raw *= mult
+        rounded = int(round(raw / 100.0)) * 100
+        # [PN162 knee 2026-07-27] marginal accuracy is flat above ~6K reasoning
+        # tokens, and the deep tail spends whatever it is handed — so k is not
+        # allowed to buy past the knee. k <= 1.0 and caller-pinned budgets
+        # (which never reach this function) are untouched.
+        rounded = _pn162.knee_clamp(rounded, flat, mult)
     return max(floor, min(ceil, rounded))
+
+
+def _pn162_lane(request: Any) -> str | None:
+    """The H119 lane this request will be SERVED on, at grant time.
+
+    PN162's ledger is keyed by (steps bucket, lane) because the two banner
+    treatments have structurally different appetites: the v5/deep lane
+    free-runs, the v3/lean lane paces to an announced N. Learning them into one
+    cell lets the expansive lane's bound votes inflate the frugal lane's grant.
+
+    The route is decided one frame out by PN102's route autosplit wrapper
+    (answer_rescue.py), which runs a max_tokens=1 H119 probe and then calls the
+    real `create_chat_completion` — i.e. it has already stamped the request
+    before this hook runs. Sources, in order:
+
+      1. `GENESIS_PN102_BANNER_V5=1` -> "deep" for EVERYTHING, whatever the
+         route says. The banner chain is `force_v5 -> v5 | BANNER_V5 -> v5 |
+         else v3` with no force_v3, so under that flag the router cannot
+         express "lean" and every request gets the expansive treatment
+         (measured 42/42 against a reported 21% deep split). The lane is the
+         TREATMENT, so this outranks the route stamp.
+      2. `chat_template_kwargs["pn162_lane"]` — the autosplit's own route.
+      3. the v5 markers (`pn102_auto_v5` / `pn102_force_v5`) -> "deep". A
+         caller-forced v5 IS the expansive treatment even without a probe.
+      4. autosplit armed, neither marker -> "lean" (it took the v3 chain).
+      5. autosplit disarmed -> None = UNKNOWN. The banner is then whatever the
+         env chain says for EVERY request, so the lane is genuinely not
+         derivable here and PN162 must serve identity rather than guess.
+    """
+    try:
+        ctk = getattr(request, "chat_template_kwargs", None) or {}
+        if not isinstance(ctk, dict):
+            return None
+        if (_env_bool("GENESIS_ENABLE_PN102_CONTRACT", False)
+                and _env_bool("GENESIS_PN102_BANNER_V5", False)):
+            return "deep"
+        lane = ctk.get("pn162_lane")
+        if lane:
+            return str(lane).strip().lower()
+        if ctk.get("pn102_auto_v5") or ctk.get("pn102_force_v5"):
+            return "deep"
+        if _env_bool("GENESIS_ENABLE_PN102_ROUTE_AUTOSPLIT", False):
+            return "lean"
+        return None
+    except Exception:  # noqa: BLE001 — identity is the safe answer
+        return None
 
 
 def _pn162_ptok(request: Any) -> int | None:
@@ -1067,7 +1126,8 @@ async def apply_hook_async(serving: Any, request: Any) -> None:
         c_ann, c_size = _pn162_arm(request, c_steps)      # PN162, dark no-op
         cont = _pn162_exact(
             request,
-            _continuous_budget(c_tier, c_size, _pn162_ptok(request)), key)
+            _continuous_budget(c_tier, c_size, _pn162_ptok(request),
+                               _pn162_lane(request)), key)
         if cont is not None and not (c_tier == 0 and allow_disable):
             applied = _apply_budget(request, cont)
         else:
@@ -1137,7 +1197,8 @@ async def apply_hook_async(serving: Any, request: Any) -> None:
     _STATS[f"tier_{tier}"] += 1
     ann_steps, size_steps = _pn162_arm(request, steps)    # PN162, dark no-op
     cont = _pn162_exact(
-        request, _continuous_budget(tier, size_steps, _pn162_ptok(request)),
+        request, _continuous_budget(tier, size_steps, _pn162_ptok(request),
+                                    _pn162_lane(request)),
         key)
     if cont is not None and not (tier == 0 and allow_disable):
         applied = _apply_budget(request, cont)

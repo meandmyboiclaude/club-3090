@@ -687,6 +687,11 @@ def maybe_add_answer_hint(request: Any) -> None:
     # re-open BUG-156 by putting the banner back on tools/structured requests.
     # So `pn102_auto_v5` is popped here but only consulted after the gates.
     auto_v5 = bool(ctk.pop("pn102_auto_v5", False))
+    # [PN162 lane 2026-07-27] consumed by PN100's budget hook, which ran a
+    # frame earlier (it is what stashes `pn100_steps` this function pops). Drop
+    # it here for the same reason `pn102_auto_v5` is dropped: internal routing
+    # state has no business reaching the chat template.
+    ctk.pop("pn162_lane", None)
     if not _bounded(request) or (not force_internal and _skip_common(request)):
         return
     if ctk.get("pn_env_banner"):
@@ -965,15 +970,25 @@ def _autosplit_wrapper(orig: Any) -> Any:
                     v5_route = (os.environ.get(
                         "GENESIS_PN102_AUTOSPLIT_V5_ROUTE", "")
                         or "deep").strip().lower()
+                    # [PN162 lane 2026-07-27] publish the route onto the
+                    # request itself, on BOTH branches. PN100's budget hook
+                    # runs one frame later, inside `orig`, in this same
+                    # process — and PN162's ledger is keyed by (steps, lane)
+                    # so the free-running v5 lane cannot teach the anchored v3
+                    # lane's budget. This stamp is the only place the route is
+                    # derivable at grant time; without it PN162 serves identity
+                    # (lane_unknown), never a guess.
+                    ctk = dict(
+                        getattr(request, "chat_template_kwargs", None) or {})
+                    ctk["pn162_lane"] = route
                     if route == v5_route:
-                        ctk = dict(
-                            getattr(request, "chat_template_kwargs", None) or {})
                         ctk["pn102_auto_v5"] = True
                         request.chat_template_kwargs = ctk
                         _STATS["autosplit_deep"] += 1
                         log.info("PN102: autosplit route=%s → v5 banner "
                                  "(server-side, no client involvement)", route)
                     else:
+                        request.chat_template_kwargs = ctk
                         _STATS["autosplit_lean"] += 1
                         log.info("PN102: autosplit route=%s → default banner "
                                  "chain", route)

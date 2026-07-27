@@ -794,9 +794,19 @@ services:
       - GENESIS_PN162_RESTAT_S=${GENESIS_PN162_RESTAT_S:-2.0}
       - GENESIS_PN162_K_MIN=${GENESIS_PN162_K_MIN:-0.7}
       - GENESIS_PN162_K_MAX=${GENESIS_PN162_K_MAX:-3.0}
-      # Consumer-side chars->tokens estimate, used ONLY by a composite
-      # key_schema (the default "steps" schema ignores it).
+      # Consumer-side chars->tokens estimate, used ONLY by the "steps_ptok"
+      # key_schema (the shipped "steps_lane" default ignores it).
       - GENESIS_PN162_CHARS_PER_TOK=${GENESIS_PN162_CHARS_PER_TOK:-3.6}
+      # [PN162 KNEE 2026-07-27] accuracy-saturation knee, in reasoning tokens.
+      # MEASURED on this model (2048->0.770, 4096->0.797, 6144->0.800,
+      # 8192->0.803): marginal accuracy is FLAT above ~6K, and the deep tail
+      # spends whatever it is handed — so a bound outcome at a grant >= the
+      # knee carries no need-more signal. The consumer clamps the calibrated
+      # grant at max(knee, flat grid) on the k>1 path only; the updater refuses
+      # to vote on saturated bound rows (same env name, PN162_GRANT_KNEE).
+      # A MODEL PROPERTY to re-derive per model/quant, NOT a throughput knob.
+      # MUST be declared here or a systemd drop-in cannot reach the engine.
+      - PN162_GRANT_KNEE=${PN162_GRANT_KNEE:-6144}
       # [PN162 EXACT — USER RULING PENDING, SEPARATE FLAG] per-PROMPT memory:
       # a prompt that was force-closed last time gets max(grant, last x1.25)
       # immediately instead of waiting for its bucket to drift. That is a

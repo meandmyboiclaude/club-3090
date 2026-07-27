@@ -63,6 +63,86 @@ FLAGS
   GENESIS_PN162_K_MAX              float clamp ceiling (default 3.0)
   GENESIS_PN162_EXACT_MULT         float bump applied to a remembered bound
                                         grant (default 1.25)
+  PN162_GRANT_KNEE                 int   accuracy-saturation knee, in reasoning
+                                        tokens (default 6144). SAME NAME on the
+                                        updater side (PN162_<KNOB>) — see below.
+
+THE GRANT-SATURATION KNEE — WHY k IS NOT ALLOWED TO RUN AWAY UPWARD
+-------------------------------------------------------------------
+MEASURED on this model (USER-confirmed, banked accuracy-vs-cap sweep):
+
+    cap 2048 -> 0.770    cap 4096 -> 0.797
+    cap 6144 -> 0.800    cap 8192 -> 0.803
+
+Marginal accuracy is FLAT above ~6K reasoning tokens: the whole 4096->8192
+doubling buys +0.6pt, inside noise. And the deep tail consumes ANY grant it is
+given, so a BOUND outcome at a grant already >= the knee carries no
+"needs more" information — it is the tail spending what it was handed. The
+bound/slack loop cannot tell those two apart from the outcome alone, which is
+how live buckets 12/15/16 reached k 2.6-3.0 (grants 7.5K-11.7K) on evidence
+that could never stop arriving.
+
+So the grant is clamped at the knee:
+
+    grant' = min(round100(steps x TOK_PER_STEP x k), KNEE)
+
+with two hard restrictions:
+
+  * ONLY on the k-multiplied path (k > 1.0). k <= 1.0 never reaches the knee by
+    construction and must not be touched by it.
+  * NEVER below the flat grid's own value for the request. PN100's open-loop
+    grant IS the validated grid; the knee removes PN162's amplification, it does
+    not overrule PN100. So the effective ceiling is `max(KNEE, flat_grant)` —
+    bucket 15's flat 3900 stays reachable, and a flat grant above the knee (none
+    exist on the current 260-tok grid below 24 steps) passes through untouched.
+  * Caller-supplied budgets (`thinking_token_budget`, the `caller` source) never
+    go through `_continuous_budget` at all and are untouched.
+
+The effect is a per-bucket ceiling on the EFFECTIVE multiplier:
+
+    k_eff_max(bucket) = min(K_MAX, KNEE / flat_grant(bucket))
+
+e.g. bucket 15: 6144/3900 = 1.58, so bucket 15 tops out at 6144 rather than the
+11700 its ledger k=3.0 asks for. The updater half stops VOTING for those
+bumps (a bound row at a grant >= the knee counts `bound_saturated` and adds no
+exponent); this half makes the ceiling hold regardless of what the ledger says,
+so the two halves are safe to deploy in EITHER order.
+
+`PN162_GRANT_KNEE` is a MEASURED MODEL PROPERTY, not a tuning knob. Re-derive it
+from an accuracy-vs-cap sweep for any new model/quant; do not nudge it to move
+throughput.
+
+THE LANE KEY — THE EXPANSIVE LANE MUST NOT TEACH THE FRUGAL LANE
+-----------------------------------------------------------------
+The two banner treatments produce structurally different reasoning lengths for
+the SAME step estimate:
+
+    route "deep" -> pn102_auto_v5 -> v5 banner: no announced N, free-run,
+                    settle-then-stop. rtok inflates; a bound outcome there is
+                    a statement about V5's appetite.
+    route "lean" -> the v3 chain:  announced N is a hard behavioural anchor,
+                    the model paces to it and stops clean. Frugal by design.
+
+Under a steps-ONLY key those two populations share one bucket, so the deep
+lane's bound votes raise k and the raised grant is then handed to anchored v3
+requests that never asked for it. The ledger is therefore keyed by
+`(steps bucket, lane)` — schema `"steps_lane"`, key `"<bucket>|l<lane>"`, and
+that is now the DEFAULT (ledger schema 2).
+
+Consumer-side lane derivation happens at grant time, in the API-server process,
+from the request itself (`_pn162_lane` in auto_budget.py):
+
+    ctk["pn162_lane"]                    <- stamped by the PN102 route autosplit
+                                            wrapper the frame before PN100 runs
+    ctk["pn102_auto_v5"] / "pn102_force_v5" -> "deep"  (v5 treatment either way)
+    autosplit armed but neither present     -> "lean"  (it took the v3 chain)
+    autosplit disarmed                      -> UNKNOWN
+
+UNKNOWN is not guessed. There is no marginal steps-only cell to fall back to —
+that cell is exactly the contaminated mixture this key exists to kill — so an
+unknown lane returns k=1.0 (identity, the validated PN100 grid) and counts
+`lane_unknown` in the stats. A thin lane cell behaves the same way: the updater
+does not write a cell below its occupancy floor, and a missing key is 1.0.
 
 THE "EXACT" LEG IS NOT RULED ON, AND NOTHING POPULATES IT
 ---------------------------------------------------------
@@ -166,11 +246,19 @@ MAX_BUCKET = 16
 K_MIN_DEFAULT = 0.7
 K_MAX_DEFAULT = 3.0
 
+#: accuracy-saturation knee, in reasoning tokens. MEASURED, not tuned — see the
+#: module docstring. Same env name on the updater side (`PN162_GRANT_KNEE`), so
+#: the two halves cannot silently disagree about where the flat region starts.
+GRANT_KNEE_ENV = "PN162_GRANT_KNEE"
+GRANT_KNEE_DEFAULT = 6144
+
 _STATS: dict[str, int] = {
     "applied": 0,        # a k != 1.0 actually changed a grant
     "identity": 0,       # enabled, ledger read, but k == 1.0
     "no_ledger": 0,      # enabled, no usable ledger
     "map_refused": 0,    # STEP_BUDGET_MAP set -> refused
+    "lane_unknown": 0,   # lane schema, lane not derivable -> neutral 1.0
+    "knee_clamped": 0,   # a k-amplified grant was cut back to the knee
     "exact_hits": 0,
     "reloads": 0,
     "read_errors": 0,
@@ -188,7 +276,7 @@ _CACHE: dict[str, Any] = {
     "next_stat": 0.0,
 }
 _LOCK = threading.Lock()
-_ANNOUNCED = {"v": False, "map": False}
+_ANNOUNCED = {"v": False, "map": False, "knee": False}
 
 
 # ── env helpers (local copies: this module must not import auto_budget) ─────
@@ -226,6 +314,18 @@ def get_stats() -> dict[str, int]:
     return dict(_STATS)
 
 
+def grant_knee() -> int:
+    """The measured accuracy-saturation knee, in reasoning tokens.
+
+    <= 0 disables the clamp entirely (an escape hatch for a model whose sweep
+    has not been done yet — NOT a throughput knob).
+    """
+    try:
+        return int(_env_float(GRANT_KNEE_ENV, GRANT_KNEE_DEFAULT))
+    except (TypeError, ValueError):
+        return GRANT_KNEE_DEFAULT
+
+
 def bucket_of(steps: Any) -> int:
     """steps -> steps bucket (int 1..MAX_BUCKET). Never raises."""
     try:
@@ -257,11 +357,35 @@ def bucket_of(steps: Any) -> int:
 # then lands on the marginal bucket by construction.
 KEY_SCHEMA_STEPS = "steps"
 KEY_SCHEMA_STEPS_PTOK = "steps_ptok"
-KEY_SCHEMAS = (KEY_SCHEMA_STEPS, KEY_SCHEMA_STEPS_PTOK)
+KEY_SCHEMA_STEPS_LANE = "steps_lane"
+KEY_SCHEMAS = (KEY_SCHEMA_STEPS, KEY_SCHEMA_STEPS_PTOK, KEY_SCHEMA_STEPS_LANE)
+
+#: The lane axis. Exactly two values, because there are exactly two banner
+#: treatments (v5 free-run vs v3 announced-N) and the contamination the key
+#: exists to kill is between those two.
+LANE_DEEP = "deep"
+LANE_LEAN = "lean"
+LANES = (LANE_LEAN, LANE_DEEP)
 
 #: prompt-token band edges used when key_schema == "steps_ptok". Overridable
 #: per-ledger via `"key_bands": {"ptok": [...]}`.
 DEFAULT_PTOK_BANDS = (256, 1024, 4096)
+
+
+def lane_of(lane: Any) -> str | None:
+    """Route -> lane key part. None means UNKNOWN and is never guessed.
+
+    A non-empty route that is not "deep" is "lean": the v5 banner is selected
+    by exactly one route, so everything else took the announced-N chain. An
+    absent/blank route is a different statement — "this path cannot tell" —
+    and the caller must fall back to identity rather than pick a lane.
+    """
+    if lane is None:
+        return None
+    s = str(lane).strip().lower()
+    if not s:
+        return None
+    return LANE_DEEP if s == LANE_DEEP else LANE_LEAN
 
 #: chars -> tokens, for the consumer's estimate of prompt_tok. The updater
 #: reads the sink's exact `prompt_tok`, so the two agree only approximately —
@@ -285,9 +409,20 @@ def band_index(value: Any, edges) -> int:
 
 
 def bucket_keys(steps: Any, ptok: Any = None,
-                schema: str = KEY_SCHEMA_STEPS, bands=None) -> list:
-    """Lookup chain for one request: most specific first, marginal last."""
+                schema: str = KEY_SCHEMA_STEPS, bands=None,
+                lane: Any = None) -> list:
+    """Lookup chain for one request: most specific first, marginal last.
+
+    `steps_lane` is the exception and deliberately so: it returns ONE key and
+    has NO marginal fallback. The steps-only cell is the deep/lean mixture the
+    lane axis exists to separate, so falling back to it would hand the v5
+    lane's learned appetite straight back to the anchored v3 lane. An empty
+    chain (unknown lane) means identity.
+    """
     b = bucket_of(steps)
+    if schema == KEY_SCHEMA_STEPS_LANE:
+        ln = lane_of(lane)
+        return [] if ln is None else [f"{b}|l{ln}"]
     keys = []
     if schema == KEY_SCHEMA_STEPS_PTOK:
         idx = band_index(ptok, bands or DEFAULT_PTOK_BANDS)
@@ -393,12 +528,13 @@ def _normalise(raw: Any) -> dict:
 
 
 # ── the two public legs ─────────────────────────────────────────────────────
-def budget_multiplier(steps: Any, ptok: Any = None) -> float:
+def budget_multiplier(steps: Any, ptok: Any = None, lane: Any = None) -> float:
     """k for this request shape. ALWAYS returns a float; 1.0 == identity.
 
     `ptok` is an ESTIMATE of the prompt's token count, used only when the
-    ledger declares a composite `key_schema`. Under the default "steps" schema
-    it is ignored entirely.
+    ledger declares the "steps_ptok" schema. `lane` is the H119 route
+    ("deep"/"lean"), used only under "steps_lane" (the default) — and there a
+    lane of None is IDENTITY, never a guess. See the module docstring.
     """
     try:
         if not is_enabled():
@@ -417,9 +553,15 @@ def budget_multiplier(steps: Any, ptok: Any = None) -> float:
         if not data or not data["bucket"]:
             _STATS["no_ledger"] += 1
             return 1.0
+        keys = bucket_keys(steps, ptok, data["key_schema"],
+                           data["key_bands"], lane)
+        if not keys:
+            # steps_lane with an underivable lane. No marginal cell exists to
+            # fall back to by design — identity is the honest answer.
+            _STATS["lane_unknown"] += 1
+            return 1.0
         k = None
-        for key in bucket_keys(steps, ptok, data["key_schema"],
-                               data["key_bands"]):
+        for key in keys:
             if key in data["bucket"]:
                 k = data["bucket"][key]
                 break
@@ -444,6 +586,46 @@ def budget_multiplier(steps: Any, ptok: Any = None) -> float:
         _STATS["read_errors"] += 1
         log.debug("PN162: multiplier lookup failed — identity", exc_info=True)
         return 1.0
+
+
+def knee_clamp(grant: int, flat_grant: int, k: Any = None) -> int:
+    """Cut a k-AMPLIFIED grant back to the accuracy-saturation knee.
+
+        grant' = min(grant, max(KNEE, flat_grant))     [only when k > 1.0]
+
+    `flat_grant` is PN100's own open-loop number for this request (the same
+    `round100(steps x TOK_PER_STEP)`, high-step multiplier included). It is a
+    hard floor on the clamp: the knee removes PN162's amplification, it never
+    overrules the validated flat grid — so bucket 15's flat 3900 stays exactly
+    3900 and a flat grant that already exceeds the knee passes through.
+
+    Never raises, never raises the grant, and is a no-op when the calibrator is
+    disabled, when k <= 1.0, or when the knee is set to 0.
+    """
+    try:
+        g = int(grant)
+        if not is_enabled():
+            return g
+        if k is not None and float(k) <= 1.0:
+            return g
+        knee = grant_knee()
+        if knee <= 0:
+            return g
+        cap = max(knee, int(flat_grant or 0))
+        if g <= cap:
+            return g
+        _STATS["knee_clamped"] += 1
+        if not _ANNOUNCED["knee"]:
+            _ANNOUNCED["knee"] = True
+            log.info("PN162: knee-clamped %d -> %d (PN162_GRANT_KNEE=%d, flat "
+                     "grant %d). Marginal accuracy is flat above the knee and "
+                     "the deep tail consumes any grant, so k is not allowed to "
+                     "buy tokens past it.", g, cap, knee, int(flat_grant or 0))
+        return cap
+    except Exception:  # noqa: BLE001 — the unclamped grant is the safe failure
+        _STATS["read_errors"] += 1
+        log.debug("PN162: knee clamp failed — grant unchanged", exc_info=True)
+        return grant
 
 
 def exact_floor(prompt_hash: Any, grant: int) -> int:
@@ -556,3 +738,4 @@ def reset_cache() -> None:
         _CACHE["next_stat"] = 0.0
     _ANNOUNCED["v"] = False
     _ANNOUNCED["map"] = False
+    _ANNOUNCED["knee"] = False

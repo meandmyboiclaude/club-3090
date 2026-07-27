@@ -81,7 +81,16 @@ def _load_auto_budget():
 
 ab = _load_auto_budget()
 
-CFG = dict(up.DEFAULTS)
+# The shipped DEFAULT key schema is lane-keyed ("steps_lane", 2026-07-27). The
+# control-law suite below predates the lane axis and is INDEPENDENT of it — the
+# per-row exponent, the era filter, the aliasing split and the 10x convergence
+# stories are the same arithmetic whatever the cells are called — so it is
+# pinned to the flat "steps" schema, which is still a supported schema and
+# keeps those assertions readable (`led["bucket"]["5"]`, not `"5|llean"`).
+# The lane axis has its own group: "the lane key" below, which drives the real
+# default end to end through run_pass.
+CFG = dict(up.DEFAULTS, key_schema="steps")
+CFG_LANE = dict(up.DEFAULTS)
 _TMPDIRS = []
 
 
@@ -477,16 +486,37 @@ def test_key_derivation_matches_the_consumer():
     for schema in up.KEY_SCHEMAS:
         for steps in (0, 1, 4, 5, 12, 16, 17, 99, None):
             for ptok in (None, 0, 255, 256, 1023, 4096, 100000):
-                assert up.bucket_keys(steps, ptok, schema) == \
-                    cal.bucket_keys(steps, ptok, schema), (schema, steps, ptok)
+                for lane in ("deep", "lean", "DEEP", "weird"):
+                    assert up.bucket_keys(steps, ptok, schema, None, lane) == \
+                        cal.bucket_keys(steps, ptok, schema, None, lane), \
+                        (schema, steps, ptok, lane)
     assert up.KEY_SCHEMAS == cal.KEY_SCHEMAS
     assert up.DEFAULT_PTOK_BANDS == cal.DEFAULT_PTOK_BANDS
     assert up.MAX_BUCKET == cal.MAX_BUCKET
+    assert up.LANES == cal.LANES
 
 
-def test_marginal_key_is_always_last():
-    for schema in up.KEY_SCHEMAS:
+def test_the_two_sides_differ_only_on_an_UNKNOWN_lane():
+    """The one deliberate asymmetry, spelled out so nobody 'fixes' it.
+
+    The updater always has a row to file and files an unknown route under the
+    conservative lane; the consumer is deciding whether to apply a k at all and
+    an unknown lane there means identity — an EMPTY chain, never a guess."""
+    assert up.bucket_keys(5, None, "steps_lane", None, None) == ["5|llean"]
+    assert cal.bucket_keys(5, None, "steps_lane", None, None) == []
+    assert cal.lane_of(None) is None and cal.lane_of("") is None
+    assert up.lane_of(None) == "lean" and up.lane_of("") == "lean"
+
+
+def test_marginal_key_is_always_last_except_under_the_lane_schema():
+    for schema in (up.KEY_SCHEMA_STEPS, up.KEY_SCHEMA_STEPS_PTOK):
         assert up.bucket_keys(5, 300, schema)[-1] == "5"
+    # steps_lane has NO marginal fallback: that cell is the deep/lean mixture
+    # the lane axis exists to separate (see writable_keys / schema_has_marginal).
+    assert up.bucket_keys(5, 300, "steps_lane", None, "deep") == ["5|ldeep"]
+    assert not up.schema_has_marginal("steps_lane")
+    assert up.schema_has_marginal("steps") and up.schema_has_marginal(
+        "steps_ptok")
 
 
 def test_thin_composite_cells_are_not_written():
@@ -1157,6 +1187,381 @@ def test_beta_and_gamma_are_env_and_cli_overridable():
     assert up.env_overrides({"PN162_BETA": "not-a-float"}) == {}
     assert up.env_overrides({"PN162_BETA": ""}) == {}
     assert up.build_cfg(args, {})["gamma"] == up.DEFAULTS["gamma"]
+
+
+# ─── THE GRANT-SATURATION KNEE ───────────────────────────────────────────────
+# MEASURED (USER-confirmed): 2048->0.770, 4096->0.797, 6144->0.800, 8192->0.803.
+# Marginal accuracy is flat above ~6K reasoning tokens and the deep tail
+# consumes ANY grant, so a bound outcome at a grant >= the knee says nothing
+# about need. It is counted, and it votes zero.
+def _classified(r, kmap, cfg):
+    """Put one row through exactly the per-row pipeline run_pass uses."""
+    r["_outcome"] = up.classify(r, cfg)
+    r["_lane"] = up.lane_of(r.get("route"))
+    r["_alias"] = up.invert_candidates(r["budget_grant"], kmap, cfg,
+                                       r.get("prompt_tok"), r["_lane"])
+    r["_bucket"] = r["_alias"][0][0]
+    r["_keys"] = r["_alias"][0][1]
+    r["_stale"] = up.era_stale(r, kmap, cfg)
+    r["_saturated"] = up.grant_saturated(r, cfg)
+    return r
+
+
+def _drive(kmap, cfg, bucket=12, lane="lean", rounds=60, n_bound=6,
+           n_slack=6):
+    """Repeat `n_bound` force-closed + `n_slack` loose rows for one bucket,
+    resizing the grant from the live ledger each round — the closed loop, with
+    no sink io. Returns (kmap, grants)."""
+    grants = []
+    for _ in range(rounds):
+        keys = up.bucket_keys(bucket, None, cfg["key_schema"], None, lane)
+        g = up.pn100_grant(bucket, up.lookup_k(kmap, keys, cfg), cfg)
+        grants.append(g)
+        rows = [row(g, g - 5, route=lane, censor_forced=True)
+                for _ in range(n_bound)]
+        rows += [row(g, int(g * 0.2), route=lane) for _ in range(n_slack)]
+        rows = [_classified(r, kmap, cfg) for r in rows]
+        kmap, _ = up.update_buckets(rows, kmap, cfg, None)
+    return kmap, grants
+
+
+def test_grant_saturated_is_a_property_of_the_rows_own_grant():
+    assert up.grant_saturated(dict(_outcome="bound", budget_grant=8400), CFG)
+    assert up.grant_saturated(dict(_outcome="bound", budget_grant=6144), CFG)
+    assert not up.grant_saturated(dict(_outcome="bound", budget_grant=6100), CFG)
+    # only BOUND rows saturate — a slack row at 8400 is still real decay
+    assert not up.grant_saturated(dict(_outcome="slack", budget_grant=8400), CFG)
+    assert not up.grant_saturated(dict(_outcome="ok", budget_grant=8400), CFG)
+    # knee 0 disables the rule entirely
+    assert not up.grant_saturated(dict(_outcome="bound", budget_grant=99999),
+                                  dict(CFG, grant_knee=0))
+
+
+def test_a_bound_row_above_the_knee_votes_zero_but_is_counted():
+    cfg = dict(CFG)
+    r = dict(_bucket=12, _outcome="bound", _keys=["12"], _saturated=True)
+    k, per = up.update_buckets([r] * 20, {"12": 2.0}, cfg)
+    assert k["12"] == 2.0                       # not one exponent applied
+    assert per["12"]["bound"] == 20             # telemetry still sees them
+    assert per["12"]["bound_saturated"] == 20
+    assert per["12"]["bound_eff"] == 0
+
+
+def test_a_bound_row_below_the_knee_still_bumps_normally():
+    r = dict(_bucket=5, _outcome="bound", _keys=["5"], _saturated=False)
+    k, per = up.update_buckets([r] * 20, {"5": 1.0}, CFG)
+    assert abs(k["5"] - 1.0 * (1 + CFG["beta"]) ** 20) < 1e-9
+    assert per["5"]["bound_saturated"] == 0 and per["5"]["bound_eff"] == 20
+
+
+def test_bound_saturated_stale_and_eff_partition_the_bound_count():
+    """bound == bound_eff + bound_stale + bound_saturated, always."""
+    rows = ([dict(_bucket=5, _outcome="bound", _keys=["5"])] * 3
+            + [dict(_bucket=5, _outcome="bound", _keys=["5"], _stale=True)] * 4
+            + [dict(_bucket=5, _outcome="bound", _keys=["5"],
+                    _saturated=True)] * 5)
+    _, per = up.update_buckets(rows, {}, CFG)
+    c = per["5"]
+    assert c["bound"] == 12
+    assert (c["bound_eff"], c["bound_stale"], c["bound_saturated"]) == (3, 4, 5)
+
+
+def test_a_saturated_bucket_stops_climbing_and_decays_toward_the_knee():
+    """The live symptom: buckets 12/15/16 at k 2.6-3.0 with bound+slack traffic
+    still pushing UP. Same traffic, knee off vs knee on."""
+    cfg_off = dict(CFG, grant_knee=0)
+    off, g_off = _drive({"12": 2.6833}, cfg_off, rounds=60)
+    assert off["12"] > 2.6833, off            # the runaway, reproduced
+    assert g_off[-1] >= g_off[0]
+
+    on, g_on = _drive({"12": 2.6833}, dict(CFG), rounds=60)
+    assert on["12"] < 2.6833, on              # same traffic, now decays
+    assert g_on[0] == 8400 and g_on[-1] < g_on[0]
+    # it lands AT the knee, not below it: once the grant drops under the knee
+    # the bound rows count again and hold it there.
+    assert 5800 <= g_on[-1] <= 6200, g_on[-1]
+
+
+def test_and_then_toward_neutral_once_slack_dominates():
+    """Below the knee the loop is ordinary again — a bucket whose traffic is
+    mostly slack keeps decaying to NEUTRAL (k_min 1.0), not to some floor the
+    knee invented."""
+    on, grants = _drive({"12": 2.6833}, dict(CFG), rounds=400,
+                        n_bound=6, n_slack=40)
+    assert on["12"] == CFG["k_min"] == 1.0, on
+    assert grants[-1] == up.pn100_grant(12, 1.0, CFG) == 3100
+
+
+def test_k_eff_max_is_the_knee_over_the_flat_grant():
+    """The effective ceiling the consumer's clamp puts on each bucket."""
+    for b, want in ((12, 6144 / 3100), (15, 6144 / 3900), (16, 6144 / 4200)):
+        assert abs(up.k_eff_max(b, CFG) - want) < 1e-9, b
+    assert up.k_eff_max(15, CFG) < 1.6           # bucket 15 tops at ~6144
+    # a bucket whose FLAT grant already exceeds the knee is never cut, so its
+    # effective ceiling is 1.0 (k buys nothing there), not something < 1.
+    assert up.k_eff_max(30, CFG) == 1.0
+    # k_max still binds for the small buckets, where knee/flat is enormous
+    assert up.k_eff_max(1, CFG) == CFG["k_max"]
+
+
+def test_the_clamped_grant_never_cuts_below_the_flat_grid():
+    cfg = dict(CFG)
+    # bucket 15: flat 3900 stays exactly reachable, k=1.0 untouched
+    assert up.pn100_grant(15, 1.0, cfg, clamp_knee=True) == 3900
+    assert up.pn100_grant(15, 3.0, cfg, clamp_knee=True) == 6144
+    # unclamped, for reference: PN100's own BUDGET_CEIL is all that held it
+    assert up.pn100_grant(15, 3.0, cfg) == cfg["budget_ceil"] == 10240
+    # steps 30: flat 7800 is ALREADY above the knee -> passes through untouched
+    assert up.pn100_grant(30, 1.0, cfg, clamp_knee=True) == 7800
+    assert up.pn100_grant(30, 1.4, cfg, clamp_knee=True) == 7800
+    # k <= 1 is never touched by the knee on any bucket
+    for b in range(1, 40):
+        assert up.pn100_grant(b, 1.0, cfg, clamp_knee=True) == \
+            up.pn100_grant(b, 1.0, cfg), b
+
+
+def test_the_inversion_matches_a_grant_from_either_boot():
+    """The consumer half lands at the next container boot, the updater half at
+    the next tick. A row served by EITHER engine must invert to its own
+    bucket — otherwise the post-boot saturated rows get credited to whichever
+    bucket the naive quotient happens to hit."""
+    cfg = dict(CFG, key_schema="steps")
+    kmap = {"12": 2.6833}                        # the live bucket-12 k
+    pre, post = 8400, 6144                       # unclamped / knee-clamped
+    assert up.pn100_grant(12, 2.6833, cfg) == pre
+    assert up.pn100_grant(12, 2.6833, cfg, clamp_knee=True) == post
+    for g in (pre, post):
+        cands = up.invert_candidates(g, kmap, cfg)
+        assert any(b == 12 for b, _k, _w in cands), (g, cands)
+    # and the naive quotient would have gotten the post-boot one wrong
+    assert round(post / cfg["tok_per_step"]) != 12
+
+
+def test_the_era_filter_is_conservative_across_the_knee_boot_boundary():
+    """`era_stale` only exists to DISCARD evidence, so where the two halves
+    disagree about 'what this bucket grants now' it takes the end that keeps
+    the row voting."""
+    cfg = dict(CFG, key_schema="steps")
+    kmap = {"12": 2.6833}                 # grants 8400 unclamped, 6144 clamped
+    # a slack row served the UNCLAMPED grant (pre-boot) is not stale
+    r = _classified(row(8400, 1000, route="lean"), kmap, cfg)
+    assert r["_outcome"] == "slack" and not r["_stale"]
+    # a slack row served the CLAMPED grant (post-boot) is not stale either
+    r = _classified(row(6144, 500, route="lean"), kmap, cfg)
+    assert r["_outcome"] == "slack" and not r["_stale"]
+    # and a genuinely old, much smaller grant IS still caught as stale. 3200
+    # is OFF the current grid (bucket 12 grants 8400/6144, 13 grants 3400), so
+    # it can only be a row from a dead k regime.
+    r = _classified(row(3200, 3195, route="lean", censor_forced=True),
+                    kmap, cfg)
+    assert r["_outcome"] == "bound" and r["_stale"]
+
+
+def test_run_pass_publishes_the_saturation_audit(sat_grant=8400):
+    d = tmpdir()
+    sink = os.path.join(d, "sink")
+    os.makedirs(sink)
+    cfg = dict(CFG, key_schema="steps")
+    write_sink(sink, [sink_rows(sat_grant, sat_grant - 5, censor_forced=True)
+                      for _ in range(4)])
+    led = up.run_pass(cfg, sink, os.path.join(d, "l.json"),
+                      os.path.join(d, "c.json"))
+    assert led["window"]["counts"]["bound_saturated"] == 4
+    key = next(iter(led["audit"]))
+    assert led["audit"][key]["bound_saturated"] == 4
+    assert led["audit"][key]["bound_eff"] == 0
+    assert led["audit"][key]["step"] == 1.0
+    assert led["params"]["grant_knee"] == 6144
+    assert led["telemetry"][key]["new_bound_saturated"] == 4
+    assert led["telemetry"][key]["k_eff_max"] is not None
+
+
+def test_the_knee_is_env_and_cli_overridable_under_the_shared_name():
+    """Both halves read PN162_GRANT_KNEE. Same name, no drift."""
+    assert up.env_overrides({"PN162_GRANT_KNEE": "4096"})["grant_knee"] == 4096
+    assert cal.GRANT_KNEE_ENV == "PN162_GRANT_KNEE"
+    assert cal.GRANT_KNEE_DEFAULT == up.DEFAULTS["grant_knee"] == 6144
+    args = types.SimpleNamespace(**{k: None for k in up.DEFAULTS})
+    args.grant_knee = 8192
+    assert up.build_cfg(args, {"PN162_GRANT_KNEE": "4096"})["grant_knee"] == 8192
+
+
+# ─── THE LANE KEY ────────────────────────────────────────────────────────────
+# The v5/deep lane free-runs; the v3/lean lane paces to an announced N. One
+# steps-keyed cell lets the expansive lane's bound votes buy tokens for the
+# frugal lane's anchored requests.
+def test_the_shipped_default_is_lane_keyed():
+    assert up.DEFAULTS["key_schema"] == up.KEY_SCHEMA_STEPS_LANE
+    assert up.LEDGER_SCHEMA == 2
+
+
+def test_a_deep_bound_row_moves_only_the_deep_cell():
+    cfg = dict(CFG_LANE)
+    rows = [_classified(row(1300, 1295, route="deep", censor_forced=True), {},
+                        cfg) for _ in range(20)]
+    k, per = up.update_buckets(rows, {}, cfg, None)
+    assert set(k) == {"5|ldeep"}, k
+    assert "5" not in k and "5|llean" not in k
+    assert abs(k["5|ldeep"] - (1 + cfg["beta"]) ** 20) < 1e-9
+    assert set(per) == {"5|ldeep"}
+
+
+def test_the_lean_cell_is_untouched_by_deep_traffic_end_to_end():
+    d = tmpdir()
+    sink = os.path.join(d, "sink")
+    os.makedirs(sink)
+    ledger, cursor = os.path.join(d, "l.json"), os.path.join(d, "c.json")
+    cfg = dict(CFG_LANE, min_cell=1)
+    up.atomic_write_json(ledger, {"schema": 2, "key_schema": "steps_lane",
+                                  "bucket": {"5|llean": 1.0, "5|ldeep": 1.0},
+                                  "exact": {}})
+    write_sink(sink, [sink_rows(1300, 1295, route="deep", censor_forced=True)
+                      for _ in range(30)])
+    led = up.run_pass(cfg, sink, ledger, cursor)
+    assert led["bucket"]["5|ldeep"] > 1.0
+    assert led["bucket"]["5|llean"] == 1.0
+    # and the mixed marginal cell is not written at all — nothing can read it
+    assert "5" not in led["bucket"]
+
+
+def test_a_thin_lane_cell_falls_back_to_NEUTRAL_not_to_the_mixture():
+    cfg = dict(CFG_LANE, min_cell=10)
+    win = ([dict(_bucket=5, _keys=["5|ldeep"], _outcome="ok")] * 3
+           + [dict(_bucket=5, _keys=["5|llean"], _outcome="ok")] * 25)
+    allowed = up.writable_keys(win, cfg)
+    assert allowed == {"5|llean"}          # the thin deep cell is not writable
+    assert "5" not in allowed              # and there is NO marginal to land on
+    # a row for the thin cell is HELD OUT of control rather than credited to
+    # the mixed bucket — that fallback is the contamination itself.
+    r = dict(_bucket=5, _outcome="bound", _keys=["5|ldeep"])
+    k, per = up.update_buckets([r] * 50, {}, cfg, allowed)
+    assert k == {} and per == {}
+
+
+def test_migration_seeds_the_lean_cells_only():
+    old = {"5": 1.5, "12": 2.6833, "15": 3.0}
+    new, n = up.migrate_kmap(dict(old), "steps", "steps_lane")
+    assert n == 3
+    assert new == {"5|llean": 1.5, "12|llean": 2.6833, "15|llean": 3.0}
+    # deep starts NEUTRAL: absent == 1.0, so it must re-earn every token
+    assert not any(k.endswith("|ldeep") for k in new)
+    assert up.lookup_k(new, up.bucket_keys(15, None, "steps_lane", None,
+                                           "deep"), CFG_LANE) == 1.0
+    assert up.lookup_k(new, up.bucket_keys(15, None, "steps_lane", None,
+                                           "lean"), CFG_LANE) == 3.0
+
+
+def test_migration_is_a_no_op_once_the_ledger_is_lane_keyed():
+    lane = {"5|llean": 1.5, "5|ldeep": 2.0}
+    assert up.migrate_kmap(dict(lane), "steps_lane", "steps_lane") == (lane, 0)
+    # ...and it is self-healing: a pass that ran between the default flip and
+    # the migration landing stamps "steps_lane" onto a still-bare-keyed map.
+    # Detection is by CONTENT, so the next tick still rescues those keys
+    # instead of stranding them behind an unreadable header.
+    out, n = up.migrate_kmap({"5": 1.5, "12": 2.6833}, "steps_lane",
+                             "steps_lane")
+    assert n == 2 and out == {"5|llean": 1.5, "12|llean": 2.6833}
+    # and it never clobbers a learned cell if the header ever regresses
+    mixed = dict(lane, **{"5": 9.9})
+    out, n = up.migrate_kmap(mixed, "steps", "steps_lane")
+    assert out["5|llean"] == 1.5 and n == 0
+    # nor does it touch a ledger that is staying on a marginal schema
+    assert up.migrate_kmap({"5": 1.5}, "steps", "steps") == ({"5": 1.5}, 0)
+
+
+def test_migration_runs_once_through_run_pass():
+    d = tmpdir()
+    sink = os.path.join(d, "sink")
+    os.makedirs(sink)
+    ledger, cursor = os.path.join(d, "l.json"), os.path.join(d, "c.json")
+    up.atomic_write_json(ledger, {"schema": 1, "key_schema": "steps",
+                                  "bucket": {"5": 1.5}, "exact": {}})
+    write_sink(sink, [sink_rows(1300, 900, route="lean")])   # an "ok" row
+    led = up.run_pass(dict(CFG_LANE, min_cell=1), sink, ledger, cursor)
+    assert led["window"]["counts"]["migrated_lean_cells"] == 1
+    assert led["bucket"]["5|llean"] == 1.5 and "5" not in led["bucket"]
+    write_sink(sink, [sink_rows(1300, 900, route="lean")])
+    led2 = up.run_pass(dict(CFG_LANE, min_cell=1), sink, ledger, cursor)
+    assert "migrated_lean_cells" not in led2["window"]["counts"]
+
+
+def test_an_unknown_route_files_under_the_conservative_lane():
+    for route in ("", None, "weird"):
+        r = _classified(row(1300, 1295, route=route, censor_forced=True), {},
+                        dict(CFG_LANE))
+        assert r["_keys"] == ["5|llean"], route
+
+
+def test_the_knee_applies_to_both_lanes():
+    for lane in ("deep", "lean"):
+        k, grants = _drive({f"12|l{lane}": 2.6833}, dict(CFG_LANE),
+                           lane=lane, rounds=60)
+        assert k[f"12|l{lane}"] < 2.6833, lane
+        assert 5800 <= grants[-1] <= 6200, (lane, grants[-1])
+
+
+def test_lane_telemetry_reports_per_cell():
+    d = tmpdir()
+    sink = os.path.join(d, "sink")
+    os.makedirs(sink)
+    cfg = dict(CFG_LANE, min_cell=1)
+    write_sink(sink, [sink_rows(1300, 600, route="lean") for _ in range(4)]
+               + [sink_rows(1300, 600, route="deep") for _ in range(4)])
+    led = up.run_pass(cfg, sink, os.path.join(d, "l.json"),
+                      os.path.join(d, "c.json"))
+    assert set(led["telemetry"]) == {"5|llean", "5|ldeep"}
+    assert led["telemetry"]["5|ldeep"]["n"] == 4
+
+
+# ─── VALIDATION TARGETS (~/shared/CALIBRATION-truth-table-20260727.md) ───────
+def test_lean_bucket_5_is_the_expected_first_visible_win():
+    """THE cell to watch after this change (truth table §2, §4c).
+
+    GPQA lean bucket 5 is the single biggest miscalibration: 44 items,
+    grant/need_p80 = 0.56, and the old steps-only k for bucket 5 was only
+    1.0422 because that cell's evidence was diluted. With the lane axis its
+    bound votes are its own, and the KNEE DOES NOT OBSTRUCT IT — flat 1300
+    means k_eff_max is 4.7, so `k_max` binds long before the knee does. This
+    cell rising is the expected first visible win.
+    """
+    cfg = dict(CFG_LANE)
+    assert up.k_eff_max(5, cfg) == cfg["k_max"] == 3.0
+    assert 6144 / up.round100(up._flat_raw(5, cfg)) > cfg["k_max"]
+    rows = [_classified(row(1300, 1295, route="lean", censor_forced=True), {},
+                        cfg) for _ in range(60)]
+    assert all(not r["_saturated"] for r in rows)     # nowhere near the knee
+    k, _ = up.update_buckets(rows, {"5|llean": 1.0422}, cfg, None)
+    assert k["5|llean"] > 1.0422
+    # the need_p80/grant ratio wants ~1.78; that is inside the reachable range
+    assert up.pn100_grant(5, 1.78, cfg, clamp_knee=True) == 2300
+
+
+def test_deep_cells_start_neutral_and_climb_toward_the_knee():
+    """Truth table §4b: GPQA deep is UNDER-granted everywhere (0.33), and
+    36.6% of deep draws exceed 6144 — the knee is a VALUE ceiling, not an
+    appetite ceiling. So a deep cell must be free to climb from neutral all
+    the way to the knee, and must stop there rather than at k_max."""
+    cfg = dict(CFG_LANE)
+    k, grants = _drive({}, cfg, bucket=12, lane="deep", rounds=200,
+                       n_bound=12, n_slack=1)
+    assert grants[0] == 3100                       # started at the flat grid
+    assert k["12|ldeep"] > 1.0                     # climbed on its own votes
+    assert max(grants) <= 8400
+    # the CONSUMER-half ceiling for this cell is the knee, not k_max
+    assert up.pn100_grant(12, k["12|ldeep"], cfg, clamp_knee=True) <= 6144
+
+
+def test_prod_style_lean_traffic_idles_at_neutral():
+    """Truth table §3: prod is all-lean and 2.66x over-granted, but that
+    overshoot is COST-FREE (the grant is invisible; unused = free). The
+    k_min=1.0 floor is what keeps the loop from 'fixing' it into starvation —
+    and a seeded, deep-inflated lean cell decays back to neutral on that same
+    slack traffic rather than sitting there."""
+    cfg = dict(CFG_LANE)
+    k, grants = _drive({"12|llean": 2.6833}, cfg, bucket=12, lane="lean",
+                       rounds=800, n_bound=0, n_slack=8)
+    assert k["12|llean"] == cfg["k_min"] == 1.0
+    assert grants[-1] == 3100                      # the flat grid, not below it
 
 
 # ─── standalone runner ───────────────────────────────────────────────────────

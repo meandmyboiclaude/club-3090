@@ -86,6 +86,10 @@ _OWNED_ENV = (
     "GENESIS_PN100_HIGHSTEP_MULT",
     "GENESIS_PN100_BUDGET_FLOOR",
     "GENESIS_PN100_BUDGET_CEIL",
+    "GENESIS_ENABLE_PN102_ROUTE_AUTOSPLIT",
+    "GENESIS_ENABLE_PN102_CONTRACT",
+    "GENESIS_PN102_BANNER_V5",
+    "PN162_GRANT_KNEE",
 )
 
 _TMP = tempfile.mkdtemp(prefix="pn162-test-")
@@ -481,6 +485,209 @@ def test_stats_surface_exists():
     for k in ("applied", "identity", "no_ledger", "map_refused", "exact_hits",
               "reloads", "read_errors", "explore_arm", "explore_control"):
         assert k in s
+
+
+# ─── THE GRANT-SATURATION KNEE ───────────────────────────────────────────────
+# MEASURED (USER-confirmed): 2048->0.770, 4096->0.797, 6144->0.800, 8192->0.803.
+# Marginal accuracy is flat above ~6K reasoning tokens, so k is not allowed to
+# buy tokens past it. This is a MODEL PROPERTY, not a tuning knob.
+def _knee_env():
+    base_env()
+    os.environ["GENESIS_ENABLE_PN162_BUDGET_CAL"] = "1"
+    os.environ["GENESIS_PN162_K_MAX"] = "3.0"
+
+
+def test_knee_caps_the_amplified_grant_at_the_knee():
+    _knee_env()
+    write_ledger({15: 3.0})
+    # unclamped this is 15 x 260 x 3.0 = 11700 -> PN100's own ceiling 10240.
+    # Clamped it stops at the knee.
+    assert ab._continuous_budget(2, 15) == 6144
+    assert cal.grant_knee() == 6144 == cal.GRANT_KNEE_DEFAULT
+
+
+def test_bucket_15_tops_out_at_the_knee_whatever_k_says():
+    """k_eff_max(15) = 6144 / 3900 = 1.58. Above that, k buys nothing."""
+    _knee_env()
+    grants = []
+    for k in (1.0, 1.2, 1.5, 1.58, 2.0, 2.5, 3.0):
+        write_ledger({15: k})
+        grants.append(ab._continuous_budget(2, 15))
+    assert grants[0] == 3900                       # the flat grid, untouched
+    assert max(grants) == 6144                     # never the 11700 k asks for
+    assert grants[-1] == 6144
+    assert grants == sorted(grants)                # still monotone in k
+    # the top is the knee itself, and the step below it is a round100 value
+    assert all(g <= 6144 for g in grants)
+    assert 6100 in grants or 6144 in grants
+
+
+def test_the_knee_never_cuts_below_the_flat_grid_for_that_bucket():
+    _knee_env()
+    # bucket 15's own flat grant stays reachable
+    write_ledger({15: 1.0})
+    assert ab._continuous_budget(2, 15) == 3900
+    # a FLAT grant already above the knee passes through untouched (none exist
+    # on the current 260-tok grid below 24 steps, but the rule is the rule)
+    write_ledger({16: 1.0})
+    assert ab._continuous_budget(2, 30) == 7800    # 30 x 260, no k
+    assert cal.knee_clamp(7800, 7800, 1.0) == 7800
+    assert cal.knee_clamp(9000, 7800, 1.4) == 7800  # cut to flat, not to knee
+
+
+def test_the_knee_only_touches_the_k_multiplied_path():
+    _knee_env()
+    for k in (1.0, 0.9, 0.7):
+        assert cal.knee_clamp(99999, 3900, k) == 99999
+    # and it is inert when the calibrator is off, ledger or no ledger
+    reset_env()
+    assert cal.knee_clamp(99999, 3900, 3.0) == 99999
+
+
+def test_the_knee_is_env_overridable_under_the_shared_name():
+    _knee_env()
+    write_ledger({15: 3.0})
+    os.environ[cal.GRANT_KNEE_ENV] = "4096"
+    assert cal.grant_knee() == 4096
+    assert ab._continuous_budget(2, 15) == 4096
+    os.environ[cal.GRANT_KNEE_ENV] = "0"           # 0 disables the clamp
+    assert ab._continuous_budget(2, 15) == 10240   # back to PN100's ceiling
+    os.environ.pop(cal.GRANT_KNEE_ENV, None)
+
+
+def test_the_knee_clamp_counts_itself_and_announces_once():
+    _knee_env()
+    write_ledger({15: 3.0})
+    before = cal.get_stats()["knee_clamped"]
+    for _ in range(3):
+        ab._continuous_budget(2, 15)
+    assert cal.get_stats()["knee_clamped"] == before + 3
+
+
+def test_a_caller_pinned_budget_never_meets_the_knee():
+    """`_continuous_budget` is the ONLY path the clamp lives on, and a
+    client-pinned budget does not go through it — it is applied verbatim."""
+    _knee_env()
+    write_ledger({15: 3.0})
+    r = Req()
+    r.chat_template_kwargs = {"thinking_budget": 9000}
+    # the direct-numeric mode short-circuits BEFORE `_continuous_budget` — the
+    # only function the clamp lives on — so the caller's 9000 is served whole
+    assert ab._decide_mode(r)[0] == "9000"
+    src = (_MW / "auto_budget.py").read_text(encoding="utf-8")
+    assert src.count("knee_clamp(") == 1
+
+
+def test_knee_failures_leave_the_grant_alone():
+    _knee_env()
+    assert cal.knee_clamp("not an int", 3900, 3.0) == "not an int"
+
+
+# ─── THE LANE KEY ────────────────────────────────────────────────────────────
+# The v5/deep lane free-runs; the v3/lean lane paces to an announced N. One
+# steps-keyed cell would let the expansive lane teach the frugal lane.
+def lane_ledger(cells):
+    return write_ledger(raw={"schema": 2, "updated_ts": time.time(),
+                             "key_schema": "steps_lane",
+                             "bucket": dict(cells), "exact": {}})
+
+
+def test_lane_keys_are_read_per_lane():
+    base_env()
+    os.environ["GENESIS_ENABLE_PN162_BUDGET_CAL"] = "1"
+    lane_ledger({"5|ldeep": 2.0, "5|llean": 1.2})
+    assert cal.budget_multiplier(5, None, "deep") == 2.0
+    assert cal.budget_multiplier(5, None, "lean") == 1.2
+    assert ab._continuous_budget(2, 5, None, "deep") == 2600
+    assert ab._continuous_budget(2, 5, None, "lean") == 1600   # 1560 -> 1600
+
+
+def test_an_unknown_lane_is_identity_not_a_guess():
+    base_env()
+    os.environ["GENESIS_ENABLE_PN162_BUDGET_CAL"] = "1"
+    lane_ledger({"5|ldeep": 2.0, "5|llean": 1.2})
+    before = cal.get_stats()["lane_unknown"]
+    assert cal.budget_multiplier(5, None, None) == 1.0
+    assert cal.get_stats()["lane_unknown"] == before + 1
+    assert ab._continuous_budget(2, 5, None, None) == 1300      # the flat grid
+
+
+def test_a_thin_lane_cell_is_neutral_never_the_steps_mixture():
+    """There is no marginal cell to fall back to — that cell IS the mixture."""
+    base_env()
+    os.environ["GENESIS_ENABLE_PN162_BUDGET_CAL"] = "1"
+    lane_ledger({"5|llean": 1.8, "5": 2.5})       # a stray steps key
+    assert cal.budget_multiplier(5, None, "deep") == 1.0
+    assert ab._continuous_budget(2, 5, None, "deep") == 1300
+    assert cal.budget_multiplier(5, None, "lean") == 1.8
+
+
+def test_lane_normalisation():
+    assert cal.lane_of("DEEP") == "deep" and cal.lane_of(" deep ") == "deep"
+    assert cal.lane_of("lean") == "lean" and cal.lane_of("anything") == "lean"
+    assert cal.lane_of(None) is None and cal.lane_of("") is None
+    assert cal.bucket_keys(5, None, "steps_lane", None, "deep") == ["5|ldeep"]
+    assert cal.bucket_keys(5, None, "steps_lane", None, None) == []
+
+
+def test_the_lane_comes_off_the_request_at_grant_time():
+    """The PN102 autosplit wrapper stamps the route one frame before PN100's
+    hook runs, in this same process."""
+    base_env()
+    r = Req()
+    r.chat_template_kwargs = {"pn162_lane": "deep"}
+    assert ab._pn162_lane(r) == "deep"
+    r.chat_template_kwargs = {"pn162_lane": "lean"}
+    assert ab._pn162_lane(r) == "lean"
+    # the v5 markers are the fallback — a forced v5 IS the expansive treatment
+    r.chat_template_kwargs = {"pn102_auto_v5": True}
+    assert ab._pn162_lane(r) == "deep"
+    r.chat_template_kwargs = {"pn102_force_v5": True}
+    assert ab._pn162_lane(r) == "deep"
+    # autosplit armed, no marker -> it took the v3 chain
+    r.chat_template_kwargs = {}
+    os.environ["GENESIS_ENABLE_PN102_ROUTE_AUTOSPLIT"] = "1"
+    assert ab._pn162_lane(r) == "lean"
+    # autosplit disarmed -> the lane is genuinely not derivable here
+    os.environ.pop("GENESIS_ENABLE_PN102_ROUTE_AUTOSPLIT", None)
+    assert ab._pn162_lane(r) is None
+    assert ab._pn162_lane(None) is None
+
+
+def test_banner_v5_makes_every_request_the_expansive_lane():
+    """The lane is the TREATMENT, not the route. With
+    GENESIS_PN102_BANNER_V5=1 the banner chain has no force_v3, so the router
+    cannot express "lean" and everything gets v5 (measured 42/42 against a
+    reported 21% deep split) — the route stamp is then a lie about treatment
+    and must not win."""
+    base_env()
+    os.environ["GENESIS_ENABLE_PN102_CONTRACT"] = "1"
+    os.environ["GENESIS_PN102_BANNER_V5"] = "1"
+    r = Req()
+    r.chat_template_kwargs = {"pn162_lane": "lean"}
+    assert ab._pn162_lane(r) == "deep"
+    os.environ["GENESIS_PN102_BANNER_V5"] = "0"
+    assert ab._pn162_lane(r) == "lean"
+    for k in ("GENESIS_ENABLE_PN102_CONTRACT", "GENESIS_PN102_BANNER_V5"):
+        os.environ.pop(k, None)
+
+
+def test_the_knee_applies_on_both_lanes():
+    _knee_env()
+    lane_ledger({"15|ldeep": 3.0, "15|llean": 3.0})
+    assert ab._continuous_budget(2, 15, None, "deep") == 6144
+    assert ab._continuous_budget(2, 15, None, "lean") == 6144
+
+
+def test_a_steps_keyed_ledger_still_reads_under_the_old_schema():
+    """Rollback safety: an old schema-1 ledger keeps working byte-identically,
+    lane or no lane."""
+    base_env()
+    os.environ["GENESIS_ENABLE_PN162_BUDGET_CAL"] = "1"
+    write_ledger({5: 1.5})
+    assert cal.budget_multiplier(5) == 1.5
+    assert cal.budget_multiplier(5, None, "deep") == 1.5
+    assert ab._continuous_budget(2, 5, None, "deep") == 2000
 
 
 # ─── standalone runner ───────────────────────────────────────────────────────
