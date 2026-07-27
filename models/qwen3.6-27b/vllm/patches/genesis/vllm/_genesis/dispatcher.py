@@ -301,6 +301,23 @@ PATCH_REGISTRY: dict[str, dict[str, Any]] = {
             "is_turboquant": [True],
         },
         "requires_patches": ["P67"],
+        # 2026-07-27 (REVIEW H1/M1): P67 is `lifecycle: retired`, so once lane 1
+        # grew a lifecycle gate P67 became a permanent SKIP and this edge became
+        # permanently unsatisfiable — validate_apply_plan would emit
+        # "ERROR: P67b requires 'P67' to also be APPLY" on every single boot.
+        # That error is correct about the registry and wrong about reality: what
+        # P67b actually needs is the P67 *kernel module*
+        # (kernels/p67_multi_query_kernel.py, which P67b imports directly and
+        # which gates on GENESIS_ENABLE_P67_TQ_MULTI_QUERY_KERNEL — carried here
+        # as an env_flag_alias), NOT the P67 text patch. P67's own registry note
+        # says the patch must NOT be re-anchored because P67b already intercepts
+        # the same call site.
+        # So the edge is KEPT (it documents the real pairing and keeps the
+        # kernel dependency discoverable) and explicitly acknowledged as
+        # satisfied-by-retirement. validate_apply_plan honours the
+        # acknowledgement silently; any UNacknowledged requires→retired edge
+        # still surfaces as a WARNING so a future one is loud.
+        "requires_satisfied_by_retirement": ["P67"],
         "conflicts_with": ["P65"],
     },
     "P72": {
@@ -2238,6 +2255,53 @@ def _check_applies_to(
     return True, "applies_to satisfied"
 
 
+# ─── Lifecycle gate (GAP4 parity with lane 2) ─────────────────────────────
+# 2026-07-27 (REVIEW-genesis-dispatcher H1): lane 1 had NO lifecycle gate —
+# `lifecycle: retired` was decorative here while lane 2
+# (sndr/dispatcher/decision.py:_check_lifecycle_gate) hard-skipped on it. On
+# the 07-27 boot that let six retired lane-1 patches (P59 P60 P60b P62 P67
+# P87) announce APPLY purely because a stale GENESIS_ENABLE_* was carried
+# across the pin bump; five were saved only by anchor drift and P60b actually
+# rewrote two files. Retirement's whole job is pin-upgrade break-safety, so it
+# must gate lane 1 exactly as it gates lane 2, with the same escape hatch.
+
+def _allow_retired() -> bool:
+    """`GENESIS_ALLOW_RETIRED=1` — diagnostic escape hatch, mirrors lane 2."""
+    return os.environ.get(
+        "GENESIS_ALLOW_RETIRED", ""
+    ).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _check_lifecycle_gate(
+    patch_id: str, meta: dict[str, Any],
+) -> tuple[bool, str] | None:
+    """Hard-skip a ``lifecycle=retired`` patch on any apply path, even when its
+    ENABLE flag is set and its wiring module is still present in the tree.
+
+    Returns a skip-decision ``(False, reason)``, or ``None`` to proceed.
+    Fail-open on import error: a broken lifecycle module must never wedge
+    dispatch (same contract as lane 2's GAP4 gate).
+    """
+    try:
+        from vllm._genesis.compat.lifecycle import is_engageable
+    except Exception:
+        return None
+    try:
+        ok, lc_reason = is_engageable(meta, allow_gated=_allow_retired())
+    except Exception:
+        return None
+    if ok:
+        return None
+    log.debug("[Genesis dispatcher] %s lifecycle gate: %s", patch_id, lc_reason)
+    # Loud, greppable, and it names the override — the boot log's old
+    # "opt-in env (config: neutral)" never mentioned retirement at all (L7).
+    # Kept under log_decision()'s 120-char reason truncation on purpose.
+    return False, (
+        "LIFECYCLE: retired — pass GENESIS_ALLOW_RETIRED to engage "
+        "(patch removed from active use)"
+    )
+
+
 # ─── Single-call gate ─────────────────────────────────────────────────────
 
 def should_apply(patch_id: str) -> tuple[bool, str]:
@@ -2271,6 +2335,13 @@ def should_apply(patch_id: str) -> tuple[bool, str]:
     meta = PATCH_REGISTRY.get(patch_id)
     if meta is None:
         return False, f"unknown patch_id {patch_id!r}"
+
+    # H1 / GAP4: a retired patch never engages — not via env override, not via
+    # default_on. Checked FIRST so the reason string carries the retirement,
+    # which is the signal the boot log and vllmops.boot_patches were missing.
+    lifecycle_skip = _check_lifecycle_gate(patch_id, meta)
+    if lifecycle_skip is not None:
+        return lifecycle_skip
 
     env_flag = meta.get("env_flag")
 
@@ -2402,6 +2473,147 @@ def log_decision(patch_id: str, applied: bool, reason: str) -> None:
     })
 
 
+# ─── Outcome logging (H2 / M1) ────────────────────────────────────────────
+# `_DECISIONS` records INTENT — what should_apply() decided before any wiring
+# ran. Until 2026-07-27 the boot summary printed that intent under a "✓
+# APPLIED" header, and 12 of the 42 rows on the 07-27 boot were false: P60 and
+# P67 drift-skipped (flagged WARNING three lines earlier in the same log), ten
+# others plain-skipped inside their wiring. The real outcomes lived in
+# PatchStats.results and were never reconciled back.
+#
+# `_OUTCOMES` closes that loop. apply_all's result loop calls log_outcome()
+# once per PatchResult; the summary and the dependency validator then read the
+# outcome where one exists and fall back to the decision where none does.
+
+_OUTCOMES: dict[str, dict[str, str]] = {}
+
+# Normalised outcome statuses.
+OUTCOME_APPLIED = "applied"
+OUTCOME_DRIFT = "drift"       # skipped because a required anchor moved
+OUTCOME_SKIPPED = "skipped"   # skipped for any other reason (self-gate, etc.)
+OUTCOME_FAILED = "failed"
+OUTCOME_UNKNOWN = "unknown"   # apply reported something we don't recognise
+
+_DRIFT_MARKERS = (
+    "required anchor",
+    "required_anchor_missing",
+    "anchor not found",
+    "ambiguous_anchor",
+)
+
+
+def is_drift_reason(reason: str) -> bool:
+    """True when a skip reason describes anchor drift rather than a decision.
+
+    Mirrors the predicate apply_all uses to escalate a skip to WARNING, so the
+    summary's DRIFT bucket and the boot log's ``DRIFT skipped:`` lines can never
+    disagree about which skips were drift.
+    """
+    low = (reason or "").lower()
+    return any(m in low for m in _DRIFT_MARKERS)
+
+
+def _normalize_outcome(status: str, reason: str, drift: bool | None) -> str:
+    """Map a PatchResult status (+ reason) onto an OUTCOME_* constant."""
+    s = (status or "").strip().lower()
+    if s == "applied":
+        return OUTCOME_APPLIED
+    if s == "failed":
+        return OUTCOME_FAILED
+    if s == "skipped":
+        if drift is None:
+            drift = is_drift_reason(reason)
+        return OUTCOME_DRIFT if drift else OUTCOME_SKIPPED
+    return OUTCOME_UNKNOWN
+
+
+def log_outcome(
+    patch_id: str,
+    status: str,
+    reason: str = "",
+    drift: bool | None = None,
+) -> None:
+    """Record the ACTUAL apply outcome for ``patch_id``.
+
+    Companion to :func:`log_decision`. Called from apply_all's result loop with
+    the ``PatchResult`` it just handled. ``patch_id`` may be the long
+    registration name (``"P60b GDN ngram Triton kernel"``) — the leading id
+    token is extracted and, for combined registrations (``"P32/P33 …"``), the
+    outcome is recorded against every id in the head token that the registry
+    knows.
+
+    ``drift`` lets the caller pass its own drift verdict so both sides of the
+    log agree; ``None`` means "classify from the reason".
+    """
+    for pid in resolve_outcome_ids(patch_id):
+        _OUTCOMES[pid] = {
+            "status": _normalize_outcome(status, reason, drift),
+            "raw_status": (status or "").strip().lower(),
+            "reason": reason or "",
+        }
+
+
+def resolve_outcome_ids(name: str) -> list[str]:
+    """Extract registry patch_ids from a PatchResult name.
+
+    apply_all registers patches under human-readable names whose first token is
+    the id (``"PN16 Lazy-reasoner request hook"``), sometimes covering two ids
+    (``"P32/P33 TurboQuant cu_2 + synth_seq_lens preallocs"``). An exact
+    registry key is returned as-is so callers that already have an id are not
+    re-parsed.
+    """
+    if not name:
+        return []
+    if name in PATCH_REGISTRY:
+        return [name]
+    head = name.split()[0] if name.split() else name
+    ids = [tok for tok in head.split("/") if tok in PATCH_REGISTRY]
+    if ids:
+        return ids
+    # Unknown to the registry — keep it under the head token so nothing is
+    # silently dropped (a caller may still want to see it).
+    return [head] if head else []
+
+
+def get_outcomes() -> dict[str, dict[str, str]]:
+    """Return the recorded per-patch apply outcomes for this boot."""
+    return dict(_OUTCOMES)
+
+
+def get_outcome(patch_id: str) -> dict[str, str] | None:
+    """Return the recorded outcome for one patch, or None if never reported."""
+    return _OUTCOMES.get(patch_id)
+
+
+def clear_outcomes() -> None:
+    """Reset the outcome ledger (tests / repeated in-process runs)."""
+    _OUTCOMES.clear()
+
+
+def get_effective_applied_set() -> set[str]:
+    """The APPLY set corrected by outcomes — what actually landed this boot.
+
+    A patch is in the set when it decided APPLY **and** its apply either
+    reported ``applied`` or never reported at all (patches that do not route a
+    PatchResult back, e.g. wiring-internal decisions, must not be dropped just
+    because nobody told us how they went).
+
+    This is what the dependency validator should be fed: the decision-level set
+    let ``P67b requires P67`` read clean on a boot where P67 drift-skipped.
+    """
+    effective: set[str] = set()
+    for d in get_apply_matrix():
+        if not d["applied"]:
+            continue
+        pid = d["patch_id"]
+        outcome = _OUTCOMES.get(pid)
+        if outcome is None or outcome["status"] in (
+            OUTCOME_APPLIED, OUTCOME_UNKNOWN,
+        ):
+            effective.add(pid)
+    return effective
+
+
 def get_apply_matrix() -> list[dict[str, Any]]:
     """Return the recorded apply matrix for this boot.
 
@@ -2483,6 +2695,28 @@ def dump_structured_boot_summary() -> str:
         _seen[d["patch_id"]] = d
     decisions = list(_seen.values())
 
+    # H2: the APPLY tables below report OUTCOMES when apply_all fed them back,
+    # and fall back to decisions only when no outcome was ever recorded (dry
+    # run / dispatcher CLI / unit tests). `_outcome_of` returns the OUTCOME_*
+    # constant or None for "announced, never reported".
+    outcomes = get_outcomes()
+    have_outcomes = bool(outcomes)
+
+    def _outcome_of(pid: str) -> str | None:
+        rec = outcomes.get(pid)
+        return rec["status"] if rec else None
+
+    def _bucket(pid: str) -> str:
+        """"applied" | "not_applied" | "unreported" for an APPLY decision."""
+        if not have_outcomes:
+            return "applied"  # no outcome data at all → decision is all we have
+        st = _outcome_of(pid)
+        if st is None:
+            return "unreported"
+        if st in (OUTCOME_APPLIED, OUTCOME_UNKNOWN):
+            return "applied"
+        return "not_applied"
+
     lines: list[str] = []
 
     # ─── 1. System info header ────────────────────────────────────────────
@@ -2537,26 +2771,59 @@ def dump_structured_boot_summary() -> str:
     n_apply = sum(1 for d in decisions if d["applied"])
     n_skip = sum(1 for d in decisions if not d["applied"])
     lines.append("─" * 78)
+    # The "(decisions)" tag matters: this line is INTENT. The Outcomes line
+    # below is what actually happened.
+    _tag = "     (decisions)" if have_outcomes else ""
     lines.append(
         f"  Patches:  {len(decisions)} total  →  "
-        f"{n_apply} APPLY  |  {n_skip} SKIP"
+        f"{n_apply} APPLY  |  {n_skip} SKIP{_tag}"
     )
 
-    # Per-category breakdown
+    # H2: the outcome line — what the apply actually did with those decisions.
+    announced = [d["patch_id"] for d in decisions if d["applied"]]
+    n_landed = sum(1 for p in announced if _bucket(p) == "applied")
+    n_not_applied = sum(1 for p in announced if _bucket(p) == "not_applied")
+    n_unreported = sum(1 for p in announced if _bucket(p) == "unreported")
+    if have_outcomes:
+        n_drift = sum(1 for p in announced
+                      if _outcome_of(p) == OUTCOME_DRIFT)
+        n_failed_out = sum(1 for p in announced
+                           if _outcome_of(p) == OUTCOME_FAILED)
+        n_refused = sum(1 for p in announced
+                        if _outcome_of(p) == OUTCOME_SKIPPED)
+        lines.append(
+            f"  Outcomes: {n_landed} applied  |  {n_drift} drift-skipped  |  "
+            f"{n_refused} refused-by-wiring  |  {n_failed_out} failed  |  "
+            f"{n_unreported} unreported"
+        )
+
+    # Per-category breakdown. When outcomes are available the APPLY column
+    # counts what LANDED, not what was announced — the decision-level count is
+    # exactly the number the review flagged as matching nothing measurable.
     cat_counts: dict[str, dict[str, int]] = {}
     for d in decisions:
         meta = PATCH_REGISTRY.get(d["patch_id"], {})
         cat = meta.get("category", "uncategorized")
-        bucket = cat_counts.setdefault(cat, {"apply": 0, "skip": 0})
-        bucket["apply" if d["applied"] else "skip"] += 1
+        bucket = cat_counts.setdefault(
+            cat, {"apply": 0, "skip": 0, "not_applied": 0}
+        )
+        if not d["applied"]:
+            bucket["skip"] += 1
+        elif _bucket(d["patch_id"]) == "not_applied":
+            bucket["not_applied"] += 1
+        else:
+            bucket["apply"] += 1
 
     if cat_counts:
         lines.append("  By category:")
         for cat in sorted(cat_counts):
             c = cat_counts[cat]
-            lines.append(
+            row = (
                 f"    • {cat:<22} APPLY={c['apply']:>3}  SKIP={c['skip']:>3}"
             )
+            if c["not_applied"]:
+                row += f"  NOT-APPLIED={c['not_applied']:>3}"
+            lines.append(row)
 
     # ─── Pretty category labels ──────────────────────────────────────────
     # Friendly human-readable description for each registry category.
@@ -2585,9 +2852,21 @@ def dump_structured_boot_summary() -> str:
         return CATEGORY_LABELS.get(cat, cat)
 
     # ─── 3. APPLIED patches grouped by category ──────────────────────────
+    # Only patches whose APPLY actually reported success land here. Everything
+    # that announced and then drifted / refused / failed goes to section 3b,
+    # and anything that announced without ever reporting goes to 3c.
     applied_by_cat: dict[str, list[dict[str, Any]]] = {}
+    not_applied: list[dict[str, Any]] = []
+    unreported: list[dict[str, Any]] = []
     for d in decisions:
         if not d["applied"]:
+            continue
+        b = _bucket(d["patch_id"])
+        if b == "not_applied":
+            not_applied.append(d)
+            continue
+        if b == "unreported":
+            unreported.append(d)
             continue
         meta = PATCH_REGISTRY.get(d["patch_id"], {})
         cat = meta.get("category", "uncategorized")
@@ -2595,7 +2874,7 @@ def dump_structured_boot_summary() -> str:
 
     if applied_by_cat:
         lines.append("─" * 78)
-        lines.append(f"  ✓ APPLIED ({n_apply})")
+        lines.append(f"  ✓ APPLIED ({n_landed})")
         for cat in sorted(applied_by_cat):
             label = _cat_label(cat)
             count = len(applied_by_cat[cat])
@@ -2610,8 +2889,59 @@ def dump_structured_boot_summary() -> str:
                     f"  ║   • {d['patch_id']:<10}  {d['title'][:90]}{upstream}"
                 )
 
+    # ─── 3b. ANNOUNCED-BUT-NOT-APPLIED (H2) ──────────────────────────────
+    if not_applied:
+        OUTCOME_LABELS = {
+            OUTCOME_DRIFT:   "Anchor drift — announced, source no longer matches",
+            OUTCOME_SKIPPED: "Refused by its own wiring after the dispatcher said APPLY",
+            OUTCOME_FAILED:  "FAILED during apply",
+        }
+        lines.append("")
+        lines.append("─" * 78)
+        lines.append(
+            f"  ⚠ ANNOUNCED-BUT-NOT-APPLIED ({len(not_applied)}) — "
+            f"decision said APPLY, the apply did not land"
+        )
+        by_status: dict[str, list[dict[str, Any]]] = {}
+        for d in not_applied:
+            by_status.setdefault(
+                _outcome_of(d["patch_id"]) or OUTCOME_UNKNOWN, []
+            ).append(d)
+        for st in (OUTCOME_FAILED, OUTCOME_DRIFT, OUTCOME_SKIPPED):
+            items = by_status.get(st)
+            if not items:
+                continue
+            lines.append("")
+            lines.append(
+                f"  ╔═══ {OUTCOME_LABELS.get(st, st)} ({len(items)})"
+            )
+            for d in items:
+                rec = outcomes.get(d["patch_id"], {})
+                lines.append(
+                    f"  ║   • {d['patch_id']:<10}  {d['title'][:60]}"
+                )
+                lines.append(
+                    f"  ║       outcome: {rec.get('reason', '')[:70]}"
+                )
+
+    # ─── 3c. ANNOUNCED, no outcome reported ──────────────────────────────
+    if unreported:
+        lines.append("")
+        lines.append("─" * 78)
+        lines.append(
+            f"  ? ANNOUNCED-NO-OUTCOME ({len(unreported)}) — decided APPLY but "
+            f"no apply result was reported back; status unverified"
+        )
+        for d in unreported[:12]:
+            lines.append(
+                f"      • {d['patch_id']:<10}  {d['title'][:70]}"
+            )
+        if len(unreported) > 12:
+            lines.append(f"      … and {len(unreported) - 12} more")
+
     # ─── 4. SKIPPED patches grouped by reason class ──────────────────────
     skip_classes = {
+        "lifecycle_retired": [],
         "upstream_merged": [],
         "env_disabled": [],
         "model_incompat": [],
@@ -2622,7 +2952,11 @@ def dump_structured_boot_summary() -> str:
         if d["applied"]:
             continue
         reason = d["reason"].lower()
-        if "upstream" in reason and ("merged" in reason or "drift" in reason):
+        # H1: retirement gets its own class — the whole point of the gate is
+        # that a stale GENESIS_ENABLE_* carried across a pin bump is VISIBLE.
+        if reason.startswith("lifecycle:"):
+            cls = "lifecycle_retired"
+        elif "upstream" in reason and ("merged" in reason or "drift" in reason):
             cls = "upstream_merged"
         elif "opt-in" in reason or "set genesis_enable" in reason:
             cls = "env_disabled"
@@ -2637,6 +2971,8 @@ def dump_structured_boot_summary() -> str:
         skip_classes[cls].append(d)
 
     SKIP_LABELS = {
+        "lifecycle_retired":
+            "RETIRED (lifecycle gate) — flag set but patch is out of service",
         "upstream_merged": "Upstream merged in current pin (auto-skip)",
         "env_disabled":    "Opt-in (env flag disabled by operator)",
         "model_incompat":  "Model architecture incompatible (applies_to)",
@@ -2713,6 +3049,22 @@ def _coerce_list(value: Any) -> list[str]:
     return []
 
 
+def _is_retired(meta: dict[str, Any]) -> bool:
+    """True when a registry entry is lifecycle-gated (retired).
+
+    Uses compat.lifecycle so the gate, the validator and `genesis
+    lifecycle-audit` all read the same source of truth; falls back to a literal
+    field read if the module is unavailable.
+    """
+    try:
+        from vllm._genesis.compat.lifecycle import (
+            SAFETY_GATED_STATES, get_state,
+        )
+        return get_state(meta) in SAFETY_GATED_STATES
+    except Exception:
+        return meta.get("lifecycle") == "retired"
+
+
 def validate_registry(
     registry: dict[str, dict[str, Any]] | None = None,
 ) -> list[ValidationIssue]:
@@ -2786,26 +3138,38 @@ def validate_registry(
 def validate_apply_plan(
     applied: set[str],
     registry: dict[str, dict[str, Any]] | None = None,
+    outcomes: dict[str, dict[str, str]] | None = None,
 ) -> list[ValidationIssue]:
     """Runtime validation: given the live APPLY set, surface dependency /
     conflict violations.
 
     Args:
-        applied: set of patch_ids that the dispatcher actually decided to
-            APPLY this boot (from `get_apply_matrix()` filtered by
-            applied=True, or computed externally).
+        applied: set of patch_ids that actually landed this boot. Feed it
+            `get_effective_applied_set()` — the decision-level set is what let
+            `P67b requires P67` read "clean" on a boot where P67 announced
+            APPLY and then drift-skipped (M1).
         registry: optional override for testing; defaults to PATCH_REGISTRY.
+        outcomes: optional per-patch apply outcomes (see `get_outcomes()`).
+            Defaults to the live ledger. Used to explain WHY a required patch
+            is missing — a drift-skipped dependency is a different (and much
+            more actionable) message than one that was never enabled.
 
     Returns:
         list of ValidationIssue. Severities:
-          - ERROR  : missing required, conflict-pair both applied
-          - WARNING: applied set contains a patch_id not in registry
+          - ERROR  : missing required (dependency never engaged), conflict-pair
+                     both applied
+          - WARNING: applied set contains a patch_id not in registry; a
+                     required patch announced APPLY but its apply did not land;
+                     a requires-edge points at a retired patch without an
+                     explicit `requires_satisfied_by_retirement` acknowledgement
 
     Conflict pairs are reported once (canonicalized — sorted ids) even when
     the conflict is declared symmetrically on both sides.
     """
     if registry is None:
         registry = PATCH_REGISTRY
+    if outcomes is None:
+        outcomes = get_outcomes()
 
     issues: list[ValidationIssue] = []
 
@@ -2822,13 +3186,55 @@ def validate_apply_plan(
         meta = registry.get(pid)
         if meta is None:
             continue  # already reported as unknown above
+        acknowledged = set(
+            _coerce_list(meta.get("requires_satisfied_by_retirement"))
+        )
         for ref in _coerce_list(meta.get("requires_patches")):
-            if ref not in applied:
+            if ref in applied:
+                continue
+
+            ref_meta = registry.get(ref) or {}
+            ref_retired = _is_retired(ref_meta)
+            ref_outcome = outcomes.get(ref)
+
+            # (a) Explicitly acknowledged as satisfied-by-retirement. Silent —
+            # the operator has recorded that the live half is elsewhere.
+            if ref in acknowledged and ref_retired:
+                continue
+
+            # (b) M1: the dependency ANNOUNCED apply and then did not land.
+            # This is the case the decision-level validator was structurally
+            # incapable of seeing.
+            if ref_outcome is not None and ref_outcome.get("status") not in (
+                OUTCOME_APPLIED, OUTCOME_UNKNOWN,
+            ):
                 issues.append(ValidationIssue(
-                    "ERROR", pid,
-                    f"missing required dependency: {pid} requires {ref!r} "
-                    f"to also be APPLY (currently SKIP)",
+                    "WARNING", pid,
+                    f"required dependency {ref!r} announced APPLY but its "
+                    f"apply reported {ref_outcome.get('status')!r} "
+                    f"({ref_outcome.get('reason', '')[:80]}) — {pid} is "
+                    f"running without the half it declares it needs",
                 ))
+                continue
+
+            # (c) The edge points at a retired patch that can never apply.
+            # Stale registry metadata, not a boot fault — warn, don't error.
+            if ref_retired:
+                issues.append(ValidationIssue(
+                    "WARNING", pid,
+                    f"stale dependency: {pid} requires {ref!r}, which is "
+                    f"lifecycle=retired and can never be APPLY. Drop the edge "
+                    f"or acknowledge it with "
+                    f"requires_satisfied_by_retirement: [{ref!r}]",
+                ))
+                continue
+
+            # (d) Plain missing dependency — unchanged ERROR.
+            issues.append(ValidationIssue(
+                "ERROR", pid,
+                f"missing required dependency: {pid} requires {ref!r} "
+                f"to also be APPLY (currently SKIP)",
+            ))
 
     # Conflicts — canonicalize pairs to avoid double-reporting
     seen_pairs: set[tuple[str, str]] = set()

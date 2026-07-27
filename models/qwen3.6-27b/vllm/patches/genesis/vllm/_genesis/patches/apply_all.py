@@ -214,6 +214,24 @@ def _failed(name: str, reason: str) -> PatchResult:
     return PatchResult(name=name, status="failed", reason=reason)
 
 
+def _record_outcome(
+    name: str, status: str, reason: str, drift: bool = False,
+) -> None:
+    """Report an apply OUTCOME back to the dispatcher (REVIEW H2 / M1).
+
+    `dispatcher._DECISIONS` only ever held should_apply()'s *intent*; the
+    outcomes lived here in `PatchStats.results` and the two were never
+    reconciled, so the boot summary's "✓ APPLIED" table and the apply-plan
+    validator were both reporting decisions as facts. Best-effort: a failure to
+    record must never affect the patch run itself.
+    """
+    try:
+        from vllm._genesis.dispatcher import log_outcome
+        log_outcome(name, status, reason, drift)
+    except Exception as e:  # pragma: no cover - defensive
+        log.debug("[Genesis] outcome record skipped for %s: %s", name, e)
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 #                       PATCH IMPLEMENTATIONS
 # ═══════════════════════════════════════════════════════════════════════════
@@ -4844,6 +4862,7 @@ def run(verbose: bool = True, apply: bool = False) -> PatchStats:
                     else _failed(patch_name, "patch_fn returned False")
                 )
             stats.results.append(result)
+            _is_drift = False
             if result.status == "failed":
                 log.error("[Genesis] FAILED: %s — %s",
                           result.name, result.reason)
@@ -4867,11 +4886,20 @@ def run(verbose: bool = True, apply: bool = False) -> PatchStats:
             else:
                 log.info("[Genesis] applied: %s — %s",
                          result.name, result.reason)
+            # H2: feed the OUTCOME back to the dispatcher. Without this the
+            # boot summary reports should_apply()'s intent under a "✓ APPLIED"
+            # header and the dependency validator reads a drift-skipped
+            # dependency as clean. The drift verdict computed above is passed
+            # through so both sides classify identically.
+            _record_outcome(result.name, result.status, result.reason,
+                            _is_drift)
         except Exception as e:
             stats.results.append(
                 _failed(patch_name, f"{type(e).__name__}: {e}")
             )
             log.exception("[Genesis] EXCEPTION in %s", patch_name)
+            _record_outcome(patch_name, "failed",
+                            f"{type(e).__name__}: {e}", False)
 
     log.info("Genesis %s", stats)
 
@@ -4909,12 +4937,20 @@ def run(verbose: bool = True, apply: bool = False) -> PatchStats:
     try:
         from vllm._genesis.dispatcher import (
             validate_registry, validate_apply_plan,
-            log_validation_issues, get_apply_matrix,
+            log_validation_issues, get_effective_applied_set,
         )
         static_issues = validate_registry()
         if static_issues:
             log_validation_issues(static_issues)
-        applied_set = {d["patch_id"] for d in get_apply_matrix() if d["applied"]}
+        # M1: OUTCOME-corrected apply set. The old decision-level set
+        # ({d["patch_id"] for d in get_apply_matrix() if d["applied"]}) is why
+        # "P67b requires P67" validated clean on a boot where P67 announced
+        # APPLY and then DRIFT-skipped on a missing anchor — the one check
+        # whose job is "don't run half of a pair" could not see the half that
+        # failed. get_effective_applied_set() drops announced-but-not-applied
+        # ids; validate_apply_plan then reads the outcome ledger to explain
+        # WHY a dependency is missing.
+        applied_set = get_effective_applied_set()
         plan_issues = validate_apply_plan(applied_set)
         log_validation_issues(plan_issues)
     except Exception as e:
