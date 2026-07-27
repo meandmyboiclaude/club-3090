@@ -27,6 +27,11 @@ What is covered
   * the leg end to end: dark by default, inert on unguided traffic, fires only
     on (structured AND empty AND at/near cap), the three modes, the retry's
     recursion guard and its fall-through, and fail-open on any exception.
+  * BUG-167 — the retry's ACCEPTANCE test. A truncated grammar-constrained
+    retry (non-blank, unparseable, so `_pn155_is_empty` says False) must never
+    be served, and must never be served under the FIRST pass's
+    `finish_reason="stop"`: the parse gate rejects it back to the visible flag
+    path, and a payload we DO serve carries the retry's own finish_reason.
   * placement: PN155 runs with the PN101 master flag OFF — the whole point,
     since every PN101 leg is gated behind `not _skip_common()` and that gate
     excludes exactly the structured requests BUG-155 lives in.
@@ -188,11 +193,17 @@ def guided(**kwargs) -> Request:
 
 
 class Serving:
-    """Records synthetic retries and answers them from a scripted queue."""
+    """Records synthetic retries and answers them from a scripted queue.
 
-    def __init__(self, replies=(), raises=None):
+    `finishes` scripts the RETRY's own finish_reason (BUG-167): the retry that
+    hit its cap mid-schema comes back `length`, and the served choice has to say
+    so instead of inheriting the first pass's `stop`.
+    """
+
+    def __init__(self, replies=(), raises=None, finishes=()):
         self.calls = []
         self.replies = list(replies)
+        self.finishes = list(finishes)
         self.raises = raises
 
     async def create_chat_completion(self, request, raw_request=None):
@@ -200,7 +211,8 @@ class Serving:
         if self.raises is not None:
             raise self.raises
         content = self.replies.pop(0) if self.replies else '{"facts": []}'
-        return Result(content=content,
+        finish = self.finishes.pop(0) if self.finishes else "stop"
+        return Result(content=content, finish_reason=finish,
                       usage=Usage(completion_tokens=900, details=Details(0)))
 
 
@@ -605,6 +617,92 @@ def test_retry_falls_through_to_flag_when_it_empties_again():
     assert ar._STATS["pn155_retry_rescued"] == 0
     assert res.choice.finish_reason == "length"
     assert res.details.budget_empty is True
+
+
+# ─── BUG-167: the retry's acceptance test ────────────────────────────────────
+# `_pn155_is_empty` returns False for anything unparseable, so a TRUNCATED
+# grammar-constrained retry — a legal prefix of the schema, non-blank, invalid
+# JSON — used to satisfy both accept conditions and be served under the FIRST
+# pass's finish_reason="stop". Strictly worse than the well-formed empty payload
+# PN155 exists to flag, and undetectable by any client.
+
+
+TRUNCATED = '{"facts": [{"claim": "the build brok'
+
+
+def test_a_truncated_retry_is_never_served_as_stop():
+    reset_env()
+    os.environ["GENESIS_PN155_MODE"] = "retry"
+    serving = Serving(replies=[TRUNCATED], finishes=["length"])
+    res = guard(guided(thinking_token_budget=3900), Result(), serving)
+    # the retry ran, and was REJECTED
+    assert ar._STATS["pn155_retries"] == 1
+    assert ar._STATS["pn155_retry_unparseable"] == 1
+    assert ar._STATS["pn155_retry_rescued"] == 0
+    # the ORIGINAL payload is what is served — the truncated one never lands
+    assert res.choice.message.content == '{"facts": []}'
+    # ... under the visible PN155 flag semantics
+    assert res.choice.finish_reason == "length"
+    assert res.choice.genesis_finish_reason_original == "stop"
+    assert res.details.budget_empty is True
+    assert ar._STATS["pn155_flagged"] == 1
+
+
+def test_a_truncated_retry_is_rejected_even_when_it_says_stop():
+    # The parse gate does not depend on the retry's finish_reason: a grammar
+    # backend that reports `stop` on a cap-ended sequence must not slip past.
+    reset_env()
+    os.environ["GENESIS_PN155_MODE"] = "retry"
+    serving = Serving(replies=[TRUNCATED], finishes=["stop"])
+    res = guard(guided(thinking_token_budget=3900), Result(), serving)
+    assert ar._STATS["pn155_retry_unparseable"] == 1
+    assert res.choice.message.content == '{"facts": []}'
+    assert res.choice.finish_reason == "length"
+
+
+def test_a_parse_ok_retry_propagates_its_own_finish_reason():
+    # Valid JSON with real content, but the retry itself ended at its cap. The
+    # payload IS served (it parses and it is not empty) and the served choice
+    # carries the RETRY's label, not the first pass's.
+    reset_env()
+    os.environ["GENESIS_PN155_MODE"] = "retry"
+    serving = Serving(replies=['{"facts": ["the build broke"]}'],
+                      finishes=["length"])
+    res = guard(guided(thinking_token_budget=3900), Result(), serving)
+    assert ar._STATS["pn155_retry_rescued"] == 1
+    assert json.loads(res.choice.message.content)["facts"] == ["the build broke"]
+    assert res.choice.finish_reason == "length"
+    # the original is preserved, never destroyed — same contract as the flag path
+    assert res.choice.genesis_finish_reason_original == "stop"
+    assert res.details.budget_empty is False
+    assert ar._STATS["pn155_flagged"] == 0
+
+
+def test_a_clean_retry_leaves_the_finish_reason_alone():
+    # finish_reason == the original: nothing to propagate, and no
+    # genesis_finish_reason_original field invented for a no-op.
+    reset_env()
+    os.environ["GENESIS_PN155_MODE"] = "retry"
+    serving = Serving(replies=['{"facts": ["x"]}'], finishes=["stop"])
+    res = guard(guided(thinking_token_budget=3900), Result(), serving)
+    assert res.choice.finish_reason == "stop"
+    assert not hasattr(res.choice, ar._PN155_ORIG_FR_FIELD)
+    assert ar._STATS["pn155_retry_unparseable"] == 0
+
+
+def test_the_parse_gate_only_applies_to_structured_requests():
+    # `_pn155_retry` is reachable only from the structured branch today, but the
+    # gate is written as a condition, not an assumption: prose from an unguided
+    # caller must not be rejected as "unparseable".
+    reset_env()
+    serving = Serving(replies=["a plain prose answer"])
+    msg = Message('{"facts": []}')
+    res = Result()
+    ok = run(ar._pn155_retry(serving, Request(thinking_token_budget=3900), res,
+                             msg, res.choice, 3900))
+    assert ok is True
+    assert msg.content == "a plain prose answer"
+    assert ar._STATS["pn155_retry_unparseable"] == 0
 
 
 def test_a_raising_retry_still_flags():

@@ -22,6 +22,14 @@ Python whose failure would cost a bench window.
     - a reply that is only numbered steps is never emptied
     - the numbered-step shape is detect-only until opted in
 
+  BUG-168 (identity when dark — the two client-settable unlocks)
+    - `pn102_force_v5` only bypasses _skip_common on proven INTERNAL origin
+      (the shared sentinel, or a self-call re-entry marker); a client `true`
+      on a tools/structured request gets no banner
+    - the echo net needs GENESIS_ENABLE_PN102_CONTRACT **and** the internal
+      injection marker: a client-supplied `pn_env_banner` never arms it, and
+      with every flag unset the served answer is byte-identical
+
   BUG-144 (PN118 -> PN123 renumber)
     - the new flag arms the close gate, the legacy flag still does, and the
       per-knob env resolution prefers the canonical name
@@ -390,6 +398,82 @@ def test_promotion_obeys_skip_gates():
           V5_TELL in banner_of(r2), banner_of(r2)[:50])
 
 
+def test_force_v5_bypass_is_provenance_gated():
+    print("\nBUG-168 force_v5: only an INTERNAL origin may bypass _skip_common")
+    reset_env()
+    os.environ["GENESIS_ENABLE_PN102_CONTRACT"] = "1"
+
+    # (1) the defect: a client body that just says `true` on a TOOLS request.
+    r = Request(tools=[{"type": "function"}],
+                chat_template_kwargs={"pn102_force_v5": True})
+    ar.maybe_add_answer_hint(r)
+    check("client `true` + tools → NO banner (BUG-156 stays fixed)",
+          banner_of(r) == "", banner_of(r)[:50])
+
+    # ... and on a structured request, the other half of that population.
+    r = Request(response_format={"type": "json_schema"},
+                chat_template_kwargs={"pn102_force_v5": True})
+    ar.maybe_add_answer_hint(r)
+    check("client `true` + structured → NO banner", banner_of(r) == "")
+
+    # (2) back-compat: an in-tree setter writing `True` is authorised by the
+    # re-entry markers it necessarily carries.
+    r = Request(tools=[{"type": "function"}],
+                chat_template_kwargs={"pn102_force_v5": True,
+                                      ar._MARKER_KEY: True})
+    ar.maybe_add_answer_hint(r)
+    check("True + pn101_internal → bypass kept (back-compat)",
+          V5_TELL in banner_of(r), banner_of(r)[:50])
+    r = Request(tools=[{"type": "function"}],
+                chat_template_kwargs={"pn102_force_v5": True,
+                                      ar._PN123_MARKER: True})
+    ar.maybe_add_answer_hint(r)
+    check("True + pn118_internal → bypass kept (back-compat)",
+          V5_TELL in banner_of(r), banner_of(r)[:50])
+
+    # (3) the documented shared sentinel — what the PN123 rerun writes and what
+    # qbench45's thinkingcap_router_online* arms send.
+    r = Request(tools=[{"type": "function"}],
+                chat_template_kwargs={
+                    "pn102_force_v5": ar._PN102_FORCE_V5_SENTINEL})
+    ar.maybe_add_answer_hint(r)
+    check("sentinel → bypass granted", V5_TELL in banner_of(r),
+          banner_of(r)[:50])
+
+    # (4) a plain (non-skipped) request keeps working from a bare `true` — the
+    # SHAPE choice was never the dangerous part, only the bypass was.
+    r = Request(chat_template_kwargs={"pn102_force_v5": True})
+    ar.maybe_add_answer_hint(r)
+    check("client `true` on a plain request still selects the v5 shape",
+          V5_TELL in banner_of(r), banner_of(r)[:50])
+    # and so does the sentinel, which is how the bench arm actually runs.
+    r = Request(chat_template_kwargs={
+        "pn102_force_v5": ar._PN102_FORCE_V5_SENTINEL})
+    ar.maybe_add_answer_hint(r)
+    check("bench-arm sentinel on a plain request → v5 shape",
+          V5_TELL in banner_of(r), banner_of(r)[:50])
+    check("the protocol key never reaches the template",
+          "pn102_force_v5" not in (r.chat_template_kwargs or {}))
+
+    # (5) the predicate itself, in isolation.
+    check("_force_v5_is_internal: sentinel",
+          ar._force_v5_is_internal({}, ar._PN102_FORCE_V5_SENTINEL) is True)
+    check("_force_v5_is_internal: bare True, no markers",
+          ar._force_v5_is_internal({}, True) is False)
+    check("_force_v5_is_internal: absent",
+          ar._force_v5_is_internal({}, False) is False)
+    check("_force_v5_is_internal: unrelated string",
+          ar._force_v5_is_internal({}, "yes") is False)
+
+    # (6) the wire value is a CONTRACT with an out-of-tree client:
+    # ~/shared/folderX/qbench45/config/arms.yaml (thinkingcap_router_online,
+    # _c6, _c7) and bench/client.py send this exact string. Changing it here
+    # without changing them degrades those arms to the v3 banner, silently.
+    check("sentinel wire value frozen",
+          ar._PN102_FORCE_V5_SENTINEL == "genesis-internal-force-v5",
+          ar._PN102_FORCE_V5_SENTINEL)
+
+
 def test_unbounded_request_gets_no_banner():
     print("\nBUG-157 a request PN100 never sized still gets no banner")
     reset_env()
@@ -410,10 +494,27 @@ def _rescue(request, result):
     return asyncio.run(ar.maybe_rescue_answer(S(), request, result))
 
 
+def injected(**kwargs):
+    """A request the INJECTOR actually ran on — the only thing Leg 4 accepts.
+
+    [BUG-168 2026-07-27] hand-setting `chat_template_kwargs["pn_env_banner"]`
+    used to be enough to arm the echo net, which is precisely the defect: that
+    key is client-settable. Proof of injection now lives on a request attribute
+    only `maybe_add_answer_hint` writes, so these tests must go through the real
+    injector — and, like production, with the master flag on.
+    """
+    os.environ["GENESIS_ENABLE_PN102_CONTRACT"] = "1"
+    r = Request(**kwargs)
+    ar.maybe_add_answer_hint(r)
+    assert banner_of(r).startswith("[envelope]"), banner_of(r)[:40]
+    ar._STATS["hints_added"] = 0
+    return r
+
+
 def test_envelope_echo_stripped():
     print("\nBUG-156 leading [envelope] is stripped from the served answer")
     reset_env()
-    r = Request(chat_template_kwargs={"pn_env_banner": "[envelope] Work through"})
+    r = injected()
     res = Result(content='[envelope] {"facts": [1]}')
     _rescue(r, res)
     msg = res.choices[0].message
@@ -424,7 +525,7 @@ def test_envelope_echo_stripped():
 def test_envelope_echo_not_ours():
     print("\nBUG-156 an answer we never injected into is left alone")
     reset_env()
-    r = Request()  # no pn_env_banner → not our injection
+    r = Request()  # no injection → not ours
     res = Result(content="[envelope] verbatim from the user's own prompt")
     _rescue(r, res)
     check("untouched",
@@ -432,10 +533,42 @@ def test_envelope_echo_not_ours():
     check("not counted", ar._STATS["banner_echo_stripped"] == 0)
 
 
+def test_client_supplied_banner_is_not_proof_of_injection():
+    print("\nBUG-168 a CLIENT-set pn_env_banner does not arm the echo net")
+    reset_env()
+    # Master ON, so only the second half of the gate can save this request.
+    os.environ["GENESIS_ENABLE_PN102_CONTRACT"] = "1"
+    r = Request(chat_template_kwargs={"pn_env_banner": "[envelope] mine, not yours"})
+    res = Result(content="[envelope] the client's own answer text")
+    _rescue(r, res)
+    check("served answer untouched",
+          res.choices[0].message.content == "[envelope] the client's own answer text",
+          repr(res.choices[0].message.content))
+    check("not counted", ar._STATS["banner_echo_stripped"] == 0)
+    check("no injection marker was written",
+          getattr(r, ar._BANNER_INJECTED_ATTR, None) is None)
+
+
+def test_echo_net_is_dark_without_the_master_flag():
+    print("\nBUG-168 identity when dark: no GENESIS_ENABLE_* → no rewrite")
+    reset_env()   # every GENESIS_ENABLE_* unset
+    # Even a request that genuinely carries our marker is not rewritten: with
+    # the injector dark there is nothing of ours on the wire to clean up.
+    r = Request()
+    setattr(r, ar._BANNER_INJECTED_ATTR, "[envelope] Work through")
+    res = Result(content='[envelope] {"facts": [1]}')
+    _rescue(r, res)
+    check("served answer byte-identical",
+          res.choices[0].message.content == '[envelope] {"facts": [1]}',
+          repr(res.choices[0].message.content))
+    check("not counted", ar._STATS["banner_echo_stripped"] == 0)
+    check("step echo not even counted", ar._STATS["banner_step_echo_seen"] == 0)
+
+
 def test_envelope_only_answer_kept():
     print("\nBUG-156 an answer that is ONLY the marker is never emptied")
     reset_env()
-    r = Request(chat_template_kwargs={"pn_env_banner": "[envelope] x"})
+    r = injected()
     res = Result(content="[envelope]")
     _rescue(r, res)
     check("kept", res.choices[0].message.content == "[envelope]")
@@ -444,7 +577,7 @@ def test_envelope_only_answer_kept():
 def test_step_echo_detect_only_by_default():
     print("\nBUG-156 numbered-step echo: detected, not stripped, by default")
     reset_env()
-    r = Request(chat_template_kwargs={"pn_env_banner": "[envelope] x"})
+    r = injected()
     body = "Step 1: read the chunk\nStep 2: assemble JSON\n\n{\"facts\": []}"
     res = Result(content=body)
     _rescue(r, res)
@@ -457,7 +590,7 @@ def test_step_echo_opt_in_strip():
     print("\nBUG-156 numbered-step echo: stripped when opted in")
     reset_env()
     os.environ["GENESIS_PN102_STRIP_STEP_ECHO"] = "1"
-    r = Request(chat_template_kwargs={"pn_env_banner": "[envelope] x"})
+    r = injected()
     res = Result(content="Step 1: read\nStep 2: assemble\n\n{\"facts\": []}")
     _rescue(r, res)
     check("stripped to the answer",
@@ -470,7 +603,7 @@ def test_step_only_answer_never_emptied():
     print("\nBUG-156 a reply that is ONLY steps survives even when opted in")
     reset_env()
     os.environ["GENESIS_PN102_STRIP_STEP_ECHO"] = "1"
-    r = Request(chat_template_kwargs={"pn_env_banner": "[envelope] x"})
+    r = injected()
     body = "Step 1: first\nStep 2: second"
     res = Result(content=body)
     _rescue(r, res)
@@ -481,7 +614,7 @@ def test_strip_can_be_disabled():
     print("\nBUG-156 GENESIS_PN102_STRIP_ECHO=0 restores the old behaviour")
     reset_env()
     os.environ["GENESIS_PN102_STRIP_ECHO"] = "0"
-    r = Request(chat_template_kwargs={"pn_env_banner": "[envelope] x"})
+    r = injected()
     res = Result(content="[envelope] answer")
     _rescue(r, res)
     check("untouched", res.choices[0].message.content == "[envelope] answer")
@@ -544,9 +677,12 @@ TESTS = [
     test_real_bridge_import_is_absent_offline,
     test_candidate_filters,
     test_promotion_obeys_skip_gates,
+    test_force_v5_bypass_is_provenance_gated,
     test_unbounded_request_gets_no_banner,
     test_envelope_echo_stripped,
     test_envelope_echo_not_ours,
+    test_client_supplied_banner_is_not_proof_of_injection,
+    test_echo_net_is_dark_without_the_master_flag,
     test_envelope_only_answer_kept,
     test_step_echo_detect_only_by_default,
     test_step_echo_opt_in_strip,

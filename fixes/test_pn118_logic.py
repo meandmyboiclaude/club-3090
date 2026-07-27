@@ -713,7 +713,14 @@ def test_rerun_request_shape():
     run(s, Request(budget=8000), res)
     syn = s.calls[-1]
     ctk = syn.chat_template_kwargs
-    check("v5 forced via ctk key", ctk.get("pn102_force_v5") is True, str(ctk))
+    # [BUG-168 2026-07-27] the rerun writes the force-v5 SENTINEL, not True:
+    # `pn102_force_v5` is the one ctk key that bypasses _skip_common and that
+    # bypass is now provenance-gated. The value must both be the sentinel and be
+    # accepted as internal by the gate the banner leg actually consults.
+    check("v5 forced via ctk key (sentinel)",
+          ctk.get("pn102_force_v5") == ar._PN102_FORCE_V5_SENTINEL, str(ctk))
+    check("the forced value is accepted as internal-origin",
+          ar._force_v5_is_internal(ctk, ctk.get("pn102_force_v5")) is True)
     check("PN101 marker carried (no re-entry)", ctk.get("pn101_internal") is True)
     # ctk marker value frozen on the old spelling — see the BUG-144 note.
     check("PN123 marker carried (no re-entry)", ctk.get("pn118_internal") is True)

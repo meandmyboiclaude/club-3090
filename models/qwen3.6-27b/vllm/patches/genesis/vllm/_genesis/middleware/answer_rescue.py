@@ -26,8 +26,9 @@ default):
   PN102  Leg 1  — the envelope-contract banner (GENESIS_ENABLE_PN102_CONTRACT)
   PN102  Leg 1b — server-side deep/lean BANNER autosplit, BUG-157
                   (GENESIS_ENABLE_PN102_ROUTE_AUTOSPLIT)
-  PN102  Leg 4  — output-side banner-echo net, BUG-156
-                  (GENESIS_PN102_STRIP_ECHO / _STRIP_STEP_ECHO)
+  PN102  Leg 4  — output-side banner-echo net, BUG-156 (gated on Leg 1's master
+                  GENESIS_ENABLE_PN102_CONTRACT since BUG-168; sub-toggles
+                  GENESIS_PN102_STRIP_ECHO / _STRIP_STEP_ECHO)
   PN123  Leg 3  — premature-close gate (GENESIS_ENABLE_PN123_CLOSEGATE; fka
                   PN118, renumbered 2026-07-26 for BUG-144 — see Leg 3's header)
 """
@@ -53,6 +54,41 @@ except Exception:  # pragma: no cover
 _MARKER_KEY = "pn101_internal"
 _PN100_MARKER_KEY = "pn100_internal"
 _HINT_SENTINEL = "[reply-window note]"
+
+# ── PN102 force-v5 protocol (BUG-168, 2026-07-27) ────────────────────────────
+# `pn102_force_v5` is the ONE ctk key that bypasses `_skip_common`, so a bare
+# truthy from any caller put the envelope banner back on tools/structured
+# requests — the exact population BUG-156 was fixed by excluding. A boolean
+# cannot carry provenance, so the bypass now needs PROOF of internal origin:
+#
+#   * the value IS `_PN102_FORCE_V5_SENTINEL`, a documented shared constant,
+#     OR
+#   * the request already carries one of this module's own re-entry markers
+#     (`pn101_internal` / `pn118_internal`), which only a synthetic self-call
+#     has — this is the back-compat path for any in-tree setter still writing
+#     `True`.
+#
+# A bare `pn102_force_v5: true` from a client is NOT provenance. It still
+# selects the v5 banner SHAPE on a request that passes the normal gates (that
+# choice was never dangerous and predates this key's bypass), but it can no
+# longer unlock the bypass itself.
+#
+# The sentinel is deliberately a SHARED value, not a secret: qbench45's
+# `thinkingcap_router_online*` arms are a legitimate external forcer (they call
+# /v1/h119/score themselves and pass the route back), and their treatment
+# `{ctk: {pn102_force_v5: <sentinel>}}` must keep working. Change this string
+# and qbench45/config/arms.yaml must change with it.
+_PN102_FORCE_V5_KEY = "pn102_force_v5"
+_PN102_FORCE_V5_SENTINEL = "genesis-internal-force-v5"
+
+# ── PN102 banner-injection marker (BUG-168, 2026-07-27) ──────────────────────
+# Leg 4's echo net used to read `chat_template_kwargs["pn_env_banner"]` as proof
+# that WE injected the banner. That key is client-settable and at least one real
+# client protocol sets it, so the net rewrote served answers on requests we
+# never touched — with every GENESIS_ENABLE_* flag OFF. This attribute is
+# written ONLY by `maybe_add_answer_hint`, on the request object, which is never
+# serialized to a caller and cannot be spoofed through the request body.
+_BANNER_INJECTED_ATTR = "_genesis_pn102_banner_injected"
 _ANSWER_TAIL_RE = re.compile(r"(final\s+)?answer\s*[:\-]", re.IGNORECASE)
 
 
@@ -113,6 +149,10 @@ _STATS: dict[str, int] = {
     "pn155_flagged": 0,
     "pn155_retries": 0,
     "pn155_retry_rescued": 0,
+    # [BUG-167] a retry whose payload did not parse under the request's own
+    # grammar — rejected, not served. Distinct from pn155_retry_rescued==0 with
+    # an empty payload, which is the ORIGINAL BUG-155 shape.
+    "pn155_retry_unparseable": 0,
     "pn155_errors": 0,
 }
 
@@ -592,6 +632,38 @@ def _contract_v8_hybrid(ctk: dict, budget: int) -> bool:
     return True
 
 
+def _force_v5_is_internal(ctk: dict, raw: Any) -> bool:
+    """Does this `pn102_force_v5` value prove internal origin? (BUG-168)
+
+    Only an internal-origin force may bypass `_skip_common`. Two accepted
+    proofs, both documented at `_PN102_FORCE_V5_SENTINEL`: the shared sentinel
+    value, or a self-call re-entry marker already on the request. A bare `True`
+    from a client body is neither.
+    """
+    if not raw:
+        return False
+    if isinstance(raw, str) and raw.strip() == _PN102_FORCE_V5_SENTINEL:
+        return True
+    # Back-compat: an in-tree setter writing `True` is authorised by the
+    # suppression markers it necessarily carries (a client body that guessed
+    # both marker keys has already forfeited the skip gates elsewhere).
+    return bool(ctk.get(_MARKER_KEY) or ctk.get(_PN123_MARKER))
+
+
+def _mark_banner_injected(request: Any, banner: Any) -> None:
+    """Record on the REQUEST that Leg 1 injected this banner (BUG-168).
+
+    Not a ctk key: ctk is caller-supplied and reaches the template. This
+    attribute is the only thing Leg 4's echo net will accept as proof.
+    """
+    if not isinstance(banner, str) or not banner:
+        return
+    try:
+        setattr(request, _BANNER_INJECTED_ATTR, banner)
+    except Exception:  # pragma: no cover - frozen models
+        log.debug("PN102: could not mark the injected banner", exc_info=True)
+
+
 def maybe_add_answer_hint(request: Any) -> None:
     if not _env_bool("GENESIS_ENABLE_PN102_CONTRACT"):
         return
@@ -602,7 +674,12 @@ def maybe_add_answer_hint(request: Any) -> None:
     # Checked before the skip/marker gates: the rerun carries the PN123/PN101
     # markers (to suppress post-response re-entry), and those would otherwise
     # trip _skip_common and drop the banner it specifically needs.
-    force_v5 = bool(ctk.pop("pn102_force_v5", False))
+    # [BUG-168 2026-07-27] but ONLY an internal-origin force gets that bypass —
+    # see `_force_v5_is_internal`. A client-supplied bare `true` still picks the
+    # v5 shape, it just no longer opens the tools/structured door (BUG-156).
+    _force_raw = ctk.pop(_PN102_FORCE_V5_KEY, False)
+    force_v5 = bool(_force_raw)
+    force_internal = _force_v5_is_internal(ctk, _force_raw)
     # [BUG-157 2026-07-26] the ROUTE-driven promotion (Leg 1b below) is a
     # SEPARATE key on purpose. `pn102_force_v5` bypasses _skip_common because a
     # PN123 rerun is a synthetic call that carries the suppression
@@ -610,7 +687,7 @@ def maybe_add_answer_hint(request: Any) -> None:
     # re-open BUG-156 by putting the banner back on tools/structured requests.
     # So `pn102_auto_v5` is popped here but only consulted after the gates.
     auto_v5 = bool(ctk.pop("pn102_auto_v5", False))
-    if not _bounded(request) or (not force_v5 and _skip_common(request)):
+    if not _bounded(request) or (not force_internal and _skip_common(request)):
         return
     if ctk.get("pn_env_banner"):
         return  # idempotent
@@ -652,6 +729,8 @@ def maybe_add_answer_hint(request: Any) -> None:
     else:
         _contract_v3_sized(ctk, budget)
     request.chat_template_kwargs = ctk
+    # [BUG-168] the ONLY place the echo net's proof-of-injection is written.
+    _mark_banner_injected(request, ctk.get("pn_env_banner"))
     _STATS["hints_added"] += 1
 
 
@@ -952,26 +1031,42 @@ def install_route_autosplit(serving: Any) -> bool:
 #   * it fires only when THIS request carried a banner WE injected, and only
 #     strips the marker that banner itself opens with (read off the banner, not
 #     hardcoded) — so a caller whose legitimate answer starts with "[envelope]"
-#     is only ever touched on a request we were injecting into anyway;
+#     is only ever touched on a request we were injecting into anyway.
+#     [BUG-168 2026-07-27] that claim did not used to be TRUE: proof-of-
+#     injection was `chat_template_kwargs["pn_env_banner"]`, a key a client can
+#     set (and one real client protocol does — see the BUG-157 narrative
+#     above), and the call site sat above every master-flag return, so with
+#     every GENESIS_ENABLE_* unset a client that sent its own banner still had
+#     its served answer rewritten. Now the net requires BOTH
+#     GENESIS_ENABLE_PN102_CONTRACT (the master that owns injection: if we
+#     never injected, we never rewrite) and `_BANNER_INJECTED_ATTR`, which only
+#     `maybe_add_answer_hint` writes and no request body can carry;
 #   * the numbered-step shape is DETECTED and counted but NOT stripped by
 #     default. A leading "Step 1: … Step N: …" block is indistinguishable from
 #     a caller legitimately asking for worked steps, and this net has no way to
 #     tell the two apart. GENESIS_PN102_STRIP_STEP_ECHO=1 opts in for callers
 #     that know they never want it.
 #
-# Env: GENESIS_PN102_STRIP_ECHO (default ON — it can only fire on a request we
-#      injected into), GENESIS_PN102_STRIP_STEP_ECHO (default OFF).
+# Env: GENESIS_ENABLE_PN102_CONTRACT (the master — the net does not run at all
+#      without it, BUG-168), GENESIS_PN102_STRIP_ECHO (default ON under that
+#      master — it can only fire on a request we injected into),
+#      GENESIS_PN102_STRIP_STEP_ECHO (default OFF).
 
 _BANNER_MARKER_RE = re.compile(r"^\s*(\[[a-z][a-z0-9 _-]{0,30}\])")
 _STEP_LINE_RE = re.compile(r"^\s*Step\s+(\d+)\s*[:.\-]", re.IGNORECASE)
 
 
 def _injected_banner_marker(request: Any) -> str | None:
-    """The leading "[…]" token of the banner WE put on this request, if any."""
-    ctk = getattr(request, "chat_template_kwargs", None) or {}
-    if not isinstance(ctk, dict):
-        return None
-    banner = ctk.get("pn_env_banner")
+    """The leading "[…]" token of the banner WE put on this request, if any.
+
+    [BUG-168 2026-07-27] reads the INTERNAL injection marker, not
+    `chat_template_kwargs["pn_env_banner"]`. That ctk key is client-settable —
+    and per this file's own BUG-157 narrative a real client protocol sets it —
+    so keying on it made the net rewrite served answers on requests we never
+    injected into. `_BANNER_INJECTED_ATTR` is written in exactly one place,
+    `maybe_add_answer_hint`, after it has actually written a banner.
+    """
+    banner = getattr(request, _BANNER_INJECTED_ATTR, None)
     if not isinstance(banner, str) or not banner:
         return None
     m = _BANNER_MARKER_RE.match(banner)
@@ -1696,7 +1791,11 @@ async def _pn123_rerun(serving: Any, request: Any, result: Any, message: Any,
         base_ctk = dict(getattr(request, "chat_template_kwargs", None) or {})
         base_ctk.pop("pn_env_banner", None)
         base_ctk.pop("pn_env_seed", None)
-        base_ctk["pn102_force_v5"] = True
+        # [BUG-168] the SENTINEL, not True: `pn102_force_v5` is the one key that
+        # bypasses _skip_common, and the bypass is now provenance-gated. The
+        # markers below would authorise it too (back-compat path), but writing
+        # the sentinel is what makes this call site self-evidently internal.
+        base_ctk[_PN102_FORCE_V5_KEY] = _PN102_FORCE_V5_SENTINEL
         base_ctk[_MARKER_KEY] = True
         base_ctk[_PN123_MARKER] = True
         messages = list(getattr(request, "messages", None) or [])
@@ -2133,9 +2232,9 @@ def _pn155_stamp(result: Any, **fields: Any) -> bool:
 
 
 async def _pn155_retry(serving: Any, request: Any, result: Any, message: Any,
-                       budget: int) -> bool:
+                       choice: Any, budget: int) -> bool:
     """One bounded re-generate with more thinking room. True iff it delivered a
-    non-empty payload (which is then served in place of the empty one).
+    payload we are willing to SERVE (which then replaces the empty one).
 
     NOT `_maybe_escalate`: that leg continues an UNCLOSED think block from the
     reasoning text, and a BUG-155 row has neither (its think block closed, and
@@ -2143,6 +2242,24 @@ async def _pn155_retry(serving: Any, request: Any, result: Any, message: Any,
     generation of the same request, carrying the caller's structured-output
     fields so the retry is answering the same question under the same grammar.
     Never a second retry: the synthetic carries `_PN155_MARKER_KEY`.
+
+    [BUG-167 2026-07-27] ACCEPTANCE is not "non-empty". `_pn155_is_empty`
+    returns False for anything that does not parse — deliberate, and correct
+    for what it is FOR (deciding whether the model produced the grammar's
+    cheapest legal completion), but it is not a validity check. Reused as one,
+    it accepted a grammar-constrained retry that hit its cap mid-schema: a
+    legal PREFIX of the schema, non-blank, unparseable, served in place of the
+    well-formed `{"facts": []}` this leg exists to flag — and served under the
+    FIRST pass's `finish_reason="stop"`, because the retry's own reason was
+    never read. Strictly worse than the row it replaced, and invisible.
+
+    Two gates close it, both cheap because we are already inside the guided
+    path: the payload must PARSE (`json.loads`) when the request was
+    structured, and the retry's OWN `finish_reason` is propagated onto the
+    served choice. A payload that fails the parse gate is NOT served: this
+    returns False and the caller applies the normal PN155 flag semantics to the
+    ORIGINAL response (`finish_reason="length"` +
+    `genesis_finish_reason_original`), so the failure stays visible.
     """
     ceil = _env_int("GENESIS_PN155_RETRY_CEIL",
                     _env_int("GENESIS_PN101_TOTAL_THINK_CEIL", 10240))
@@ -2192,16 +2309,49 @@ async def _pn155_retry(serving: Any, request: Any, result: Any, message: Any,
     rchoice = _extract_choice(resp)
     rmsg = getattr(rchoice, "message", None) if rchoice is not None else None
     new_content = (getattr(rmsg, "content", None) or "") if rmsg else ""
+    new_finish = getattr(rchoice, "finish_reason", None) if rchoice is not None else None
     if not new_content.strip() or _pn155_is_empty(new_content):
         log.info("PN155: retry at budget=%d empty again — falling through to flag",
                  new_budget)
         return False
+    # [BUG-167] gate (a): under a grammar, "not empty" is not "valid". Run the
+    # same parse the caller is about to run, one string earlier.
+    if _has_structured_output(request):
+        try:
+            json.loads(new_content)
+        except Exception as exc:
+            _STATS["pn155_retry_unparseable"] += 1
+            log.warning(
+                "PN155: retry at budget=%d returned an UNPARSEABLE payload "
+                "(%s; finish=%s, %d chars) — refusing to serve it, falling "
+                "through to flag (BUG-167)",
+                new_budget, exc.__class__.__name__, new_finish, len(new_content),
+            )
+            return False
     message.content = new_content
+    # [BUG-167] gate (b): the served payload is the RETRY's, so it must carry
+    # the retry's label. Keeping the original "stop" on a retry that ended at
+    # `length` is exactly how a truncated retry looked complete. The original is
+    # preserved on its own field, never destroyed — same contract as the flag
+    # path below.
+    if new_finish is not None and new_finish != getattr(choice, "finish_reason", None):
+        try:
+            prior = getattr(choice, "finish_reason", None)
+            if not hasattr(choice, _PN155_ORIG_FR_FIELD):
+                setattr(choice, _PN155_ORIG_FR_FIELD, prior)
+            choice.finish_reason = new_finish
+            log.warning(
+                "PN155: retry finish_reason %s -> %s propagated onto the served "
+                "choice (BUG-167)", prior, new_finish,
+            )
+        except Exception as exc:  # pragma: no cover - frozen models
+            _STATS["pn155_errors"] += 1
+            log.warning("PN155: could not propagate retry finish_reason (%s)", exc)
     _sum_usage(getattr(result, "usage", None), getattr(resp, "usage", None))
     _pn155_stamp(result, pn155_retry_budget=new_budget)
     _STATS["pn155_retry_rescued"] += 1
-    log.info("PN155: retry at budget=%d recovered a non-empty payload (%d chars)",
-             new_budget, len(new_content))
+    log.info("PN155: retry at budget=%d recovered a servable payload "
+             "(%d chars, finish=%s)", new_budget, len(new_content), new_finish)
     return True
 
 
@@ -2262,7 +2412,8 @@ async def _maybe_pn155_budget_truth(serving: Any, request: Any,
         return
     if mode == "retry":
         try:
-            if await _pn155_retry(serving, request, result, message, budget):
+            if await _pn155_retry(serving, request, result, message, choice,
+                                  budget):
                 _pn155_stamp(result, **{_PN155_EMPTY_FIELD: False})
                 return
         except Exception as exc:
@@ -2311,7 +2462,16 @@ async def maybe_rescue_answer(serving: Any, request: Any, result: Any) -> Any:
     # content, and repair APPENDS to content this has already cleaned) — so
     # every path that can put text in the answer channel is covered exactly
     # once.
-    if not hasattr(result, "__aiter__") and not getattr(request, "stream", False):
+    # [BUG-168 2026-07-27] gated on GENESIS_ENABLE_PN102_CONTRACT — the master
+    # that owns banner injection. The net is a cleanup pass for OUR banner; with
+    # the injector dark there is nothing of ours to clean up, and running anyway
+    # broke identity-when-dark (it was the one leg with no GENESIS_ENABLE_* of
+    # its own). Belt and braces: `_injected_banner_marker` additionally requires
+    # the internal injection marker, so even with the master ON a client that
+    # sends its own `pn_env_banner` is not rewritten.
+    if (_env_bool("GENESIS_ENABLE_PN102_CONTRACT")
+            and not hasattr(result, "__aiter__")
+            and not getattr(request, "stream", False)):
         try:
             _maybe_strip_banner_echo(request, result)
         except Exception as exc:  # pragma: no cover - fail-open
