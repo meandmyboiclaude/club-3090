@@ -98,9 +98,13 @@ HELPER_SRC = '''
 def _bug077_repetition_default(request):
     import os as _os
 
+    # never override a caller that asked for something explicitly — checked
+    # BEFORE the flag so dark mode stays byte-identical for explicit callers
+    # (review 2026-07-27 H1: the old order dropped a caller's value when dark)
+    if getattr(request, "repetition_detection", None) is not None:
+        return getattr(request, "repetition_detection")
     if _os.environ.get("GENESIS_ENABLE_BUG077_REPETITION_DETECT", "0") != "1":
         return None
-    # never override a caller that asked for something explicitly
     if getattr(request, "repetition_detection", None) is not None:
         return getattr(request, "repetition_detection")
 

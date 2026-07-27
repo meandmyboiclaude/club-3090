@@ -257,3 +257,15 @@ if __name__ == "__main__":
         print(f"FAILED {len(FAILS)}: {FAILS}")
         sys.exit(1)
     print("all tests passed")
+
+
+def test_dark_mode_preserves_explicit_caller_value():
+    """Review 2026-07-27 H1: with the flag OFF, an explicitly-supplied
+    repetition_detection must pass through untouched (dark == identity)."""
+    fn = _load_helper()
+    _env()  # clears all BUG077 env -> dark
+    rd = _RDP(3, 9, 7)
+    out = fn(_Req(explicit=rd))
+    check("dark_explicit_passthrough", out is rd, f"got {out!r}")
+
+test_dark_mode_preserves_explicit_caller_value()
