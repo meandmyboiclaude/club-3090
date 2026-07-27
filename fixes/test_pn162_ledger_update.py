@@ -34,6 +34,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import types
 from pathlib import Path
 
@@ -238,6 +239,130 @@ def test_reader_holds_unfinished_rows_for_the_next_pass():
         fh.write(json.dumps(f) + "\n")
     rows2, _ = up.read_sink_since(d, offs, CFG, {})
     assert len(rows2) == 1 and rows2[0]["req_id"] == "pending"
+
+
+def _append(d, *lines):
+    with open(os.path.join(d, "meta-20260727-000000.jsonl"), "a",
+              encoding="utf-8") as fh:
+        for ln in lines:
+            fh.write(json.dumps(ln) + "\n")
+
+
+def test_reader_does_not_seek_past_an_inflight_score_line():
+    """BUG-169. The boundary the old test could not reach: an unfinished score
+    line with COMPLETED pairs AFTER it. `complete_end = max(finish offset)`
+    seeked past the pending score, so its finish arrived orphaned and the row
+    was counted in neither pass — and it is a bound row, i.e. the population
+    that drives k upward."""
+    d = tmpdir()
+    s_slow, f_slow = sink_rows(1300, 1295, req_id="slow", censored=True)
+    later = [sink_rows(1300, 400), sink_rows(1300, 420)]
+    later_ids = sorted(s["req_id"] for s, _f in later)
+    write_sink(d, [(s_slow, None)] + later)
+
+    counts = {}
+    rows, offs = up.read_sink_since(d, {}, CFG, counts)
+    assert rows == [], f"pairs behind the pin must be delayed, got {rows}"
+    assert counts["unfinished"] == 1 and "orphan_abandoned" not in counts
+
+    _append(d, f_slow)
+    rows2, offs2 = up.read_sink_since(d, offs, CFG, {})
+    got = sorted(r["req_id"] for r in rows2)
+    assert got == sorted(["slow"] + later_ids), got
+    slow = [r for r in rows2 if r["req_id"] == "slow"][0]
+    assert up.classify(slow, CFG) == "bound"
+    # and the delay is idempotent — nothing is credited twice
+    rows3, offs3 = up.read_sink_since(d, offs2, CFG, {})
+    assert rows3 == [] and offs3 == offs2
+
+
+def test_run_pass_credits_a_bound_row_that_straddled_a_pass_boundary():
+    """The same defect at the level that matters: the ledger's bound count."""
+    d = tmpdir()
+    sink = os.path.join(d, "sink")
+    os.makedirs(sink)
+    ledger, cursor = os.path.join(d, "l.json"), os.path.join(d, "c.json")
+    s, f = sink_rows(1300, 1295, req_id="slow", censored=True)
+    write_sink(sink, [(s, None)] + [sink_rows(1300, 400) for _ in range(3)])
+    up.run_pass(CFG, sink, ledger, cursor)
+    with open(os.path.join(sink, "meta-20260727-000000.jsonl"), "a",
+              encoding="utf-8") as fh:
+        fh.write(json.dumps(f) + "\n")
+    led = up.run_pass(CFG, sink, ledger, cursor)
+    assert led["window"]["bound"] == 1, led["window"]
+    assert led["window"]["n"] == 4, led["window"]
+    assert led["bucket"]["5"] > 1.0, led["bucket"]
+
+
+def test_reader_abandons_an_orphan_when_the_boot_died():
+    """--orphan-stale-s: the file will never grow again, so neither the byte
+    nor the sink-clock bound can ever trip — mtime is the only bound left."""
+    d = tmpdir()
+    s, _f = sink_rows(1300, 400, req_id="orphan")
+    p = write_sink(d, [(s, None), sink_rows(1300, 500)])
+    old = time.time() - (CFG["orphan_stale_s"] + 60)
+    os.utime(p, (old, old))
+    counts = {}
+    rows, offs = up.read_sink_since(d, {}, CFG, counts)
+    assert counts["orphan_abandoned"] == 1 and counts["unfinished"] == 1
+    assert [r["req_id"] for r in rows] != [] and "orphan" not in {
+        r["req_id"] for r in rows}
+    rows2, _ = up.read_sink_since(d, offs, CFG, {})
+    assert rows2 == []                       # cursor moved past it for good
+
+
+def test_reader_abandons_an_orphan_buried_under_new_bytes():
+    """--orphan-bytes: bounds both the per-pass re-read and the lag."""
+    d = tmpdir()
+    cfg = dict(CFG, orphan_bytes=200, orphan_stale_s=1e9, orphan_age_s=1e9)
+    s, _f = sink_rows(1300, 400, req_id="orphan")
+    write_sink(d, [(s, None)] + [sink_rows(1300, 400) for _ in range(6)])
+    counts = {}
+    rows, _ = up.read_sink_since(d, {}, cfg, counts)
+    assert counts["orphan_abandoned"] == 1 and len(rows) == 6
+
+
+def test_reader_abandons_an_orphan_the_sink_clock_left_behind():
+    """--orphan-age-s: under a slow trickle 1 MiB takes hours to accumulate,
+    so the byte bound alone would pin the cursor for hours."""
+    d = tmpdir()
+    cfg = dict(CFG, orphan_bytes=10 ** 9, orphan_stale_s=1e9)
+    s, _f = sink_rows(1300, 400, req_id="orphan", ts=1000.0)
+    write_sink(d, [(s, None),
+                   sink_rows(1300, 400, ts=1000.0 + cfg["orphan_age_s"] + 10)])
+    counts = {}
+    rows, _ = up.read_sink_since(d, {}, cfg, counts)
+    assert counts["orphan_abandoned"] == 1 and len(rows) == 1
+
+
+def test_reader_does_not_abandon_a_young_unfinished_row():
+    """The bounds must not fire on the normal case, or BUG-169 comes back
+    wearing a counter."""
+    d = tmpdir()
+    s, _f = sink_rows(1300, 400, req_id="pending", ts=time.time())
+    write_sink(d, [(s, None), sink_rows(1300, 400, ts=time.time())])
+    counts = {}
+    rows, _ = up.read_sink_since(d, {}, CFG, counts)
+    assert counts["unfinished"] == 1 and "orphan_abandoned" not in counts
+    assert rows == []
+
+
+def test_reader_leaves_a_torn_tail_unconsumed():
+    """A half-written line must not be consumed: the next append concatenates
+    onto it, so a cursor past it loses both rows."""
+    d = tmpdir()
+    p = write_sink(d, [sink_rows(1300, 400)])
+    s, f = sink_rows(900, 300, req_id="torn")
+    blob = json.dumps(s) + "\n" + json.dumps(f)
+    with open(p, "a", encoding="utf-8") as fh:
+        fh.write(blob[:-10])                 # finish line torn mid-write
+    counts = {}
+    rows, offs = up.read_sink_since(d, {}, CFG, counts)
+    assert len(rows) == 1 and rows[0]["req_id"] != "torn"
+    with open(p, "a", encoding="utf-8") as fh:
+        fh.write(blob[-10:] + "\n")
+    rows2, _ = up.read_sink_since(d, offs, CFG, {})
+    assert [r["req_id"] for r in rows2] == ["torn"]
 
 
 def test_reader_recovers_from_truncation():

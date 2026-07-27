@@ -2419,6 +2419,9 @@ class PN119Router:
                 self._free_slots.append(p["slot"])
                 continue
             self._free_slots.append(p["slot"])
+            if not self._score_is_finite(score, p["req_id"], p["prompt_len"],
+                                         "async"):
+                continue
             self._publish(p["req_id"], score, p["prompt_len"], p["cached"],
                           p["thinking"], p["budget"], p["source"],
                           p["caller"], p["suite"], feat)
@@ -2478,6 +2481,8 @@ class PN119Router:
         # centre/scale/PCA/readout chain is pre-collapsed at load, so the whole
         # per-request decision is a single 15,360-term reduction on device.
         score = float(torch.dot(self.pv, x)) + self.pb
+        if not self._score_is_finite(score, req_id, prompt_len, "sync"):
+            return
         feat = None
         if want_feat:
             try:
@@ -2519,9 +2524,50 @@ class PN119Router:
                 "probe_sig": self.probe_sig_short(),
             }) + "\n")
 
+    def _score_is_finite(self, score, req_id, prompt_len, where: str) -> bool:
+        """False (and the request is already on the fallback) if the score is
+        not a real number.
+
+        `_load_probe` guards the PROBE against non-finite values and near-zero
+        `sd`, with a comment naming this exact failure — "every request routes
+        LEAN, at full accuracy cost, with no exception, no warning". Nothing
+        guarded the ACTIVATIONS, and NaN hidden states demonstrably occur on
+        this stack (`patch_pn105_nan_logits_abort.py` ships for them). One NaN
+        score does three separate kinds of damage, all silent:
+
+          * `NaN >= t_used` is False, so it is a LEAN in enforce mode — not a
+            fallback, not counted, not visible anywhere;
+          * `bisect.insort(_score_sorted, nan)` de-sorts the window. The
+            eviction path then fails its `srt[i] == old` identity check, stops
+            popping, and `_score_sorted` desynchronises from the capped
+            `_score_win` and grows without bound — after which the rate
+            controller's cut point `srt[k]` is no longer the k-th smallest for
+            the rest of the boot. `_effective_tdeep` only guards against `T`
+            itself being non-finite, not against the ORDER being wrong;
+          * `json.dumps` emits a bare `NaN` token into meta-*.jsonl. Python's
+            json.loads accepts it, so the refit round-trips it into `Row.score`
+            and on into the DeLong/accuracy paths; every strict JSON reader
+            rejects the whole line.
+
+        So it takes the declared fallback route like any other unscoreable
+        request, and is counted under `score_nonfinite` (plus a per-origin
+        counter) in health.json.
+        """
+        if math.isfinite(score):
+            return True
+        _bump("score_nonfinite")
+        self.scored.pop(req_id, None)
+        self._scored_plen.pop(req_id, None)
+        self._unscoreable(req_id, f"score_nonfinite_{where}", 0, prompt_len)
+        return False
+
     def _publish(self, req_id, score, prompt_len, cached, thinking, budget,
                  source, caller, suite, feat) -> None:
         """Everything that happens once a score EXISTS — sync or deferred."""
+        # Last line of defence: no caller, present or future, may put a
+        # non-finite score into the percentile window or the sink.
+        if not self._score_is_finite(score, req_id, prompt_len, "publish"):
+            return
         self.scored[req_id] = score
         self._scored_plen[req_id] = prompt_len
         # Threshold first: `_pctl` below inserts `score` into the same window

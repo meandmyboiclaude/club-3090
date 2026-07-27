@@ -203,6 +203,16 @@ D_MODEL = 5120
 FEAT_DIM = len(LAYERS) * 2 * D_MODEL  # 30720
 KNOWN_FEAT_DIMS = (len(LAYERS) * D_MODEL, FEAT_DIM)  # 15360, 30720
 ROW_BYTES = FEAT_DIM * 2  # bf16
+# Block order per era, layer-major/pool-minor — the SAME construction as the
+# router's `FEAT_BLOCKS = tuple(f"L{li}-{p}" for li in LAYERS for p in POOLS)`.
+# Last-resort only: a window's `pn119_header` and the incumbent probe both
+# DECLARE their order, and a declaration outranks a reconstruction.
+POOLS_BY_DIM = {len(LAYERS) * D_MODEL: ("last",),
+                len(LAYERS) * 2 * D_MODEL: ("last", "mean")}
+# Sink req_ids are namespaced in `train_ids` so a consumer that expects the
+# seed ITEM set (gpqa-NNN, present in the offline safetensors capture) can tell
+# the two apart instead of KeyError-ing on the first sink row (BUG-170).
+SINK_ID_PREFIX = "sink:"
 NEEDFIT = os.path.expanduser("~/shared/needfit")
 RESULTS = os.path.expanduser("~/shared/folderX/qbench45/results")
 
@@ -1650,6 +1660,111 @@ def incumbent_feat_dim(path: str) -> int | None:
         return None
 
 
+def blocks_for_dim(feat_dim: int):
+    """Reconstructed block order for a known width, or None."""
+    pools = POOLS_BY_DIM.get(int(feat_dim))
+    if not pools:
+        return None
+    return tuple(f"L{li}-{p}" for li in LAYERS for p in pools)
+
+
+def spec_from_blocks(blocks, feat_dim: int) -> str:
+    """`feature_spec` string in the incumbent's format, DERIVED from the block
+    order rather than asserted. The hardcoded "pools[last,mean]" it replaces
+    made a 15360 probe describe itself as 30720, which sent
+    `pn119-cont-slice-blocks.target_blocks` down its no-`blocks` fallback and
+    built a 30720 reference for a 15360 probe (BUG-170)."""
+    layers: list[str] = []
+    pools: list[str] = []
+    for b in blocks:
+        li, _, p = str(b).partition("-")
+        li = li.lstrip("L")
+        if li not in layers:
+            layers.append(li)
+        if p and p not in pools:
+            pools.append(p)
+    per = int(feat_dim) // max(1, len(layers) * len(pools))
+    return (f"layers[{','.join(layers)}] x pools[{','.join(pools)}] "
+            f"d{per} concat")
+
+
+def sink_declared_blocks(sink_dir: str, feat_dim: int):
+    """Block order as stamped by the router that WROTE these features.
+
+    Newest window first, and only windows that declare the same width — a
+    header from the other era describes a different feature space.
+    """
+    try:
+        names = sorted((f for f in os.listdir(sink_dir)
+                        if f.startswith("meta-") and f.endswith(".jsonl")),
+                       reverse=True)
+    except OSError:
+        return None
+    for f in names:
+        try:
+            with open(os.path.join(sink_dir, f), encoding="utf-8") as fh:
+                h = json.loads(fh.readline() or "{}")
+        except (OSError, ValueError):
+            continue
+        if not h.get("pn119_header") or not h.get("blocks"):
+            continue
+        if int(h.get("feat_dim") or 0) != int(feat_dim):
+            continue
+        return tuple(str(b) for b in h["blocks"])
+    return None
+
+
+def incumbent_blocks(path: str, feat_dim: int):
+    """The live probe's own declared block order, if it is the same width."""
+    if not os.path.isfile(path):
+        return None
+    try:
+        z = np.load(path, allow_pickle=True)
+        if "blocks" not in z.files:
+            return None
+        if int(np.asarray(z["mu"]).reshape(-1).size) != int(feat_dim):
+            return None
+        return tuple(str(b) for b in np.asarray(z["blocks"]).reshape(-1))
+    except (OSError, KeyError, ValueError, IndexError):
+        return None
+
+
+def resolve_blocks(sink_dir: str, out_path: str, feat_dim: int, counts: dict):
+    """Block order for the candidate payload, declaration-first.
+
+    A refit artifact that omits `blocks` disarms `pn119_router._load_probe`'s
+    block-order check on precisely the files the loop produces, and the module
+    documents that check as one of its only two defences against a
+    wrong-but-loadable probe: "mis-ordering the blocks produces finite,
+    plausible, meaningless scores". So this never returns None quietly — an
+    unresolvable width is a hard refusal.
+    """
+    for how, got in (("sink_header", sink_declared_blocks(sink_dir, feat_dim)),
+                     ("incumbent", incumbent_blocks(out_path, feat_dim)),
+                     ("derived", blocks_for_dim(feat_dim))):
+        if got and len(got) * D_MODEL == int(feat_dim):
+            counts["blocks_via"] = how
+            return tuple(got)
+    return None
+
+
+def canary_score_for(mu, sd, Vt, w, seed: int) -> float:
+    """The trainer's signed claim about what this probe outputs.
+
+    Computed in the STAGED form on a seeded pseudo-random vector; the router
+    re-scores it in the FOLDED form at every load and hot-reload
+    (`_load_probe`, canary block), so agreement proves the file on disk is the
+    file that was validated. Same construction as the incumbent's canary
+    (canary_seed -> default_rng(seed).standard_normal(FEAT_DIM)).
+    """
+    mu64 = np.asarray(mu, dtype=np.float64).reshape(-1)
+    sd64 = np.asarray(sd, dtype=np.float64).reshape(-1)
+    vt64 = np.asarray(Vt, dtype=np.float64)
+    w64 = np.asarray(w, dtype=np.float64).reshape(-1)
+    cx = np.random.default_rng(int(seed)).standard_normal(mu64.size)
+    return float(w64[:-1] @ (vt64 @ ((cx - mu64) / sd64)) + w64[-1])
+
+
 def load_incumbent(path: str, feat_dim: int | None = None):
     """(probe, note). A probe in another feature space is NOT the incumbent.
 
@@ -1950,7 +2065,7 @@ def main() -> int:
 
     if args.no_seed:
         X_train, y_train, w_train, ts_train = X_res, y_res, w_res, ts_res
-        train_ids = [m["req_id"] for m in R_meta]
+        train_ids = [SINK_ID_PREFIX + m["req_id"] for m in R_meta]
     else:
         X_train = np.vstack([X_seed, X_res]) if len(X_res) else X_seed
         y_train = np.concatenate([y_seed, y_res])
@@ -1958,7 +2073,7 @@ def main() -> int:
         # The seed predates every sink row: ts=0 pins it to the FIT side of
         # the temporal split, so the holdout is always live traffic.
         ts_train = np.concatenate([np.zeros(len(y_seed)), ts_res])
-        train_ids = seed_ids + [m["req_id"] for m in R_meta]
+        train_ids = seed_ids + [SINK_ID_PREFIX + m["req_id"] for m in R_meta]
 
     resolved = np.asarray(w_train, float) > 0
     counts["train_rows_offered"] = int(len(y_train))
@@ -2047,13 +2162,44 @@ def main() -> int:
                                   persist=not args.dry_run)
     counts["gates"] = gates
 
+    # ── self-description (BUG-170) ─────────────────────────────────────────
+    # A payload that omits `blocks`/`canary_*`/`feat_dim` loads into the router
+    # with BOTH of its wrong-probe guards inert, and a hardcoded feature_spec
+    # is worse than none: the slicer believes it. Everything here is either
+    # DECLARED by the sink that produced the features or derived from the
+    # candidate's own fit — nothing is asserted.
+    blocks = resolve_blocks(args.sink, args.out, feat_dim, counts)
+    if not blocks:
+        print(f"[refit] REFUSED: cannot establish the block order for a "
+              f"{feat_dim}-dim candidate — no sink window stamps `blocks` at "
+              f"that width, the incumbent is another width, and {feat_dim} is "
+              f"not a known era ({list(POOLS_BY_DIM)}). Writing the probe "
+              f"without `blocks` would disarm the router's block-order check, "
+              f"and mis-ordered blocks score finite, plausible, meaningless "
+              f"numbers.\n[refit] {json.dumps(counts)}")
+        return EXIT_REJECT
+    canary_seed = int(t0) & 0x7FFFFFFF
+    canary_score = canary_score_for(mu, sd, Vt, w, canary_seed)
+
     payload = {
         "mu": mu.astype(np.float64), "sd": sd.astype(np.float64),
         "Vt10": Vt.astype(np.float64), "w": w.astype(np.float64),
         "lam": args.lam, "pcs": args.pcs, "variant": "lens_only",
         "label": f"rtok_ge_{args.deep_thresh}_spend_selftrain",
-        "feature_spec": "layers[42,47,51] x pools[last,mean] d5120 concat",
+        "feat_dim": int(feat_dim),
+        "blocks": np.array(list(blocks)),
+        "feature_spec": spec_from_blocks(blocks, feat_dim),
+        # The router recomputes this from the folded weights at every load and
+        # every hot-reload; tol matches the incumbent's (observed residual on a
+        # correctly signed probe is < 1e-9).
+        "canary_seed": canary_seed,
+        "canary_score": canary_score,
+        "canary_tol": 1e-6,
+        # gpqa-NNN (offline capture items) stay bare; sink rows carry the
+        # `sink:` namespace so b3 / make_reference / tap_capture can skip what
+        # is not an item instead of KeyError-ing on it.
         "train_ids": np.array(train_ids),
+        "refit_blocks_via": counts.get("blocks_via", "?"),
         "refit_ts": t0, "refit_n_sink": len(X_res),
         "refit_n_seed": 0 if args.no_seed else len(X_seed),
         "refit_capture_source": SINK_CAPTURE_SOURCE,

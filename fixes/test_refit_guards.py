@@ -972,6 +972,331 @@ def case19_two_feature_eras(tmp) -> None:
           c4.get("reservoir_reset_feat_dim") == R.FEAT_DIM, json.dumps(c4))
 
 
+# ------------------------------------------------- BUG-170: self-description
+ROUTER_PY = str(REPO / "fixes/pn119_router.py")
+
+
+def _load_router():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pn119_router_bug170",
+                                                  ROUTER_PY)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["pn119_router_bug170"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _router_load(mod, path):
+    """Drive the REAL `_load_probe` with the smallest object it needs."""
+    import types as _t
+    stub = _t.SimpleNamespace(runner=_t.SimpleNamespace(device="cpu"),
+                              _probe_fold_resid=None, _probe_canary=None,
+                              _probe_loads=0)
+    pv, pb = mod.PN119Router._load_probe(stub, path)
+    return stub, pv, pb
+
+
+def _lastonly_sink(sink, tag, rows, feat_rows):
+    """One 15360-dim window WITH the header the live router stamps."""
+    os.makedirs(sink, exist_ok=True)
+    (feat_rows.view(np.uint32) >> np.uint32(16)).astype(np.uint16).tofile(
+        os.path.join(sink, f"feats-{tag}.bin"))
+    with open(os.path.join(sink, f"meta-{tag}.jsonl"), "w",
+              encoding="utf-8") as f:
+        f.write(json.dumps({"pn119_header": 1, "feat_dim": 15360,
+                            "blocks": ["L42-last", "L47-last", "L51-last"],
+                            "censor_schema": 2, "censor_slack": 13,
+                            "mode": "enforce", "ts": 1000.0}) + "\n")
+        for i, r in enumerate(rows):
+            f.write(json.dumps({"req_id": r["req_id"], "row": i, "score": 0.5,
+                                "route": "deep", "prompt_tok": 100,
+                                "ts": r["ts"], "mode": "enforce"}) + "\n")
+            f.write(json.dumps({"req_id": r["req_id"], "finish": True,
+                                "generated": r["generated"], "rtok": r["rtok"],
+                                "cap_hit": False, "censored": False,
+                                "thinking": True, "ts": r["ts"],
+                                "mode": "enforce"}) + "\n")
+
+
+def case20_refit_payload_is_self_describing(tmp) -> None:
+    """BUG-170. A refit artifact that omits blocks/canary/feat_dim loads into
+    the router with BOTH of its wrong-probe guards inert — on precisely the
+    files the continuous loop produces."""
+    print("case 20 — a refit probe describes itself, and the router's guards "
+          "are ARMED on it")
+    sink = os.path.join(tmp, "sink20")
+    state = os.path.join(tmp, "state20")
+    out = os.path.join(tmp, "live20", "probe.npz")
+    meta = [dict(req_id=f"s-{i}", generated=900, ts=100.0 + i,
+                 rtok=(3037 if i % 3 else 137), censored=False)
+            for i in range(40)]
+    y = np.array([1.0 if m["rtok"] >= 2000 else 0.0 for m in meta])
+    rng = np.random.default_rng(5)
+    d = rng.standard_normal(15360).astype(np.float32)
+    d /= np.linalg.norm(d)
+    X = (rng.standard_normal((len(meta), 15360)).astype(np.float32) * 0.05
+         + y[:, None] * d[None, :] * 8.0).astype(np.float32)
+    _lastonly_sink(sink, "20260727-120000", meta, X)
+    cmd = [PY, str(REPO / "fixes/refit_pn119_probe.py"), "--sink", sink,
+           "--state", state, "--out", out, "--no-seed",
+           "--b3-report", _fake_b3(tmp),
+           "--results-dir", os.path.join(tmp, "no-results20"),
+           "--promote-mode", "direct", "--min-new", "5",
+           "--max-deep-frac", "0.9", "--prior-hi", "0.75"]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+    check("a 15360 refit swaps and exits 0",
+          r.returncode == 0 and os.path.isfile(out),
+          f"rc={r.returncode} {(r.stdout + r.stderr).strip()[-220:]}")
+    if not os.path.isfile(out):
+        return
+    z = np.load(out, allow_pickle=True)
+    for k in ("blocks", "feat_dim", "feature_spec", "canary_seed",
+              "canary_score", "canary_tol"):
+        check(f"the payload carries `{k}`", k in z.files, str(z.files))
+    check("blocks come from the WINDOW HEADER, not a guess",
+          list(map(str, z["blocks"])) == ["L42-last", "L47-last", "L51-last"]
+          and str(z["refit_blocks_via"]) == "sink_header",
+          f"{list(map(str, z['blocks']))} via {z['refit_blocks_via']}")
+    check("feat_dim matches the fitted width", int(z["feat_dim"]) == 15360
+          and np.asarray(z["mu"]).size == 15360)
+    check("feature_spec is DERIVED, not the hardcoded last+mean lie",
+          str(z["feature_spec"]) == "layers[42,47,51] x pools[last] d5120 concat",
+          str(z["feature_spec"]))
+    ids = [str(s) for s in z["train_ids"]]
+    check("sink rows are namespaced in train_ids",
+          ids and all(i.startswith("sink:") for i in ids), str(ids[:2]))
+
+    mod = _load_router()
+    mod.STATS.clear()
+    stub, pv, pb = _router_load(mod, out)
+    check("the router's CANARY is armed and passes on a refit probe",
+          stub._probe_canary is not None
+          and stub._probe_canary["resid"] < 1e-9
+          and "probe_canary_absent" not in mod.STATS,
+          json.dumps(stub._probe_canary, default=str))
+    arrays = {k: z[k] for k in z.files}
+    arrays["w"] = np.asarray(arrays["w"], dtype=np.float64).copy()
+    arrays["w"][-1] += 0.01                     # not the probe that was signed
+    bad = os.path.join(tmp, "bad20.npz")
+    np.savez(bad, **arrays)
+    try:
+        _router_load(mod, bad)
+        check("a tampered refit probe is REFUSED", False, "load succeeded")
+    except ValueError as e:
+        check("a tampered refit probe is REFUSED", "CANARY FAILED" in str(e),
+              str(e)[:80])
+    arrays2 = {k: z[k] for k in z.files}
+    arrays2["blocks"] = np.array(["L51-last", "L47-last", "L42-last"])
+    wrong = os.path.join(tmp, "wrongorder20.npz")
+    np.savez(wrong, **arrays2)
+    try:
+        _router_load(mod, wrong)
+        check("a mis-ordered block set is REFUSED", False, "load succeeded")
+    except ValueError as e:
+        check("a mis-ordered block set is REFUSED", "block order" in str(e),
+              str(e)[:80])
+    check("blocks_for_dim reconstructs BOTH eras",
+          R.blocks_for_dim(15360) == ("L42-last", "L47-last", "L51-last")
+          and R.blocks_for_dim(30720) == (
+              "L42-last", "L42-mean", "L47-last", "L47-mean",
+              "L51-last", "L51-mean")
+          and R.blocks_for_dim(999) is None)
+    check("spec_from_blocks round-trips the 30720 era",
+          R.spec_from_blocks(R.blocks_for_dim(30720), 30720)
+          == "layers[42,47,51] x pools[last,mean] d5120 concat")
+    check("resolve_blocks refuses a width it cannot describe",
+          R.resolve_blocks(sink, out, 999, {}) is None)
+
+
+def case21_nonfinite_scores_take_the_fallback(tmp) -> None:
+    """P2-2. One NaN score is a SILENT lean in enforce mode, de-sorts the
+    percentile window for the rest of the boot, and puts a bare `NaN` token in
+    the sink."""
+    print("case 21 — a non-finite score takes the fallback, is counted, and "
+          "never reaches the window or the sink")
+    import types as _t
+    mod = _load_router()
+    live = str(NEEDFIT / "pn119-live/probe.npz")
+    if not os.path.isfile(live):
+        check("live probe present for the router guard case", False, live)
+        return
+    sink = os.path.join(tmp, "sink21")
+    os.makedirs(sink, exist_ok=True)
+    for k in ("PN119_ASYNC_SCORE", "PN119_RATE_TARGET", "PN119_HEALTH"):
+        os.environ.pop(k, None)
+    os.environ["GENESIS_ENABLE_PN119_ROUTER"] = "1"
+    os.environ["PN119_MODE"] = "enforce"
+    os.environ["PN119_SINK"] = sink
+    os.environ["PN119_FALLBACK_ROUTE"] = "deep"
+    mod.STATS.clear()
+    mod.ROUTES.clear()
+    mod.SCORES.clear()
+    runner = _t.SimpleNamespace(
+        device="cpu", max_num_reqs=64,
+        input_batch=_t.SimpleNamespace(req_ids=[]), requests={},
+        vllm_config=_t.SimpleNamespace(reasoning_config=None))
+    r = mod.PN119Router(runner, live)
+    for i in range(8):
+        r._publish(f"ok-{i}", 0.1 * i, 100, 0, True, None, None, None, None, None)
+    base_sorted = list(r._score_sorted)
+    check("the finite baseline is in the window", len(base_sorted) == 8)
+
+    for j, bad in enumerate((float("nan"), float("inf"), float("-inf"))):
+        rid = f"bad-{j}"
+        r._publish(rid, bad, 100, 0, True, None, None, None, None, None)
+        check(f"{bad!r} does not enter the percentile window",
+              list(r._score_sorted) == base_sorted, f"{len(r._score_sorted)}")
+        check(f"{bad!r} takes the declared fallback route",
+              mod.ROUTES.get(rid) == r.fallback_route
+              and r.unscored.get(rid, "").startswith("score_nonfinite"),
+              f"route={mod.ROUTES.get(rid)} reason={r.unscored.get(rid)}")
+        # SCORES still gets the legacy compatibility shim `_unscoreable`
+        # writes — a FINITE value on the fallback side of tdeep. What must
+        # never happen is the non-finite number landing there.
+        check(f"{bad!r} is not published as a score",
+              rid not in r.scored
+              and mod.SCORES.get(rid) == r.tdeep,
+              f"scored={rid in r.scored} SCORES={mod.SCORES.get(rid)}")
+    check("every non-finite score is counted in health.json stats",
+          mod.STATS.get("score_nonfinite") == 3
+          and mod.STATS.get("unscoreable_score_nonfinite_publish") == 3,
+          json.dumps({k: v for k, v in mod.STATS.items()
+                      if "nonfinite" in k or k == "unscoreable"}))
+
+    # the async drain path has its own producer-side guard
+    r._pin_score = __import__("torch").tensor([float("nan")] * 4)
+    r._free_slots = [1, 2, 3]
+    r._pending = [{"req_id": "async-nan", "slot": 0, "event": None,
+                   "prompt_len": 100, "cached": 0, "thinking": True,
+                   "budget": None, "source": None, "caller": None,
+                   "suite": None, "want_feat": False}]
+    r._drain_pending()
+    check("the deferred readback guards its own score",
+          mod.ROUTES.get("async-nan") == r.fallback_route
+          and r.unscored.get("async-nan") == "score_nonfinite_async"
+          and mod.STATS.get("score_nonfinite") == 4,
+          f"{r.unscored.get('async-nan')}")
+
+    # the SYNC dot path, through the real _finalize
+    st = _t.SimpleNamespace(prompt_token_ids=[7] * 37 + [248068, 11, 11],
+                            num_prompt_tokens=40, num_computed_tokens=40,
+                            output_token_ids=[],
+                            sampling_params=_t.SimpleNamespace(
+                                thinking_token_budget=None, max_tokens=4096,
+                                extra_args=None))
+    torch = __import__("torch")
+    nan_rows = [torch.full((5120,), float("nan")) for _ in range(3)]
+    r._finalize("sync-nan", st, nan_rows, 40, 0)
+    check("the synchronous dot guards its own score",
+          mod.ROUTES.get("sync-nan") == r.fallback_route
+          and r.unscored.get("sync-nan") == "score_nonfinite_sync",
+          f"{r.unscored.get('sync-nan')}")
+
+    r.shutdown() if hasattr(r, "shutdown") else r._sink_close()
+    text = ""
+    for f in sorted(os.listdir(sink)):
+        if f.startswith("meta-") and f.endswith(".jsonl"):
+            text += open(os.path.join(sink, f), encoding="utf-8").read()
+    strict_ok = True
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            json.loads(line, parse_constant=_strict_constant)
+        except ValueError:
+            strict_ok = False
+    check("no bare NaN/Infinity token ever reaches the sink",
+          strict_ok and "NaN" not in text and "Infinity" not in text,
+          f"{len(text.splitlines())} lines")
+
+
+def _strict_constant(name):
+    raise ValueError(f"bare {name} token")
+
+
+def case22_b3_skips_non_item_train_ids(tmp) -> None:
+    """BUG-170, second half: `np.stack([st[i] for i in z['train_ids']])` against
+    the 100-item capture KeyError'd on the first sink id, so the first direct
+    swap left the loop green-timered and dead."""
+    print("case 22 — b3 / make_reference skip non-item train_ids instead of "
+          "KeyError")
+    from safetensors.torch import save_file
+    import torch as _torch
+    d = os.path.join(tmp, "b322")
+    os.makedirs(d, exist_ok=True)
+    n_items, dim = 24, 96
+    rng = np.random.default_rng(7)
+    item_ids = [f"gpqa-{i:03d}" for i in range(n_items)]
+    feats = rng.standard_normal((n_items, dim)).astype(np.float32) * 0.3
+    feats += rng.standard_normal(dim).astype(np.float32)[None, :] * 2.0
+    st_path = os.path.join(d, "cap.safetensors")
+    save_file({i: _torch.tensor(feats[k]).reshape(1, dim)
+               for k, i in enumerate(item_ids)}, st_path)
+
+    mu, sd = feats.mean(0), feats.std(0) + 1e-6
+    Xs = (feats - mu) / sd
+    _u, _s, Vt = np.linalg.svd(Xs, full_matrices=False)
+    Vt = Vt[:5]
+    P = Xs @ Vt.T
+    w = np.concatenate([np.linspace(1.0, 0.2, 5), [0.05]])
+    full = np.hstack([P, np.ones((len(P), 1))]) @ w
+    # exactly the shape the fixed refit writes: items + namespaced sink rows
+    train_ids = item_ids + [f"sink:cmpl-{i}" for i in range(60)]
+    probe = os.path.join(d, "probe.npz")
+    np.savez(probe, mu=mu, sd=sd, Vt10=Vt, w=w,
+             train_ids=np.array(train_ids), feat_dim=dim,
+             blocks=np.array(["b0"]), feature_spec="synthetic")
+
+    panel_ids = item_ids[:10]
+    order = (-full[:10]).argsort().argsort() + 1
+    ref = {"criteria": {"rho_loo_ceiling": 1.0,
+                        "top25_agreement_full_vs_loo": n_items,
+                        "max_between_item_cosine_seed": 0.99}, "panel": [
+        {"item_id": i, "offline_score": float(full[k]),
+         "loo_score": float(full[k]) + 1e-3 * (k % 3),
+         "n_tok_offline": 100 + k, "offline_rank_in_panel": int(order[k])}
+        for k, i in enumerate(panel_ids)]}
+    ref_p = os.path.join(d, "ref.json")
+    with open(ref_p, "w", encoding="utf-8") as f:
+        json.dump(ref, f)
+    loo_p = os.path.join(d, "loo.json")
+    with open(loo_p, "w", encoding="utf-8") as f:
+        json.dump({"ids": item_ids, "loo": [float(x) for x in full]}, f)
+    featjson = os.path.join(d, "cap.json")
+    with open(featjson, "w", encoding="utf-8") as f:
+        json.dump({"features": {i: {"n_tok": 100 + k}
+                                for k, i in enumerate(item_ids)}}, f)
+
+    b3 = subprocess.run(
+        [PY, str(NEEDFIT / "pn119_b3_numerics.py"), "--dry-run",
+         "--probe", probe, "--features", st_path, "--ref", ref_p,
+         "--out", os.path.join(d, "report.json"), "--no-marker"],
+        capture_output=True, text=True, timeout=600)
+    out = b3.stdout + b3.stderr
+    check("b3 does not KeyError on a namespaced train_id",
+          "KeyError" not in out and "Traceback" not in out,
+          out.strip()[-200:])
+    check("b3 reports how many non-item ids it skipped",
+          "60 non-item ids skipped" in out, out.strip()[:200])
+    check("b3 still reaches its verdict on the item subset",
+          b3.returncode == 0, f"rc={b3.returncode} {out.strip()[-200:]}")
+
+    mk = subprocess.run(
+        [PY, str(NEEDFIT / "pn119_b3_make_reference.py"),
+         "--features", st_path, "--feat-json", featjson, "--probe", probe,
+         "--loo", loo_p, "--panel-from", ref_p,
+         "--out", os.path.join(d, "ref-out.json")],
+        capture_output=True, text=True, timeout=600)
+    mkout = mk.stdout + mk.stderr
+    check("make_reference does not KeyError either",
+          "KeyError" not in mkout and "Traceback" not in mkout
+          and mk.returncode == 0, mkout.strip()[-200:])
+    check("...and its rebuilt reference keeps the whole panel",
+          os.path.isfile(os.path.join(d, "ref-out.json"))
+          and len(json.load(open(os.path.join(d, "ref-out.json"),
+                                 encoding="utf-8"))["panel"]) == 10)
+
+
 def main() -> int:
     print("PN119 v2 refit guards + gates\n")
     tmp = tempfile.mkdtemp(prefix="pn119-refit-test-")
@@ -995,6 +1320,9 @@ def main() -> int:
         case17_exploration_is_specified_but_off()
         case18_accuracy_monitor(tmp)
         case19_two_feature_eras(tmp)
+        case20_refit_payload_is_self_describing(tmp)
+        case21_nonfinite_scores_take_the_fallback(tmp)
+        case22_b3_skips_non_item_train_ids(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print()

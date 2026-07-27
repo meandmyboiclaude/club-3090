@@ -143,6 +143,12 @@ DEFAULTS = dict(
     budget_ceil=10240,
     key_schema="steps",     # "steps" | "steps_ptok"  (see bucket_keys)
     min_cell=30,            # composite cells below this are not written
+    # BUG-169 orphan bounds — how long an unpaired score line may pin the
+    # cursor before it is dropped. See read_sink_since for what each one
+    # bounds; whichever trips first retires the line.
+    orphan_bytes=1048576,   # newer bytes in the SAME file after it
+    orphan_age_s=1800.0,    # sink-clock span to the file's newest ts
+    orphan_stale_s=300.0,   # wall-clock since the file was last appended to
     # Which `budget_source` values are trustworthy grants to invert.
     # "h119" is included because the shipped H119_LEAN_MULT/DEEP_MULT are 1.0
     # (exact passthrough — `_h119_route_budget` returns int(prior) unchanged),
@@ -328,6 +334,26 @@ def load_markers(sink: str) -> set:
     return ids
 
 
+def _orphaned(sm: dict, s_end: int, raw_end: int, max_ts: float,
+              mtime: float, now: float, cfg: dict) -> bool:
+    """Has this unpaired score line waited long enough to be given up on?
+
+    Any ONE of the three bounds retires it. They are deliberately different in
+    kind because the ways a finish can fail to arrive are different in kind:
+    a burst of traffic behind it (bytes), a slow trickle behind it (sink
+    clock), or a dead boot whose file will never grow again (wall clock).
+    """
+    if (raw_end - s_end) > cfg["orphan_bytes"]:
+        return True
+    try:
+        s_ts = float(sm.get("ts") or 0.0)
+    except (TypeError, ValueError):
+        s_ts = 0.0
+    if s_ts > 0.0 and (max_ts - s_ts) > cfg["orphan_age_s"]:
+        return True
+    return (now - mtime) > cfg["orphan_stale_s"]
+
+
 def read_sink_since(sink: str, offsets: dict, cfg: dict,
                     counts: dict) -> tuple[list, dict]:
     """New paired rows since the cursor, plus the updated offsets.
@@ -336,17 +362,46 @@ def read_sink_since(sink: str, offsets: dict, cfg: dict,
     that SHRANK was rotated/truncated under us — reread it from zero.
 
     Score and finish lines are paired inside one file (the router writes both
-    for a request into whichever file its boot owns). A score line whose finish
-    has not landed yet is left for the next pass by NOT advancing the cursor
-    past it: the offset advances only to the end of the last COMPLETE pair.
+    for a request into whichever file its boot owns). The cursor stops at the
+    START of the EARLIEST score line whose finish has not landed yet, and only
+    pairs lying ENTIRELY behind that point are emitted. A request in flight at
+    a pass boundary is therefore DELAYED to the next pass, never skipped.
+
+    BUG-169: this used to advance to max(finish offset) over the pass's
+    complete pairs, which seeks past an in-flight score line sitting before
+    that maximum — and when its finish lands, the next pass no longer has the
+    score line, so the row is dropped in BOTH passes. At seqs=6 there is
+    almost always a long thinker straddling a pass, and the rows lost that way
+    are the slow ones, i.e. exactly the `bound` population that drives k
+    upward. Emitting only fully-behind-the-pin pairs is what keeps the delay
+    idempotent: the region the cursor covers contains complete pairs only, so
+    re-reading can never double-credit a row.
+
+    A score line whose finish will NEVER land must not pin the cursor for
+    ever. `_orphaned` retires one on whichever of these trips first:
+
+      * --orphan-bytes    (1 MiB) newer bytes appended to the SAME file after
+        it — bounds both the per-pass re-read and the lag under traffic.
+      * --orphan-age-s    (1800 s) sink-clock span between it and the newest
+        ts in the file — bounds the lag under a slow trickle, where 1 MiB
+        would take hours to accumulate. No live request thinks for 30 min
+        (the budget ceiling is 10240 tokens).
+      * --orphan-stale-s  (300 s) wall clock since the file was last appended
+        to — a boot that died mid-request leaves a file that never grows
+        again, so neither of the other two bounds can ever trip on it.
+
+    Retiring a line counts `orphan_abandoned`; it is the ONLY path on which a
+    score line is dropped without its finish.
     """
     markers = load_markers(sink)
     new_offsets = dict(offsets)
     rows = []
+    now = time.time()
     for path in sorted(glob.glob(os.path.join(sink, "meta-*.jsonl"))):
         name = os.path.basename(path)
         try:
             size = os.path.getsize(path)
+            mtime = os.path.getmtime(path)
         except OSError:
             continue
         start = int(new_offsets.get(name, 0) or 0)
@@ -357,13 +412,21 @@ def read_sink_since(sink: str, offsets: dict, cfg: dict,
             continue
         counts["files_read"] = counts.get("files_read", 0) + 1
         scores, finishes = {}, {}
+        max_ts = 0.0
+        raw_end = start
         try:
             with open(path, "r", encoding="utf-8") as f:
                 f.seek(start)
                 pos = start
-                for line in f:
-                    pos += len(line.encode("utf-8"))
-                    line = line.strip()
+                for raw in f:
+                    line_start = pos
+                    pos += len(raw.encode("utf-8"))
+                    # Only a newline-terminated line is whole. A torn tail must
+                    # stay UNCONSUMED — the next append concatenates onto it,
+                    # and a cursor past it would lose both rows.
+                    if raw.endswith("\n"):
+                        raw_end = pos
+                    line = raw.strip()
                     if not line:
                         continue
                     try:
@@ -376,20 +439,42 @@ def read_sink_since(sink: str, offsets: dict, cfg: dict,
                     rid = m.get("req_id")
                     if not rid:
                         continue
+                    try:
+                        max_ts = max(max_ts, float(m.get("ts") or 0.0))
+                    except (TypeError, ValueError):
+                        pass
                     if m.get("finish"):
                         finishes[rid] = (m, pos)
                     elif "row" in m or "budget_grant" in m:
-                        scores.setdefault(rid, (m, pos))
+                        scores.setdefault(rid, (m, line_start, pos))
         except OSError:
             continue
-        complete_end = start
-        for rid, (sm, _s_off) in scores.items():
+
+        # Where the cursor is allowed to stop: the earliest still-live
+        # unpaired score line, or the end of the parsed content if there is
+        # none. `start` is the floor, so a pin on the first line means no
+        # advance at all.
+        pin = None
+        for rid, (sm, s_start, s_end) in scores.items():
+            if rid in finishes:
+                continue
+            counts["unfinished"] = counts.get("unfinished", 0) + 1
+            if _orphaned(sm, s_end, raw_end, max_ts, mtime, now, cfg):
+                counts["orphan_abandoned"] = counts.get(
+                    "orphan_abandoned", 0) + 1
+                continue
+            pin = s_start if pin is None else min(pin, s_start)
+        complete_end = raw_end if pin is None else pin
+
+        for rid, (sm, _s_start, s_end) in scores.items():
             got = finishes.get(rid)
             if got is None:
-                counts["unfinished"] = counts.get("unfinished", 0) + 1
                 continue
             fm, f_off = got
-            complete_end = max(complete_end, f_off)
+            if max(s_end, f_off) > complete_end:
+                # Behind the pin: delayed to the next pass, NOT dropped, and
+                # not counted here either — the next pass counts it once.
+                continue
             if rid in markers:
                 counts["marker_excluded"] = counts.get("marker_excluded", 0) + 1
                 continue
