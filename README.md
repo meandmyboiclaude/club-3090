@@ -1,4 +1,16 @@
-# club-3090
+# club-3090 — aibox fork
+
+> **This fork** (`meandmyboiclaude/club-3090`) tracks a production single-GPU deployment that pushes past the upstream recipes. Running 24/7 on **one RTX 4090 (24 GB)**:
+>
+> - **Qwen3.6-27B** (GPTQ W4) on a patched vLLM nightly + the genesis patch stack (`models/qwen3.6-27b/vllm/patches/genesis/`, ~1000 files of engine patches)
+> - **~190K-token KV pool** (188,708 tokens, turboquant 3-bit KV) at `max_model_len` 82,560 — on a *single* 24 GB card
+> - **6 concurrent slots** (`max_num_seqs 6`, util 0.91)
+> - **MTP speculative decoding** (nst=3 probabilistic; ~70% acceptance on GPQA-class reasoning, **84–94% on production traffic**)
+> - **~340–380 tok/s aggregate decode at full occupancy** — six reasoning streams at 56–63 tok/s each, **300+ tok/s sustained for hours on production traffic** (Prometheus-measured), ~90 tok/s single-stream — all at **82,560-token max context**
+> - **Self-calibrating thinking-budget stack**: an activation-probe router (PN119) + closed-loop per-category budget calibrator (PN162) that lands GPQA-class accuracy at champion wall-time with zero hand-set multipliers
+> - Boot configs of record: `models/qwen3.6-27b/vllm/compose/single/endgame8020.yml` (prod) and `tcbench8021.yml` (bench)
+>
+> Upstream (`noonghunna/club-3090`) documentation continues below — the tooling, model catalog, and cross-rig benches are theirs; the endgame configs and genesis engine work are this fork's.
 
 **Recipes for serving LLMs locally on RTX 3090s.** Multi-engine (vLLM, llama.cpp, ik_llama), multi-model, model-agnostic by design.
 
