@@ -12,7 +12,9 @@ Covered
     two drop classes that would otherwise poison k (cap_hit, no-generation)
   * the PN100 grant grid + its inverse, including PN162's own feedback trap
     (once k != 1, grant/260 no longer recovers the steps estimate)
-  * the k update: bump / decay / no-op, both clamps, and the per-pass cap
+  * the k update: bump / decay / no-op, both clamps, and the per-pass cap —
+    including the 2026-07-27 semantics that decay stops at NEUTRAL (k_min=1.0,
+    the flat PN100 grid) rather than reclaiming below it
   * the sink reader: pairing, byte cursor, IDEMPOTENCE (a second pass over
     unchanged files learns nothing), unfinished rows held for the next pass,
     truncation recovery, synthetic-marker exclusion
@@ -194,12 +196,20 @@ def test_inverse_falls_back_when_no_candidate_matches():
 
 # ─── the k update ────────────────────────────────────────────────────────────
 def test_bump_decay_and_noop():
+    """The three arms under the shipped k_min=1.0: bound bumps UP toward k_max,
+    slack decays DOWN TOWARD NEUTRAL (never past it), ok does nothing."""
     k, _ = up.update_buckets([dict(_bucket=5, _outcome="bound", _keys=["5"])],
                              {}, CFG)
     assert abs(k["5"] - 1.15) < 1e-9
+    # decay only has room to move while the bucket is ABOVE neutral
+    k, _ = up.update_buckets([dict(_bucket=5, _outcome="slack", _keys=["5"])],
+                             {"5": 1.3}, CFG)
+    assert abs(k["5"] - 1.3 * 0.97) < 1e-9
+    # at neutral, a slack row is a no-op: 1.0 x 0.97 lands on the floor, and
+    # the floor IS the flat PN100 grid. Reclaiming below it is out of scope.
     k, _ = up.update_buckets([dict(_bucket=5, _outcome="slack", _keys=["5"])],
                              {}, CFG)
-    assert abs(k["5"] - 0.97) < 1e-9
+    assert k["5"] == 1.0
     k, _ = up.update_buckets([dict(_bucket=5, _outcome="ok", _keys=["5"])],
                              {"5": 1.3}, CFG)
     assert k["5"] == 1.3
@@ -211,9 +221,28 @@ def test_clamps_and_per_pass_cap():
     assert k["5"] == 1.5                              # max_step, not 3.0
     k2, _ = up.update_buckets(rows, {"5": 2.9}, CFG)
     assert k2["5"] == 3.0                             # k_max
+    # the per-pass cap is symmetric — a slack storm cannot fall further than
+    # k0 / max_step in one pass either
     rows = [dict(_bucket=5, _outcome="slack", _keys=["5"])] * 200
-    k3, _ = up.update_buckets(rows, {"5": 0.8}, CFG)
-    assert k3["5"] == 0.7                             # k_min
+    k3, _ = up.update_buckets(rows, {"5": 3.0}, CFG)
+    assert abs(k3["5"] - 2.0) < 1e-9                  # 3.0 / max_step
+    # ... and it stops EXACTLY at the neutral floor, never below
+    k4, _ = up.update_buckets(rows, {"5": 1.05}, CFG)
+    assert k4["5"] == 1.0                             # k_min, == flat grid
+    k5, _ = up.update_buckets(rows, {"5": 1.0}, CFG)
+    assert k5["5"] == 1.0
+
+
+def test_k_min_is_still_a_working_config_knob():
+    """NON-DEFAULT. The shipped floor is 1.0 (see DEFAULTS), but `k_min` stays
+    configurable, and a boot that lowers it must still be honoured end to end.
+    Nothing ships this: GENESIS_PN162_K_MIN on the serving side is 1.0 too."""
+    cfg = dict(CFG, k_min=0.7)
+    rows = [dict(_bucket=5, _outcome="slack", _keys=["5"])] * 200
+    k, _ = up.update_buckets(rows, {"5": 0.8}, cfg)
+    assert k["5"] == 0.7
+    assert up._clamp_k(0.5, cfg) == 0.7
+    assert up._clamp_k(0.5, CFG) == 1.0               # the default still binds
 
 
 # ─── the sink reader ─────────────────────────────────────────────────────────
@@ -490,19 +519,36 @@ def test_repeated_binding_converges_upward_then_stabilises():
 
 
 def test_a_loose_bucket_decays_and_stops_at_the_floor():
+    """A persistently-slack bucket converges to NEUTRAL and stays there.
+
+    The floor is 1.0 (DEFAULTS, 2026-07-27), so "decayed all the way down"
+    means "identical to the flat PN100 grid", not "below it": slack is free on
+    this stack (the grant is invisible to the model and the cost is
+    E[min(need, grant)]), while a sub-neutral k starves the items that DO need
+    their steps. Reclaiming budget below the validated flat grid is out of
+    scope by design — the loop's job is to hand back the bumps it granted, not
+    to shrink PN100.
+    """
     cfg = dict(CFG, max_step=10.0)
     steps, need = 10, 200               # 10 x 260 = 2600 for a 200-tok item
-    kmap = {}
+    flat = up.pn100_grant(steps, 1.0, cfg)
+    assert flat == 2600
+    kmap, grants = {"10": 2.5}, []      # start ABOVE neutral so decay can bite
     for _ in range(200):
         k = up.lookup_k(kmap, up.bucket_keys(steps), cfg)
         g = up.pn100_grant(steps, k, cfg)
+        grants.append(g)
         sim = simulate(need, g, cfg)
         r = row(sim["grant"], sim["rtok"], censor_forced=sim["censor_forced"])
         r["_bucket"], r["_keys"] = steps, up.bucket_keys(steps)
         r["_outcome"] = up.classify(r, cfg)
         kmap, _ = up.update_buckets([r], kmap, cfg)
-    assert kmap["10"] == cfg["k_min"]
-    assert up.pn100_grant(steps, kmap["10"], cfg) == 1800   # 2600 x 0.7
+    assert grants[0] > flat, grants[0]              # it really did start high
+    assert kmap["10"] == 1.0 == cfg["k_min"]
+    assert up.pn100_grant(steps, kmap["10"], cfg) == flat
+    # monotone down to the floor, and it STAYS — never a single grant below it
+    assert min(grants) == flat, min(grants)
+    assert grants[-40:] == [flat] * 40, grants[-40:]
 
 
 # ─── THE USER'S 10x STORY, end to end ────────────────────────────────────────
@@ -526,9 +572,14 @@ def _workload():
     return items
 
 
-def _tenx(rounds=10, items=None, cfg=None):
+def _tenx(rounds=10, items=None, cfg=None, seed_bucket=None):
     """Run the SAME 100 requests `rounds` times back to back through the real
-    run_pass(), against a real sink dir, ledger file and cursor file."""
+    run_pass(), against a real sink dir, ledger file and cursor file.
+
+    `seed_bucket` writes a starting ledger (e.g. {"8": 2.0}) so a run can begin
+    from an ALREADY-BUMPED bucket — the only state from which decay has room to
+    move now that the floor is neutral.
+    """
     d = tmpdir()
     sink = os.path.join(d, "sink")
     ledger = os.path.join(d, "pn162-ledger.json")
@@ -536,6 +587,10 @@ def _tenx(rounds=10, items=None, cfg=None):
     os.makedirs(sink, exist_ok=True)
     cfg = cfg or dict(CFG, window=2000)     # shipped params otherwise
     items = items or _workload()
+    if seed_bucket:
+        up.atomic_write_json(ledger, {"schema": up.LEDGER_SCHEMA,
+                                      "bucket": dict(seed_bucket),
+                                      "exact": {}})
 
     history, grants = [], []
     for rnd in range(rounds):
@@ -573,11 +628,34 @@ def test_ten_rounds_of_the_same_hundred_calibrate():
     assert "10" not in kmap or kmap["10"] == 1.0   # the fitted buckets untouched
 
 
-def test_ten_rounds_also_reclaim_the_over_granted():
-    _, led, cfg, _, grants = _tenx()
+def test_ten_rounds_return_the_over_granted_bucket_to_neutral():
+    """The over-granted bucket hands its bump back and STOPS at the flat grid.
+
+    Bucket 8 is granted 4x what its items use, so every round is slack. Under
+    the 2026-07-27 floor (k_min=1.0) the loop's answer is k -> 1.0 exactly:
+    the grant returns to PN100's validated flat number and never dips below it.
+
+    Reclaiming BELOW the flat grid is deliberately out of scope. Slack costs
+    nothing on this stack — the grant is invisible to the model and the real
+    spend is E[min(need, grant)], so an unused budget is never paid for —
+    whereas a sub-neutral k does cost: it starved the lean items on a live
+    full-100 by ~6 accuracy points. So the calibrator only ever undoes its own
+    bumps; shrinking PN100 itself is PN100's decision, not the loop's.
+    """
+    # Start from an already-bumped bucket 8, the only state decay can move.
+    # 1.6, not 2.0: at k=2.0 bucket 8's grant is exactly bucket 16's FLAT
+    # grant, and `invert_steps` resolves that tie to the naive quotient (16).
+    _, led, cfg, _, grants = _tenx(seed_bucket={"8": 1.6})
     kmap = up.load_kmap(led, cfg)
-    assert kmap["8"] == cfg["k_min"], kmap
-    assert grants[-1][8] < grants[0][8], (grants[0][8], grants[-1][8])
+    flat = up.pn100_grant(8, 1.0, cfg)
+    assert kmap["8"] == 1.0 == cfg["k_min"], kmap
+    assert grants[0][8] > flat, grants[0][8]        # the bump was really there
+    assert grants[-1][8] == flat, (grants[0][8], grants[-1][8], flat)
+    assert min(g[8] for g in grants) == flat        # never dipped below grid
+    # and with no seed it simply never leaves neutral
+    _, led2, cfg2, _, grants2 = _tenx()
+    assert up.load_kmap(led2, cfg2).get("8", 1.0) == 1.0
+    assert {g[8] for g in grants2} == {flat}
 
 
 def test_ten_rounds_leave_the_already_right_buckets_alone():

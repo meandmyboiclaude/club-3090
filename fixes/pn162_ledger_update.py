@@ -23,12 +23,15 @@ request, whether its own thinking budget bound (BUG-139 censor schema 2):
     otherwise                         -> OK     : the cap was about right
 
     k[bucket] *= BUMP  on BOUND   (default 1.15, clamp 3.0)
-    k[bucket] *= DECAY on SLACK   (default 0.97, floor 0.7)
+    k[bucket] *= DECAY on SLACK   (default 0.97, floor 1.0 = NEUTRAL)
     k[bucket] unchanged on OK
 
 Causal grounding (banked 2026-07-26): force-closed items gain +9.6pt when given
 more; natural stops lose nothing. Bumping a bound bucket is the paying side of
-the trade; decaying a slack bucket is free.
+the trade; an unused grant costs nothing (cost = E[min(need, grant)]), so decay
+exists only to hand back bumps this loop granted. It stops at 1.0 — identity
+with PN100's validated flat grid — because a sub-neutral k starves lean items
+(-6pt on a live full-100). Reclaiming below the flat grid is out of scope.
 
 WHAT CARRIES THE STEPS ESTIMATE — IT IS NOT IN THE SINK
 -------------------------------------------------------
@@ -129,7 +132,10 @@ DEFAULTS = dict(
     bump=1.15,
     decay=0.97,
     slack_frac=0.40,
-    k_min=0.7,
+    # 2026-07-27: floor raised 0.7 -> 1.0 — slack is free on this stack (grant
+    # invisible, cost=E[min(need,grant)]); sub-neutral k starved lean items
+    # -6pt on the all-armed full-100. Decay now converges to neutral, not below.
+    k_min=1.0,
     k_max=3.0,
     max_step=1.5,          # per-pass cap on |k_new / k_old|
     min_generated=32,
