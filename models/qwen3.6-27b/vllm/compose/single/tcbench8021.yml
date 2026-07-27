@@ -507,7 +507,31 @@ services:
       - GENESIS_ENABLE_BUG158_REASONING_TOKENS=${GENESIS_ENABLE_BUG158_REASONING_TOKENS:-0}
       - GENESIS_ENABLE_BUG077_REPETITION_DETECT=${GENESIS_ENABLE_BUG077_REPETITION_DETECT:-0}
       - BUG077_REP_SCOPE=${BUG077_REP_SCOPE:-nothink}
+      # BUG-077 detector parameters (review 2026-07-27 M3: previously undeclared,
+      # so the documented tuning knobs were unreachable at runtime — a systemd
+      # drop-in Environment= would have silently done nothing). Defaults are the
+      # measured ones: 2/32/16 caught the real 12-token cycle with 0 false
+      # positives over 407 generations; min_pattern_size=1 false-positives on
+      # legitimate digit runs and the helper refuses to build that config.
+      - BUG077_REP_MIN_PATTERN=${BUG077_REP_MIN_PATTERN:-2}
+      - BUG077_REP_MAX_PATTERN=${BUG077_REP_MAX_PATTERN:-32}
+      - BUG077_REP_MIN_COUNT=${BUG077_REP_MIN_COUNT:-16}
       - GENESIS_ENABLE_PN136_INBOUND_NEUTRALIZE=${GENESIS_ENABLE_PN136_INBOUND_NEUTRALIZE:-0}
+      # PN136 scope knobs (review 2026-07-27 M3: same unreachable-knob defect).
+      # PN136_ROLES: message roles whose text parts are neutralised. `assistant`
+      #   is deliberately absent — the chat template splits assistant content on
+      #   </think> to recover reasoning_content, so neutralising it would break a
+      #   supported input shape.
+      # PN136_CHATML=0 disables the <|...|> -> [|...|] rewrite (0 occurrences in
+      #   the 465-prompt corpus, so it is free; the knob exists as a kill switch).
+      # PN136_TOOLCALL_TOKENS=1 arms the qwen3/hermes tool grammar literals; OFF
+      #   by default because system prompts that TEACH the tool-call format must
+      #   reach the model intact.
+      # PN136_EXTRA: comma-separated additional angle-bracketed literals.
+      - PN136_ROLES=${PN136_ROLES:-system,user,tool,function}
+      - PN136_CHATML=${PN136_CHATML:-1}
+      - PN136_TOOLCALL_TOKENS=${PN136_TOOLCALL_TOKENS:-0}
+      - PN136_EXTRA=${PN136_EXTRA:-}
       # ===== MUST-INCLUDE WAVE-1 (2026-07-14): pristine(107)∩qwen3.6-templates + house dedup =====
       # USER: enable everything, none skipped; crash/quality-breakers FIXED not ditched.
       # PN77=0 (degenerate token-soup, quality killer). PN399 deduped→/fixes PN79 (IMA gone).

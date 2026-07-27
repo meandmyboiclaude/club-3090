@@ -47,7 +47,20 @@ services:
     # open upstream). DO NOT flip until g4/g5 gates reviewed (VLLM-UPDATE-20260725.md).
     # Rollback: revert image: to localhost/vllm-qwen36-endgame:dev1060cherry-2204-20260713
     # (boot-guard tag validated-qwopus-3da1671f-w1).
-    image: docker.io/vllm/vllm-openai@sha256:e4f855492d6c95b00cdd21ec642f00d9747df43a3bbedab903316be1a5cd2207
+    # [2026-07-27 H2 — image aligned to the bench-validated wheel v2] Prod was
+    # still pinned to the STOCK nightly-0ba2aa35 digest while every 07-25 -> 07-27
+    # measurement ran on wheel v2 (dev1474cherrymax: stock nightly-0ba2aa35 base +
+    # club-dev1474-cherry wheel, max+kvq+mtpq, CI 30163221644). Two days of bench
+    # validation sit on cherrymax and none on the digest, so the digest is now the
+    # unvalidated arm. Also unblocks VLLM_MTP_HEAD_QUANT, which is a documented
+    # no-op on the older image (+8,387 KV tok / +2.5% tok/s once a drop-in sets it).
+    # ROLLBACK CHAIN (newest -> oldest, each one validated in its own window):
+    #   1. localhost/vllm-qwen36-endgame:dev1474cherrymax-1757-20260725  <- LIVE
+    #   2. docker.io/vllm/vllm-openai@sha256:e4f855492d6c95b00cdd21ec642f00d9747df43a3bbedab903316be1a5cd2207
+    #      (stock nightly-0ba2aa35; resident locally as 860be1e98815)
+    #   3. localhost/vllm-qwen36-endgame:dev1060cherry-2204-20260713
+    #      (boot-guard tag validated-qwopus-3da1671f-w1)
+    image: localhost/vllm-qwen36-endgame:dev1474cherrymax-1757-20260725
     container_name: vllm-qwen36-endgame
     restart: unless-stopped
     healthcheck:
@@ -80,17 +93,52 @@ services:
       # switched to the model's OWN native template (XReyRobert/Qwopus3.6-27B-v2-GPTQ-Pro-MTP-BF16).
       - ../../patches/qwopus-chat-template/chat_template_v2json.jinja:/chat_template.jinja:ro
       - ../../../../../fixes:/fixes:ro
-      # [PN119 2026-07-25] lens-router probe (ro) + v2 self-training sink (rw)
-      - /home/user/shared/needfit/pn119-probe-lens_only.npz:/pn119/probe.npz:ro
+      # [PN119 2026-07-25] lens-router probe (ro) + v2 self-training sink (rw).
+      # [PN119-v2 / H1 2026-07-27] probe is now a DIRECTORY mount, mirroring
+      # tcbench8021.yml. Two reasons, both live:
+      #  1. WRONG DIMENSIONALITY. The old single-FILE mount pointed at
+      #     pn119-probe-lens_only.npz, whose mu/sd are (30720,) with no `blocks`
+      #     key. The router's FEAT_DIM is 15360 (fixes/pn119_router.py:295), so
+      #     _load_probe raised "probe dim 30720 != 15360" (:1466-1467) and
+      #     maybe_create() degraded to "router disabled" — prod booted
+      #     GENESIS_ENABLE_H119_LENS_ROUTER=1 with no router at all, masked only
+      #     by PN119_MODE=shadow. pn119-live/probe.npz is the LAST-ONLY probe
+      #     (15360, with `blocks`), which is what the router actually loads.
+      #  2. ATOMIC RENAME. The refit timer swaps pn119-live/probe.npz via
+      #     tmp+rename (pn119_atomic.py); a single-FILE bind pins the container
+      #     to the dead inode and the swap stays invisible until a restart.
+      #     Directory mount + router mtime hot-reload = refits land without one.
+      # Rollback = restore the old file-mount line:
+      #   - /home/user/shared/needfit/pn119-probe-lens_only.npz:/pn119/probe.npz:ro
+      - /home/user/shared/needfit/pn119-live:/pn119:ro
       - /home/user/shared/needfit/pn119-sink:/pn119-sink
       # [PN162 2026-07-27] closed-loop budget-calibration ledger, DIRECTORY mount
       # (the host updater writes tmp+rename; a single-FILE bind would pin this
       # container to the dead inode and the swap would be invisible until a
-      # restart). Deliberately /pn162, not /pn119 — this compose still file-mounts
-      # its probe at /pn119/probe.npz and that line stays untouched.
+      # restart). Its own mountpoint (not /pn119) so the two consumers stay
+      # independent — same shape as tcbench8021.yml. [2026-07-27] the probe above
+      # is now a directory mount of the SAME host dir; both mountpoints are kept
+      # because the router and the calibrator resolve different filenames.
       # Inert until GENESIS_ENABLE_PN162_BUDGET_CAL=1; absent file = identity.
       - /home/user/shared/needfit/pn119-live:/pn162:ro
-      - ./cache-override.yaml:/config/cache-override.yaml:ro
+      # [BUG-131 prefix-cache 2026-07-25] The engine forces attention block_size
+      # up to 4128 (platforms/interface.py:903, "attention page size >= mamba page
+      # size"), so hash_block_size resolves to 4128 too and NOTHING under 4129
+      # prompt tokens can ever produce a block hash -> prefix_cache_hits_total is
+      # structurally 0. Cure = a finer --prefix-match-unit (must divide 4128).
+      # [2026-07-27 champion-defaults mirror] Was a hardcoded
+      # `./cache-override.yaml` — no variable at all, so the largest measured
+      # capacity lever was unreachable from a unit drop-in (H3). Default is now
+      # the SHIPPING replayssm rung, byte-identical to tcbench8021.yml (the
+      # fit-or-better gate passed 2026-07-27). Revert to the old no-op file with
+      # CACHE_OVERRIDE=cache-override.yaml; the APC rung stays
+      #   CACHE_OVERRIDE=cache-override-apc.yaml podman-compose ... up -d
+      # (⚠ BUG-159: re-derive prefix_match_unit before engaging APC).
+      # ⚠ COUPLED with PREFIX_CACHING_ARG below: `use_replayssm_spec` requires
+      # mamba_cache_mode=none and prefix caching force-sets it to "align", so
+      # flipping one without the other is a boot-time ValueError.
+      # See ~/shared/DIAGNOSIS-prefix-cache-zero-hits-20260725.md
+      - ./${CACHE_OVERRIDE:-cache-override-replayssm.yaml}:/config/cache-override.yaml:ro
     environment:
       # - CUDA_VISIBLE_DEVICES=0
       # [2026-07-14] unbuffered stdout — crash-loop tracebacks were lost in the 8K block buffer at exit
@@ -308,7 +356,25 @@ services:
       # k260 + P-pess + PN112 shadow for the router-precision lane.]
       # Performance
       - GENESIS_ENABLE_P40=1
-      - GENESIS_ENABLE_P82=1
+      # [2026-07-26 / prod 2026-07-27 C2] TURNED OFF. P82 is a BIASED
+      # speculative-decode acceptance rule (SGLang threshold_single OR-clause),
+      # labelled opt-in research in its own module, and it has NEVER passed its
+      # documented gate (genesis_quality_harness >=30/31 + a TPS sweep). It had
+      # never actually applied on any pin because its drift marker matched
+      # upstream's ORIGINAL kernel name, so the obsolete-check fired every time --
+      # a re-anchor on 2026-07-26 made it live for the first time ever, mid-session.
+      # It changes which draft tokens are ACCEPTED, i.e. the output distribution.
+      # Do not enable it for any measurement run.
+      # [2026-07-27 REVIEW-compose-systemd-20260727.md C2] This line was a bare
+      # `=1` on prod while bench pins 0. Both composes mount the SAME genesis
+      # tree, so the 07-26 re-anchor is live here too, and P82=1 is NOT
+      # demonstrably inert: the lane-1 copy (wiring/spec_decode/patch_82_*.py:534-550)
+      # hard-refuses without GENESIS_P82_ACK_UNVALIDATED, but the lane-2 sndr copy
+      # (sndr/engines/vllm/patches/spec_decode/p82_*.py, registry.py:1464-1479,
+      # vllm_version_range >=0.20,<0.24 — this pin's 0.23.1rc1 is IN range)
+      # carries NO ack gate and applies on the env value alone.
+      # Re-enable for research with BOTH this and GENESIS_P82_ACK_UNVALIDATED=1.
+      - GENESIS_ENABLE_P82=${GENESIS_ENABLE_P82:-0}
       # [2026-07-14] PN50=1: kernel arange fixed (b23b704) + wrapper compile-safe
       # (is_compiling -> stock chain; eager keeps fused kernel). Parity green both modes.
       - GENESIS_ENABLE_PN50_GDN_FUSED_PROJ=1
@@ -357,7 +423,31 @@ services:
       - GENESIS_ENABLE_BUG158_REASONING_TOKENS=${GENESIS_ENABLE_BUG158_REASONING_TOKENS:-0}
       - GENESIS_ENABLE_BUG077_REPETITION_DETECT=${GENESIS_ENABLE_BUG077_REPETITION_DETECT:-0}
       - BUG077_REP_SCOPE=${BUG077_REP_SCOPE:-nothink}
+      # BUG-077 detector parameters (review 2026-07-27 M3: previously undeclared,
+      # so the documented tuning knobs were unreachable at runtime — a systemd
+      # drop-in Environment= would have silently done nothing). Defaults are the
+      # measured ones: 2/32/16 caught the real 12-token cycle with 0 false
+      # positives over 407 generations; min_pattern_size=1 false-positives on
+      # legitimate digit runs and the helper refuses to build that config.
+      - BUG077_REP_MIN_PATTERN=${BUG077_REP_MIN_PATTERN:-2}
+      - BUG077_REP_MAX_PATTERN=${BUG077_REP_MAX_PATTERN:-32}
+      - BUG077_REP_MIN_COUNT=${BUG077_REP_MIN_COUNT:-16}
       - GENESIS_ENABLE_PN136_INBOUND_NEUTRALIZE=${GENESIS_ENABLE_PN136_INBOUND_NEUTRALIZE:-0}
+      # PN136 scope knobs (review 2026-07-27 M3: same unreachable-knob defect).
+      # PN136_ROLES: message roles whose text parts are neutralised. `assistant`
+      #   is deliberately absent — the chat template splits assistant content on
+      #   </think> to recover reasoning_content, so neutralising it would break a
+      #   supported input shape.
+      # PN136_CHATML=0 disables the <|...|> -> [|...|] rewrite (0 occurrences in
+      #   the 465-prompt corpus, so it is free; the knob exists as a kill switch).
+      # PN136_TOOLCALL_TOKENS=1 arms the qwen3/hermes tool grammar literals; OFF
+      #   by default because system prompts that TEACH the tool-call format must
+      #   reach the model intact.
+      # PN136_EXTRA: comma-separated additional angle-bracketed literals.
+      - PN136_ROLES=${PN136_ROLES:-system,user,tool,function}
+      - PN136_CHATML=${PN136_CHATML:-1}
+      - PN136_TOOLCALL_TOKENS=${PN136_TOOLCALL_TOKENS:-0}
+      - PN136_EXTRA=${PN136_EXTRA:-}
       # ===== MUST-INCLUDE WAVE-1 (2026-07-14): pristine(107)∩qwen3.6-templates + house dedup =====
       # USER: enable everything, none skipped; crash/quality-breakers FIXED not ditched.
       # PN77=0 (degenerate token-soup, quality killer). PN399 deduped→/fixes PN79 (IMA gone).
@@ -741,6 +831,16 @@ services:
         # Design: ~/shared/PN114-DESIGN-probe-stability-20260723.md.
         python3 /fixes/pn114_boot_ids.py
         python3 /fixes/patch_pn114_forced_span.py
+        # [PN121 2026-07-26 / added to prod 2026-07-27 C3] soft-landing grafts:
+        # N = soft-phase newline/</think> logit nudge at the raw-logits seat
+        # (must run AFTER the forced-span patch — it anchors on the line
+        # P-pen/graft H leaves behind); X = structured-output row stamp in the
+        # model runner so PN121 can suppress injection under constrained
+        # decoding (#44676 is unmerged upstream).
+        # DARK unless GENESIS_ENABLE_PN121_SOFTLAND=1 — and that flag is not
+        # declared in this compose's environment block, so it is dark twice over
+        # until someone declares it (M3 in REVIEW-compose-systemd-20260727.md).
+        python3 /fixes/patch_pn121_softland.py
         # [H119 2026-07-25 / shim REMOVED 2026-07-26] lens-router (was "PN119" —
         # renamed away from the lane-2 TurboQuant PN119 kernel; audit:
         # PATCH-ID-COLLISION-AUDIT-20260725.md).
@@ -842,6 +942,13 @@ services:
         # spans (Phoenix per-trace prompt visibility; otelcol maps -> input.value).
         # Knob: VLLM_TRACE_CONTENT_MAX_CHARS. Self-retires if upstream re-adds.
         python3 /fixes/patch_pn99_trace_content_prompt_completion.py
+        # [PN129 2026-07-26 / added to prod 2026-07-27 C3] record
+        # gen_ai.response.finish_reason (always) and gen_ai.response.zero_output
+        # on trace spans. Zero-token completions previously carried no
+        # finish_reason and span status UNSET, so a burst of infra aborts was
+        # indistinguishable from model output.
+        # Anchors avoid PN99's region; composes in either order.
+        python3 /fixes/patch_pn129_trace_finish_reason_zero_output.py
         # [PN100 2026-07-18] await-site for the auto thinking-budget router
         # (classify pass; module rides the mounted _genesis tree).
         python3 /fixes/patch_pn100_auto_thinking_budget.py
@@ -877,6 +984,20 @@ services:
         # demoted to content (strict-demotion + end-of-output lexer flush).
         # Must run AFTER PN76 (deferred toolcall commit). Gate: canary_47194 0/15.
         python3 /fixes/patch_pn98_toolcall_text_fragment_demotion.py
+        # [PN135 2026-07-26 / added to prod 2026-07-27 C3] AUDIT-leak-paths L2:
+        # on the STREAMING path a `</think>` matched by the text lexer (not the
+        # token-id scanner) was demoted to content by the same strict branch PN98
+        # sits in — so in REASONING the engine never transitioned (whole answer
+        # stranded in reasoning_content) and in CONTENT the literal marker was
+        # emitted to the client. Drops only the config's declared reasoning-close
+        # terminals from the strict set; tool terminals keep strict demotion.
+        # Order-independent vs PN76/PN98 (patches __init__, not the function body).
+        # THIS endpoint is the one that can exercise it: the named reachable
+        # consumers (ragflow + phoenix playground) are :8020 clients; hindsight
+        # and bench.runner are non-streaming. It shipped on the bench endpoint
+        # that cannot reach the path and was missing here.
+        # Kill-switch: GENESIS_DISABLE_PN135_STREAM_THINK_END=1.
+        python3 /fixes/patch_pn135_streaming_think_end.py
         # [PN81 — 2026-07-07] /rerank on :8020 (USER: reranker lives IN vLLM).
         # Adapts TEI + Cohere wire formats onto upstream /generative_scoring
         # (yes/no-logit scoring on the generate engine). Requires PN82.
@@ -886,6 +1007,53 @@ services:
         # v1 scheduler (GENESIS_PN83_CHAT_SEQS); rerank fills the raised seat count.
         # FAIL-LOUD: never boot 29 seats without the chat cap.
         python3 /fixes/patch_pn83_rerank_micro_slots.py
+        # [PR#48361 / BUG-140 — 2026-07-25 / added to prod 2026-07-27 C3]
+        # P1 CORRECTNESS, DEFAULT ON. mamba_cache_mode=align hashes a block as
+        # "the SSM state at exactly (p+1)*block_size tokens", but a prefill chunk
+        # could end mid-block, so the hash advertised a state the block did not
+        # hold and a later hit resumed from the wrong recurrent state — silent
+        # output corruption. max-num-batched-tokens == block size == 4128, so any
+        # prefill sharing a step with a decode took a 4124-token first chunk: the
+        # common path. Restored upstream tests: 20 failed before, 115 passed after.
+        # Must run after the five patches above (it re-anchors their output).
+        # Kill switch GENESIS_DISABLE_PR48361=1. No-ops on dev1060cherry, which
+        # still carries the original full #48361 pick.
+        # [2026-07-27 STATE ON THIS ENDPOINT] With the champion defaults mirrored
+        # here, PREFIX_CACHING_ARG defaults to --no-enable-prefix-caching, so
+        # mamba_cache_mode is no longer force-set to align and this patch RIDES
+        # ALONG DARK. It is wired anyway and deliberately NOT dropped: prod was
+        # the one endpoint historically running align+APC (p95 prompt ~30.3K, so
+        # blocks really do hash here, unlike BUG-131's <=4128 zero-hit argument),
+        # and the moment anyone sets PREFIX_CACHING_ARG=--enable-prefix-caching
+        # with a non-replayssm CACHE_OVERRIDE the corruption class is live again.
+        # An applier is cheap; re-deriving this at flip time is not.
+        python3 /fixes/patch_pr48361_mamba_align_split.py
+        # [H119 route-API — 2026-07-25 / added to prod 2026-07-27 C3] LAST on
+        # purpose: its two anchors (scheduler.py `_free_request` call,
+        # chat_completion/api_router.py JSONResponse) must be counted against
+        # fully-patched content, and five earlier patches rewrite scheduler.py.
+        # Inert unless GENESIS_ENABLE_H119_ROUTE_API=1; a drifted anchor with
+        # the flag ON prints a boxed ERROR instead of a silent no-op. That flag
+        # is NOT declared in this compose's environment block, so it is dark
+        # twice over until someone declares it (M3 in the 07-27 review).
+        # Anchors on all three pins: python3 fixes/verify_h119_route_api_anchors.py
+        python3 /fixes/patch_h119_route_api.py
+        # [PN114-SEED — 2026-07-26 / added to prod 2026-07-27 C3] The PN102
+        # think-seed as a FORCED SPAN, so a POST-prefill decision (the H119 route)
+        # can still choose it. The seed is rendered inside <think> by the chat
+        # template, so forcing it as output is position- and voice-identical —
+        # proven by gate M2 (fixes/test_pn114_seed_equivalence.py: 59/59 on the
+        # boot pin, identical ids at identical positions incl. the MTP acceptance
+        # matrix). The BANNER is a system turn, out of the model's voice, and is
+        # deliberately NOT moved.
+        # LAST on purpose: all five anchors are text that pn114_forced_span,
+        # h119_lens_router and pn101_answer_rescue wrote earlier.
+        # DEFAULT OFF (GENESIS_ENABLE_PN114_SEED_SPAN=1 to arm;
+        # GENESIS_PN114_SEED_MODE=mirror|routed) and neither flag is declared
+        # here, so this is dark on prod exactly as it is on bench.
+        # Anchors on both live pins: python3 fixes/verify_pn114_seed_anchors.py
+        python3 /fixes/pn114_seed_ids.py
+        python3 /fixes/patch_pn114_seed_span.py
         exec vllm serve "$@"
       - --
     command:
@@ -950,7 +1118,13 @@ services:
       # construction instead of by a stale constant. VLLM_ENABLE_STARTUP_PLAN
       # (already set) persists the result, which is what the pin was
       # supposed to buy: deterministic, fast boots.
-      - "${GPU_MEMORY_UTILIZATION:-0.95}"
+      # [2026-07-27 #9 permanence] 0.91 is the settled operating point (0.91 ties
+      # 0.92 on wall with more headroom; 0.95 OOMs on 4K prefills — BUG-126).
+      # Mirrored from tcbench8021.yml under the 2026-07-27 fit-or-better gate.
+      # The unit's Environment=GPU_MEMORY_UTILIZATION=0.93 pin, which silently
+      # beat this default (C1), was removed the same day — this default is now
+      # the ONLY declared mechanism.
+      - "${GPU_MEMORY_UTILIZATION:-0.91}"
       # [2026-07-19 corrected] The "Pin RESTORED" paragraph that stood here was
       # DANGLING — no --kv-cache-memory arg exists in this file; profiling is
       # authoritative. See endgame8020.yml's corrected note + BUG-078/BUG-107.
@@ -961,8 +1135,13 @@ services:
       # PN83 scheduler patch stays wired but INERT (GENESIS_PN83_CHAT_SEQS=0).
       # Next arm (own window): 8-10 seats + max_cudagraph_capture_size=40
       # (+ maybe util 0.89). Enable = seqs up + env to 5.
+      # [2026-07-27 #9 permanence] Default 6 = the settled operating point at
+      # util 0.91 + replayssm KV (2.92 GiB / 188,708 tok): +19% vs seqs 4, 0
+      # aborts, 0 preemptions. The "5-seq is the KV-limited max" note below
+      # described the pre-replayssm 75K-model-len stack and is superseded.
+      # The unit's Environment=MAX_NUM_SEQS=4 pin (C1) was removed 2026-07-27.
       - --max-num-seqs
-      - "${MAX_NUM_SEQS:-4}"
+      - "${MAX_NUM_SEQS:-6}"
       # No num-gpu-blocks-override: profiler auto-sizes KV (~174K at util 0.91 / 75K model-len).
       # 75K model-len (not 90K) shrinks each seq's KV reservation so 5x15K peaks ~87% KV (no
       # 100% pin -> no capacity-queue throttle) AND drops the prefill VRAM spike under guardian
@@ -1002,7 +1181,26 @@ services:
       # qwen3_coder/qwen3_xml = engine parser, parses only the XML <function=> dialect
       - hermes
       - --enable-chunked-prefill
-      - --enable-prefix-caching
+      # [2026-07-26] switchable so the D2 replayssm rung is a unit drop-in.
+      # `use_replayssm_spec` requires mamba_cache_mode=none, and prefix caching
+      # force-sets that mode to "align" for Qwen3.5/3.6 (models/config.py:558-566),
+      # so the two are mutually exclusive and this must go OFF for that rung —
+      # set PREFIX_CACHING_ARG=--no-enable-prefix-caching alongside
+      # CACHE_OVERRIDE=cache-override-replayssm.yaml. The override's other stated
+      # half, `--mamba-backend triton`, needs no flag: TRITON is already the
+      # EngineArgs default on this build (verified live).
+      # [2026-07-27 #9 permanence] Default is now OFF because the default cache
+      # override is the replayssm rung (see the volumes note). Was the hardcoded
+      # literal `--enable-prefix-caching` on prod. Re-enable with
+      # PREFIX_CACHING_ARG=--enable-prefix-caching ONLY together with a
+      # non-replayssm CACHE_OVERRIDE, or boot fails with the ValueError above.
+      # ⚠ CONSEQUENCE for the entrypoint (see patch_pr48361_mamba_align_split.py):
+      # prod was the only endpoint running align+APC, which is what made PR48361
+      # a live-correctness item. With prefix caching OFF by default, mamba_cache_mode
+      # is no longer force-set to align and PR48361 rides along DARK — the applier
+      # stays wired precisely so that flipping PREFIX_CACHING_ARG back on does not
+      # silently re-open BUG-140's mid-block state corruption.
+      - "${PREFIX_CACHING_ARG:---no-enable-prefix-caching}"
       - --speculative-config
       # [2026-07-23 probdraft verdict: draft_sample_method=probabilistic tested
       # (native30pd + capt10pd30): acceptance 67.2->69.5 (+2.3pt, ~2-3% tok/s),
